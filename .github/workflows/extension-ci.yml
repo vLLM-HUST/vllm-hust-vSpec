@@ -1,0 +1,53 @@
+name: Extension CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+      - name: Install packaging tools and Extension Manager
+        run: |
+          python -m pip install build pytest "ruff>=0.12"
+          python -m pip install "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
+      - name: Install vSpec
+        run: python -m pip install --no-deps --editable .
+      - name: Check source and static discovery
+        run: |
+          ruff check .
+          ruff format --check .
+          bash -n install.sh manage.sh release.sh run.sh uninstall.sh
+          ./release.sh source-check
+          pytest -q tests/test_manifest.py tests/test_extension_lifecycle.py tests/test_management.py tests/test_release.py
+          vllm-hust-ext extension list --json
+          vllm-hust-ext extension validate org.vllm-hust.vspec
+          vllm-hust-ext extension inspect org.vllm-hust.vspec
+      - name: Build and verify wheel discovery
+        run: |
+          ./release.sh build
+          VERSION=$(python -c 'from vllm_hust_vspec._version import __version__; print(__version__)')
+          WHEEL="dist/vllm_hust_vspec-${VERSION}-py3-none-any.whl"
+          python -m pip uninstall -y vllm-hust-vspec
+          python -m pip install --no-deps "$WHEEL"
+          vllm-hust-ext extension list --json
+          vllm-hust-ext extension validate org.vllm-hust.vspec
+          vllm-hust-ext extension inspect org.vllm-hust.vspec
+      - name: Verify packaged install and uninstall wrapper
+        run: |
+          python -m venv /tmp/vspec-management-test
+          VERSION=$(python -c 'from vllm_hust_vspec._version import __version__; print(__version__)')
+          WHEEL="dist/vllm_hust_vspec-${VERSION}-py3-none-any.whl"
+          ./manage.sh --python /tmp/vspec-management-test/bin/python install --wheel "$WHEEL"
+          /tmp/vspec-management-test/bin/python -c \
+            'import importlib.metadata; assert importlib.metadata.version("vllm-hust-vspec")'
+          ./manage.sh --python /tmp/vspec-management-test/bin/python uninstall
+          ! /tmp/vspec-management-test/bin/python -c \
+            'import importlib.metadata; importlib.metadata.version("vllm-hust-vspec")'

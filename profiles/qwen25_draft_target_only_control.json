@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "max_speculative_tokens": 4,
+  "initial_gamma": 0,
+  "default_acceptance_rate": 0.77,
+  "target": {
+    "alpha_ms_per_context_token": 0.0,
+    "gamma_ms_per_batched_token": 0.0,
+    "delta_ms": 100.0
+  },
+  "draft": {
+    "alpha_ms_per_context_token": 0.0,
+    "gamma_ms_per_batched_token": 0.0,
+    "delta_ms": 20.0
+  },
+  "batch_gamma_policy": {
+    "128": 0
+  }
+}

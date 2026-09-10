@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.ruff_cache/
+.release-smoke/
+build/
+dist/
+fusion_result.json
+static_kernel_compile_outputs/
+extra-info/data-dump/
+
+# Local credentials and environment overrides.
+PyPI_api.txt
+.pypirc
+.env
+.env.*
+!.env.example

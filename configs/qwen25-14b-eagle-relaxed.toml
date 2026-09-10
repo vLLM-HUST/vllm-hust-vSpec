@@ -1,0 +1,36 @@
+[serve]
+target_model = "/data/shared-models/Qwen2.5-14B-Instruct"
+method = "eagle"
+served_model_name = "qwen2.5-14b-eagle-relaxed"
+gamma = 3
+max_num_seqs = 128
+max_num_batched_tokens = 8192
+max_model_len = 32768
+dtype = "float16"
+block_size = 128
+tensor_parallel_size = 1
+draft_tensor_parallel_size = 1
+gpu_memory_utilization = 0.85
+host = "127.0.0.1"
+port = 8000
+device = "0"
+graph_mode = "full"
+async_scheduling = true
+prefix_caching = true
+chunked_prefill = true
+capture_policy = "exact"
+disable_log_stats = true
+eagle_draft_active_vocab_ids = "/root/data/vllm-ascend-hust/benchmark_results/eagle_graph_optimization/active_vocab_ids/sharegpt_targetargmax_p200_g3_16000.json"
+eagle_target_active_vocab_ids = "/root/data/vllm-ascend-hust/benchmark_results/eagle_graph_optimization/active_vocab_ids/sharegpt_dataaware_22021_eagle_p200_g3.json"
+eagle_relaxed_accept_topk = 3
+eagle_relaxed_accept_after_tokens = 64
+eagle_spec_metadata_cache = true
+eagle_uniform_state_kernel = false
+graph_event_ordering = true
+vllm_source = "/root/data/vllm-hust-latest"
+ascend_source = "/root/data/vllm-ascend-hust-latest"
+
+[env]
+VLLM_ASCEND_ENABLE_NZ = "0"
+VLLM_NO_USAGE_STATS = "1"
+PYTHONDONTWRITEBYTECODE = "1"

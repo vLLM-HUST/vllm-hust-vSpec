@@ -1,0 +1,2 @@
+benchmark_results/*.log -diff
+benchmark_results/**/*.log -diff

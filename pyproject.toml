@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-hust-vspec"
+dynamic = ["version"]
+description = "Out-of-tree speculative decoding plugin for vLLM-HUST on Ascend"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "vLLM-HUST"}]
+dependencies = []
+
+[project.optional-dependencies]
+benchmark = [
+    "pyarrow>=18",
+]
+test = [
+    "pytest>=8",
+    "ruff>=0.12",
+    "vllm-hust-ext==0.2.0.dev0",
+]
+
+[project.entry-points."vllm.general_plugins"]
+vspec = "vllm_hust_vspec:register"
+
+[project.entry-points."vllm_hust.extension_bundles"]
+"org.vllm-hust.vspec" = "vllm_hust_vspec.manifests"
+
+[project.scripts]
+vllm-hust-vspec = "vllm_hust_vspec.cli:main"
+vllm-hust-vspec-doctor = "vllm_hust_vspec.compatibility:main"
+vllm-hust-vspec-fit-profile = "vllm_hust_vspec.adaptive.fitting:main"
+vllm-hust-vspec-profile = "vllm_hust_vspec.adaptive.profiling:main"
+vllm-hust-vspec-models = "vllm_hust_vspec.model_store:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "vllm_hust_vspec._version.__version__"}
+
+[tool.setuptools.package-data]
+vllm_hust_vspec = ["manifests/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

@@ -1,0 +1,35 @@
+[serve]
+target_model = "/data/shared-models/Qwen2.5-14B-Instruct"
+method = "eagle"
+served_model_name = "qwen2.5-14b-eagle-fp16"
+gamma = 4
+max_num_seqs = 128
+max_num_batched_tokens = 8192
+max_model_len = 32768
+dtype = "float16"
+block_size = 128
+tensor_parallel_size = 1
+draft_tensor_parallel_size = 1
+gpu_memory_utilization = 0.85
+host = "127.0.0.1"
+port = 8000
+device = "0"
+graph_mode = "full"
+async_scheduling = true
+prefix_caching = true
+chunked_prefill = true
+capture_policy = "exact"
+disable_log_stats = true
+eagle_tree_width = 1
+eagle_relaxed_accept_topk = 1
+eagle_relaxed_accept_after_tokens = 0
+eagle_spec_metadata_cache = false
+eagle_uniform_state_kernel = false
+graph_event_ordering = false
+vllm_source = "/root/data/vllm-hust-latest"
+ascend_source = "/root/data/vllm-ascend-hust-latest"
+
+[env]
+VLLM_ASCEND_ENABLE_NZ = "0"
+VLLM_NO_USAGE_STATS = "1"
+PYTHONDONTWRITEBYTECODE = "1"

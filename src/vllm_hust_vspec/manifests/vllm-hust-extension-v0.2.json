@@ -1,0 +1,48 @@
+{
+  "schema_version": "0.2-experimental",
+  "extension_id": "org.vllm-hust.vspec",
+  "extension_version": "0.13.0",
+  "kind": "in_process_plugin",
+  "host": {
+    "provider": "vllm",
+    "name": "vllm",
+    "version_range": "==0.17.2rc1.dev5871+g762f85b31.empty"
+  },
+  "runtime": {
+    "type": "python",
+    "process_scope": "vllm-processes",
+    "isolation": "trusted_in_process"
+  },
+  "lifecycle_owner": "vllm",
+  "protocols": [
+    {
+      "name": "vllm.general_plugins",
+      "version_range": null
+    },
+    {
+      "name": "vllm-ascend.spec-decode-private-abi",
+      "version_range": null
+    }
+  ],
+  "implementation": [
+    {
+      "type": "python_entry_point",
+      "group": "vllm.general_plugins",
+      "name": "vspec"
+    }
+  ],
+  "requires_services": [],
+  "components": [],
+  "activation": {
+    "entry_points": [
+      {
+        "group": "vllm.general_plugins",
+        "name": "vspec"
+      }
+    ],
+    "environment": {
+      "HUST_VSPEC_ENABLED": "1"
+    },
+    "additional_config": {}
+  }
+}

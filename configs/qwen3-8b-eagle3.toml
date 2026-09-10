@@ -1,0 +1,30 @@
+[serve]
+target_model = "/data/shared-models/Qwen3-8B"
+draft_model = "/data/shared-models/qwen3_8b_eagle3"
+method = "eagle3"
+served_model_name = "qwen3-8b-eagle3"
+gamma = 4
+max_num_seqs = 128
+max_num_batched_tokens = 8192
+max_model_len = 32768
+dtype = "float16"
+block_size = 128
+tensor_parallel_size = 1
+draft_tensor_parallel_size = 1
+gpu_memory_utilization = 0.85
+host = "127.0.0.1"
+port = 8000
+device = "0"
+graph_mode = "full"
+async_scheduling = true
+prefix_caching = true
+chunked_prefill = true
+capture_policy = "exact"
+disable_log_stats = true
+vllm_source = "/root/data/vllm-hust-latest"
+ascend_source = "/root/data/vllm-ascend-hust-latest"
+
+[env]
+VLLM_ASCEND_ENABLE_NZ = "0"
+VLLM_NO_USAGE_STATS = "1"
+PYTHONDONTWRITEBYTECODE = "1"
