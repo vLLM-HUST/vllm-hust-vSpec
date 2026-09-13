@@ -48,7 +48,9 @@ vllm-hust-vSpec/
 ├── LICENSE
 ├── configs/
 │   ├── qwen25-14b-05b.toml
+│   ├── qwen25-14b-05b-arc-easy.toml
 │   ├── qwen25-14b-eagle.toml
+│   ├── qwen25-14b-eagle-arc-easy.toml
 │   ├── qwen25-14b-eagle-relaxed.toml
 ├── profiles/
 │   ├── qwen25_draft_gsm8k_graph_b128_g4.json
@@ -148,7 +150,7 @@ post-install hook；使用这种安装方式后需另行执行 `vllm-hust-vspec-
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.13.0-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.13.1-py3-none-any.whl
 vllm-hust-vspec-models
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
@@ -249,10 +251,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.13.0 --enable
+./manage.sh upgrade --version 0.13.1 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.13.0-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.13.1-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -276,12 +278,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.13.0` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由 `v0.13.1` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.13.0
+export VSPEC_RELEASE_CONFIRM=0.13.1
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```
@@ -297,6 +299,10 @@ Token 只从环境或 CI Secret 读取，不写入源码、配置和日志。当
 
 # 严格 EAGLE，默认 B128、gamma 上限 4、FULL、Online Adaptive
 ./run.sh eagle
+
+# 工程回归协议：ARC-Easy、B16、FP16、FULL_DECODE_ONLY、端口 18180
+./run.sh draft-arc-easy
+./run.sh eagle-arc-easy
 
 # 明确选择近似验收配置
 ./run.sh eagle-relaxed
@@ -349,6 +355,41 @@ Target-only 完全一致；不接受该质量折中的场景应删除此参数�
 把每轮投机长度固定为 4。`online` 模式不接收 `--adaptive-profile`。
 需要在该预算内逐请求截断当前轮低置信后缀时，额外启用
 `--adaptive-entropy-stop`；它默认关闭，且不限制下一轮 UCB 选择。
+
+### ARC-Easy 在线回归
+
+`--protocol arc-easy` 与工程回归基线使用相同的 Target、FP16、B16、端口、长度、
+缓存和 `FULL_DECODE_ONLY` 设置。动态 gamma 默认在 `1..4` 内在线选择，无需传入
+`--gamma`。安装在文档容器的 Python 环境后可直接运行：
+
+```bash
+# Draft 服务
+/usr/local/python3.11.14/bin/vllm-hust-vspec \
+  --protocol arc-easy \
+  --method draft \
+  --draft-model /model/Qwen2.5-0.5B-Instruct
+
+# 对应压测
+/usr/local/python3.11.14/bin/vllm-hust-vspec-bench --method draft
+```
+
+严格 EAGLE 使用相同协议，只替换投机方法和 Drafter：
+
+```bash
+/usr/local/python3.11.14/bin/vllm-hust-vspec \
+  --protocol arc-easy \
+  --method eagle \
+  --draft-model /model/Eagle-Qwen2.5-14B-Instruct
+
+/usr/local/python3.11.14/bin/vllm-hust-vspec-bench --method eagle
+```
+
+压测入口默认读取 `/run_dir/materialized.jsonl`，固定 200 条 prompt、输出 256 token、
+无限请求速率、`temperature=0`，结果分别写入
+`/run_dir/benchmark_results/ARC-Easy-{draft,eagle}-vspec/ARC-Easy.json`。基线仍使用
+准备文档原命令；容器启动和数据物化步骤不变。动态 gamma 会自动补齐验证阶段所需
+Graph bucket，因此 capture sizes 会大于 Target-only 的 `1 2 4 8 16`。可先用
+`--dry-run` 查看最终 `vllm serve` 或 `vllm bench serve` 命令。
 
 启用离线 profile 策略：
 

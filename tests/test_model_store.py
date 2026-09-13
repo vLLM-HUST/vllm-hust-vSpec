@@ -91,6 +91,29 @@ def test_explicit_environment_model_precedes_registry(tmp_path: Path) -> None:
     assert resolved == override.resolve()
 
 
+def test_container_model_mount_is_discovered(tmp_path: Path) -> None:
+    container_root = tmp_path / "model"
+    draft = create_model(container_root, "draft")
+
+    with (
+        mock.patch(
+            "vllm_hust_vspec.model_store.SHARED_MODEL_DIR",
+            tmp_path / "unavailable-shared",
+        ),
+        mock.patch(
+            "vllm_hust_vspec.model_store.CONTAINER_MODEL_DIR",
+            container_root,
+        ),
+    ):
+        resolved = resolve_default_model(
+            "draft_model",
+            registry_path=tmp_path / "missing-registry.json",
+            environment={"HUST_VSPEC_MODEL_DIR": str(tmp_path / "other-models")},
+        )
+
+    assert resolved == draft.resolve()
+
+
 def test_bootstrap_downloads_only_missing_models(tmp_path: Path) -> None:
     model_dir = tmp_path / "models"
     registry = tmp_path / "models.json"

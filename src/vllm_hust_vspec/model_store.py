@@ -15,6 +15,7 @@ MODEL_REGISTRY_ENV = "HUST_VSPEC_MODEL_REGISTRY"
 MODEL_DIR_ENV = "HUST_VSPEC_MODEL_DIR"
 REGISTRY_SCHEMA_VERSION = 1
 SHARED_MODEL_DIR = Path("/data/shared-models")
+CONTAINER_MODEL_DIR = Path("/model")
 
 
 class ModelStoreError(ValueError):
@@ -156,6 +157,7 @@ def _candidate_paths(
         candidates.append(registered)
     candidates.append(model_dir / spec.directory_name)
     candidates.append(SHARED_MODEL_DIR / spec.directory_name)
+    candidates.append(CONTAINER_MODEL_DIR / spec.directory_name)
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:

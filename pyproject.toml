@@ -35,6 +35,7 @@ vllm-hust-vspec-doctor = "vllm_hust_vspec.compatibility:main"
 vllm-hust-vspec-fit-profile = "vllm_hust_vspec.adaptive.fitting:main"
 vllm-hust-vspec-profile = "vllm_hust_vspec.adaptive.profiling:main"
 vllm-hust-vspec-models = "vllm_hust_vspec.model_store:main"
+vllm-hust-vspec-bench = "vllm_hust_vspec.online_benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

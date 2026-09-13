@@ -81,6 +81,7 @@ def verify_wheel(path: Path, version: str) -> None:
     required = {
         "vllm_hust_vspec/__init__.py",
         "vllm_hust_vspec/_version.py",
+        "vllm_hust_vspec/online_benchmark.py",
         "vllm_hust_vspec/manifests/__init__.py",
         f"vllm_hust_vspec/manifests/{MANIFEST_NAME}",
         f"{dist_info}/METADATA",
@@ -104,6 +105,11 @@ def verify_wheel(path: Path, version: str) -> None:
             == "vllm_hust_vspec.manifests",
             "wheel Bundle entry point mismatch",
         )
+        require(
+            entry_points["console_scripts"]["vllm-hust-vspec-bench"]
+            == "vllm_hust_vspec.online_benchmark:main",
+            "wheel ARC-Easy benchmark entry point mismatch",
+        )
 
 
 def verify_sdist(path: Path, version: str) -> None:
@@ -111,6 +117,9 @@ def verify_sdist(path: Path, version: str) -> None:
     required = {
         f"{prefix}/release.sh",
         f"{prefix}/manage.sh",
+        f"{prefix}/configs/qwen25-14b-05b-arc-easy.toml",
+        f"{prefix}/configs/qwen25-14b-eagle-arc-easy.toml",
+        f"{prefix}/docs/arc_easy_regression.md",
         f"{prefix}/scripts/verify_release.py",
         f"{prefix}/src/vllm_hust_vspec/_version.py",
         f"{prefix}/src/vllm_hust_vspec/manifests/__init__.py",

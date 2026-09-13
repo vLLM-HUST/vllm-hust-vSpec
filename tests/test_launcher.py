@@ -710,7 +710,9 @@ class LauncherTest(unittest.TestCase):
         expected_methods = {
             "qwen25-14b-05b.toml": "draft_model",
             "qwen25-14b-05b-adaptive-b128.toml": "draft_model",
+            "qwen25-14b-05b-arc-easy.toml": "draft_model",
             "qwen25-14b-eagle.toml": "eagle",
+            "qwen25-14b-eagle-arc-easy.toml": "eagle",
             "qwen25-14b-eagle-relaxed.toml": "eagle",
             "qwen3-8b-eagle3.toml": "eagle3",
         }
@@ -732,7 +734,62 @@ class LauncherTest(unittest.TestCase):
                 speculative = command[command.index("--speculative-config") + 1]
                 self.assertIn(f'"method":"{method}"', speculative)
                 generation_config = command[command.index("--generation-config") + 1]
-                self.assertEqual(generation_config, "vllm")
+                expected_generation_config = "auto" if "arc-easy" in filename else "vllm"
+                self.assertEqual(generation_config, expected_generation_config)
+
+    def test_arc_easy_protocol_matches_baseline_serving_contract(self) -> None:
+        with mock.patch(
+            "vllm_hust_vspec.cli.resolve_default_model",
+            return_value=Path("/model/Qwen2.5-0.5B-Instruct"),
+        ):
+            options, _ = parse_args(
+                [
+                    "--protocol",
+                    "arc-easy",
+                    "--method",
+                    "draft",
+                    "--vllm-executable",
+                    "/usr/local/python3.11.14/bin/vllm",
+                ]
+            )
+
+        self.assertEqual(options.target_model, "/model/Qwen2.5-14B-Instruct")
+        self.assertEqual(options.served_model_name, "qwen2.5-14b-draft-vspec-fp16")
+        self.assertEqual(options.port, 18180)
+        self.assertEqual(options.max_num_seqs, 16)
+        self.assertEqual(options.max_num_batched_tokens, 8192)
+        self.assertEqual(options.max_model_len, 32768)
+        self.assertEqual(options.dtype, "float16")
+        self.assertEqual(options.graph_mode, "full-decode-only")
+        self.assertEqual(options.generation_config, "auto")
+        self.assertFalse(options.async_scheduling)
+        self.assertFalse(options.prefix_caching)
+        self.assertTrue(options.chunked_prefill)
+        self.assertTrue(options.adaptive_speculation)
+        self.assertEqual(options.adaptive_min_gamma, 1)
+        self.assertEqual(options.gamma, 4)
+
+        command = build_vllm_command(options)
+        self.assertIn("--no-enable-prefix-caching", command)
+        self.assertIn("--enable-chunked-prefill", command)
+        self.assertIn("--no-async-scheduling", command)
+        self.assertIn("--no-enforce-eager", command)
+        self.assertNotIn("--disable-log-stats", command)
+        compilation = command[command.index("--compilation-config") + 1]
+        self.assertEqual(compilation, '{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY"}')
+        capture_index = command.index("--cudagraph-capture-sizes") + 1
+        capture_sizes = [int(value) for value in command[capture_index:]]
+        self.assertEqual(capture_sizes[-1], 80)
+
+    def test_arc_easy_protocol_selects_eagle_served_name(self) -> None:
+        with mock.patch(
+            "vllm_hust_vspec.cli.resolve_default_model",
+            return_value=Path("/model/Eagle-Qwen2.5-14B-Instruct"),
+        ):
+            options, _ = parse_args(["--protocol", "arc-easy", "--method", "eagle"])
+
+        self.assertEqual(options.method, "eagle")
+        self.assertEqual(options.served_model_name, "qwen2.5-14b-eagle-vspec-fp16")
 
     def test_cli_overrides_toml_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

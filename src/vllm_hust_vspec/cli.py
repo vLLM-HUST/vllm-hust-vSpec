@@ -20,6 +20,34 @@ from .model_store import ModelStoreError, resolve_default_model
 PLUGIN_ENTRY_POINT = "vspec"
 ASCEND_PLATFORM_PLUGIN = "ascend"
 
+SERVE_PROTOCOLS: dict[str, dict[str, Any]] = {
+    "arc-easy": {
+        "target_model": "/model/Qwen2.5-14B-Instruct",
+        "max_num_seqs": 16,
+        "max_num_batched_tokens": 8192,
+        "max_model_len": 32768,
+        "dtype": "float16",
+        "block_size": 128,
+        "tensor_parallel_size": 1,
+        "draft_tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.85,
+        "host": "127.0.0.1",
+        "port": 18180,
+        "graph_mode": "full-decode-only",
+        "generation_config": "auto",
+        "async_scheduling": False,
+        "prefix_caching": False,
+        "chunked_prefill": True,
+        "capture_policy": "auto",
+        "disable_log_stats": False,
+    }
+}
+
+ARC_EASY_SERVED_MODEL_NAMES = {
+    "draft_model": "qwen2.5-14b-draft-vspec-fp16",
+    "eagle": "qwen2.5-14b-eagle-vspec-fp16",
+}
+
 EAGLE_REQUEST_CAPTURE_SIZES = (
     1,
     2,
@@ -268,6 +296,11 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
         description="Launch vLLM-HUST with the vSpec plugin.",
     )
     parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--protocol",
+        choices=tuple(SERVE_PROTOCOLS),
+        help="Apply a reproducible serving protocol before config and CLI overrides.",
+    )
     parser.add_argument("--target-model")
     parser.add_argument("--draft-model")
     parser.add_argument(
@@ -622,11 +655,16 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
     raw_args = list(sys.argv[1:] if argv is None else argv)
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", type=Path)
+    config_parser.add_argument("--protocol", choices=tuple(SERVE_PROTOCOLS))
     config_namespace, _ = config_parser.parse_known_args(raw_args)
-    defaults, environment = load_config(config_namespace.config)
+    configured_defaults, environment = load_config(config_namespace.config)
+    defaults = dict(SERVE_PROTOCOLS.get(config_namespace.protocol, {}))
+    defaults.update(configured_defaults)
     parser = build_parser(defaults)
     namespace = parser.parse_args(raw_args)
     namespace.method = METHOD_ALIASES[namespace.method]
+    if namespace.protocol == "arc-easy" and not namespace.served_model_name:
+        namespace.served_model_name = ARC_EASY_SERVED_MODEL_NAMES.get(namespace.method)
     if not namespace.target_model:
         parser.error("--target-model is required")
     if not namespace.draft_model:

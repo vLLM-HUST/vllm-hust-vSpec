@@ -18,12 +18,20 @@ case "$PRESET" in
     DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen25-14b-05b-adaptive-b128.toml
     shift
     ;;
+  draft-arc-easy)
+    DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen25-14b-05b-arc-easy.toml
+    shift
+    ;;
   eagle)
     DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen25-14b-eagle.toml
     shift
     ;;
   eagle-relaxed)
     DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen25-14b-eagle-relaxed.toml
+    shift
+    ;;
+  eagle-arc-easy)
+    DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen25-14b-eagle-arc-easy.toml
     shift
     ;;
   eagle3)
