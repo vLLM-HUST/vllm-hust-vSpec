@@ -249,13 +249,26 @@ def _add_adaptive_decode_graph_keys(
         dispatcher.uniform_decode_query_len = previous_width
 
 
+def _initialize_adaptive_decode_only_graph_keys(
+    dispatcher: Any,
+    cudagraph_mode: Any,
+    query_widths: tuple[int, ...],
+) -> None:
+    """Initialize FULL_DECODE_ONLY keys without mixing verification widths."""
+    dispatcher.cudagraph_mode = cudagraph_mode
+    dispatcher._compute_bs_to_padded_graph_size()
+    lora_cases = dispatcher._get_lora_cases()
+    dispatcher.captured_lora_counts = [count for count in lora_cases if count]
+    _add_adaptive_decode_graph_keys(dispatcher, query_widths)
+    dispatcher.keys_initialized = True
+
+
 @contextmanager
-def _runtime_runner_query_width(
-    proposer: Any,
+def _runner_query_width(
+    runner: Any,
     query_width: int | None,
 ) -> Any:
-    """Temporarily align shared runner state with the current Target frame."""
-    runner = getattr(proposer, "runner", None)
+    """Temporarily align runner and dispatcher with one Target frame width."""
     dispatcher = getattr(runner, "cudagraph_dispatcher", None)
     if runner is None or dispatcher is None or query_width is None:
         yield
@@ -273,6 +286,16 @@ def _runtime_runner_query_width(
     finally:
         runner.uniform_decode_query_len = previous_runner_width
         dispatcher.uniform_decode_query_len = previous_dispatcher_width
+
+
+@contextmanager
+def _runtime_runner_query_width(
+    proposer: Any,
+    query_width: int | None,
+) -> Any:
+    """Temporarily align shared runner state with the current Target frame."""
+    with _runner_query_width(getattr(proposer, "runner", None), query_width):
+        yield
 
 
 @contextmanager
@@ -1813,13 +1836,14 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 )
             acl_graph_module._graph_params = graph_params_by_width[query_width]
             try:
-                return original_warmup_and_capture(
-                    self,
-                    desc,
-                    cudagraph_runtime_mode,
-                    *args,
-                    **kwargs,
-                )
+                with _runner_query_width(self, query_width):
+                    return original_warmup_and_capture(
+                        self,
+                        desc,
+                        cudagraph_runtime_mode,
+                        *args,
+                        **kwargs,
+                    )
             finally:
                 acl_graph_module._graph_params = base_graph_params
 
@@ -1990,10 +2014,14 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                     ),
                     requested_capture_sizes=requested_capture_sizes,
                 )
-                result = original_initialize(
-                    cudagraph_mode,
-                    uniform_decode_query_len,
-                )
+                if getattr(cudagraph_mode, "name", None) == "FULL_DECODE_ONLY":
+                    _initialize_adaptive_decode_only_graph_keys(
+                        dispatcher,
+                        cudagraph_mode,
+                        self._nanoparl_uniform_decode_query_lens,
+                    )
+                    return None
+                result = original_initialize(cudagraph_mode, uniform_decode_query_len)
                 _add_adaptive_decode_graph_keys(
                     dispatcher,
                     self._nanoparl_uniform_decode_query_lens,

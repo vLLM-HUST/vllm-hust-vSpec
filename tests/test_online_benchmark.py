@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from vllm_hust_vspec.online_benchmark import build_benchmark_command, parse_args
+from vllm_hust_vspec.online_benchmark import (
+    build_benchmark_command,
+    parse_args,
+    resolve_tokenizer,
+)
 
 
 def test_arc_easy_draft_benchmark_matches_reference_contract() -> None:
@@ -10,6 +14,8 @@ def test_arc_easy_draft_benchmark_matches_reference_contract() -> None:
             "draft",
             "--vllm-executable",
             "/usr/local/python3.11.14/bin/vllm",
+            "--tokenizer",
+            "/model/Qwen2.5-14B-Instruct",
         ]
     )
     command = build_benchmark_command(options)
@@ -57,3 +63,32 @@ def test_arc_easy_eagle_defaults_and_overrides() -> None:
     assert command[command.index("--model") + 1] == "custom-name"
     assert command[command.index("--result-dir") + 1] == "/tmp/result"
     assert command[-2:] == ["--percentile-metrics", "ttft"]
+
+
+def test_tokenizer_resolution_prefers_explicit_and_environment(tmp_path) -> None:
+    local_model = tmp_path / "local-model"
+    local_model.mkdir()
+
+    assert (
+        resolve_tokenizer(
+            "/models/explicit",
+            environment={"HUST_VSPEC_TARGET_MODEL": "/models/environment"},
+            candidates=(local_model,),
+        )
+        == "/models/explicit"
+    )
+    assert (
+        resolve_tokenizer(
+            environment={"HUST_VSPEC_TARGET_MODEL": "/models/environment"},
+            candidates=(local_model,),
+        )
+        == "/models/environment"
+    )
+
+
+def test_tokenizer_resolution_uses_first_existing_candidate(tmp_path) -> None:
+    missing = tmp_path / "missing"
+    local_model = tmp_path / "local-model"
+    local_model.mkdir()
+
+    assert resolve_tokenizer(environment={}, candidates=(missing, local_model)) == str(local_model)

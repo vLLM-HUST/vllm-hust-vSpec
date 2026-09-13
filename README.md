@@ -32,6 +32,8 @@ batch-uniform 投机预算；online 还可叠加当前轮逐请求置信停止�
 [`docs/vspec_adaptive_npu_report_20260902.md`](docs/vspec_adaptive_npu_report_20260902.md)。
 无离线 profile 的在线策略实现和 NPU 对比见
 [`docs/vspec_online_adaptive_npu_report_20260902.md`](docs/vspec_online_adaptive_npu_report_20260902.md)。
+最新同卡 GSM8K B128 `1.518x` 恢复验证、工程模板 GSM8K 与 ARC-Easy 结果见
+[`docs/gsm8k_b128_recovery_and_arc_easy_20260913.md`](docs/gsm8k_b128_recovery_and_arc_easy_20260913.md)。
 离线 profile 可用 `vllm-hust-vspec-profile` 自动采集固定 gamma component
 stats、选择 batch policy 并保存完整 measurement manifest。
 
@@ -150,7 +152,7 @@ post-install hook；使用这种安装方式后需另行执行 `vllm-hust-vspec-
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.13.1-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.13.2-py3-none-any.whl
 vllm-hust-vspec-models
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
@@ -251,10 +253,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.13.1 --enable
+./manage.sh upgrade --version 0.13.2 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.13.1-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.13.2-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -278,12 +280,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.13.1` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由 `v0.13.2` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.13.1
+export VSPEC_RELEASE_CONFIRM=0.13.2
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```

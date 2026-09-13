@@ -847,6 +847,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(environment[ENV_MAX_NUM_SEQS], "128")
         self.assertEqual(environment[ENV_ADAPTIVE_SPECULATION], "1")
         self.assertEqual(environment[ENV_ADAPTIVE_POLICY], "online")
+        self.assertEqual(environment["VLLM_USE_AOT_COMPILE"], "0")
         self.assertEqual(environment["ASCEND_RT_VISIBLE_DEVICES"], "2")
 
     def test_cli_resolves_installed_model_and_allows_explicit_override(self) -> None:

@@ -16,4 +16,4 @@ def test_release_source_metadata_is_consistent() -> None:
         text=True,
     )
 
-    assert "source_version=0.13.1" in result.stdout
+    assert "source_version=0.13.2" in result.stdout

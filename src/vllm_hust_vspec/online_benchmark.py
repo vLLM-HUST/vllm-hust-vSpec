@@ -7,7 +7,7 @@ import os
 import shlex
 import shutil
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +32,11 @@ METHODS = {
         result_directory_name="ARC-Easy-eagle-vspec",
     ),
 }
+
+DEFAULT_TOKENIZER_CANDIDATES = (
+    Path("/model/Qwen2.5-14B-Instruct"),
+    Path("/data/shared-models/Qwen2.5-14B-Instruct"),
+)
 
 
 def positive_int(value: str) -> int:
@@ -62,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default="http://127.0.0.1:18180")
     parser.add_argument("--endpoint", default="/v1/chat/completions")
     parser.add_argument("--served-model-name")
-    parser.add_argument("--tokenizer", default="/model/Qwen2.5-14B-Instruct")
+    parser.add_argument("--tokenizer")
     parser.add_argument(
         "--dataset-path",
         type=Path,
@@ -90,11 +95,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     method = METHODS[options.method]
     if not options.served_model_name:
         options.served_model_name = method.served_model_name
+    options.tokenizer = resolve_tokenizer(options.tokenizer)
     if options.result_dir is None:
         options.result_dir = Path("/run_dir/benchmark_results") / method.result_directory_name
     if options.extra_args and options.extra_args[0] == "--":
         options.extra_args = options.extra_args[1:]
     return options
+
+
+def resolve_tokenizer(
+    configured: str | None = None,
+    environment: Mapping[str, str] | None = None,
+    candidates: Sequence[Path] | None = None,
+) -> str:
+    if configured:
+        return configured
+    values = os.environ if environment is None else environment
+    if target_model := values.get("HUST_VSPEC_TARGET_MODEL"):
+        return target_model
+    search_paths = DEFAULT_TOKENIZER_CANDIDATES if candidates is None else candidates
+    for candidate in search_paths:
+        if candidate.is_dir():
+            return str(candidate)
+    return str(search_paths[0])
 
 
 def resolve_vllm_executable(configured: str | None = None) -> str:

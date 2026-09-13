@@ -36,12 +36,14 @@ from vllm_hust_vspec.adaptive.runtime import (
     _disable_fixed_width_eagle_state_kernel,
     _draft_entropy_matrix,
     _full_graph_batch_matches_capture,
+    _initialize_adaptive_decode_only_graph_keys,
     _install_draft_entropy_probe,
     _nonuniform_batch_descriptor,
     _prepare_target_graph_params,
     _proposal_execution_gamma,
     _proposal_input_query_width,
     _run_with_runtime_gamma,
+    _runner_query_width,
     _runtime_dynamic_eagle_state_kernel,
     _runtime_eager_dispatch,
     _runtime_eager_proposer,
@@ -144,6 +146,63 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertIn((16, 8, True), descriptors)
         self.assertIn((16, 4, True), descriptors)
         self.assertEqual(dispatcher.uniform_decode_query_len, 5)
+
+    def test_decode_only_initialization_filters_mixed_width_buckets(self) -> None:
+        from vllm.config import CUDAGraphMode
+
+        class Dispatcher:
+            uniform_decode_query_len = 5
+            compilation_config = SimpleNamespace(
+                cudagraph_capture_sizes=[1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20],
+                max_cudagraph_capture_size=20,
+            )
+            vllm_config = SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_num_seqs=4),
+            )
+
+            def __init__(self) -> None:
+                self.keys = set()
+                self.keys_initialized = False
+
+            def _compute_bs_to_padded_graph_size(self) -> None:
+                maximum = self.compilation_config.max_cudagraph_capture_size
+                sizes = self.compilation_config.cudagraph_capture_sizes
+                self._bs_to_padded_graph_size = [0] * (maximum + 1)
+                for value in range(maximum + 1):
+                    self._bs_to_padded_graph_size[value] = next(
+                        (size for size in sizes if size >= value),
+                        maximum,
+                    )
+
+            def _get_lora_cases(self):
+                return [0]
+
+            def _create_padded_batch_descriptor(
+                self,
+                size,
+                uniform,
+                has_lora,
+                num_active_loras,
+            ):
+                padded = self._bs_to_padded_graph_size[size]
+                assert padded % self.uniform_decode_query_len == 0
+                return (padded, padded // self.uniform_decode_query_len, uniform)
+
+            def add_cudagraph_key(self, mode, descriptor):
+                self.keys.add((mode, descriptor))
+
+        dispatcher = Dispatcher()
+        _initialize_adaptive_decode_only_graph_keys(
+            dispatcher,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            (1, 2, 3, 4, 5),
+        )
+
+        self.assertTrue(dispatcher.keys_initialized)
+        self.assertEqual(dispatcher.uniform_decode_query_len, 5)
+        self.assertIn((CUDAGraphMode.FULL, (12, 4, True)), dispatcher.keys)
+        self.assertIn((CUDAGraphMode.FULL, (20, 4, True)), dispatcher.keys)
+        self.assertNotIn((CUDAGraphMode.FULL, (3, 0, True)), dispatcher.keys)
 
     def test_expected_generated_tokens(self) -> None:
         self.assertAlmostEqual(expected_generated_tokens(0.5, 3), 1.875)
@@ -1458,6 +1517,20 @@ class AdaptiveControllerTest(unittest.TestCase):
         proposer = SimpleNamespace(runner=runner)
 
         with _runtime_runner_query_width(proposer, 4):
+            self.assertEqual(runner.uniform_decode_query_len, 4)
+            self.assertEqual(dispatcher.uniform_decode_query_len, 4)
+
+        self.assertEqual(runner.uniform_decode_query_len, 5)
+        self.assertEqual(dispatcher.uniform_decode_query_len, 5)
+
+    def test_runner_query_width_is_scoped_for_graph_capture(self) -> None:
+        dispatcher = SimpleNamespace(uniform_decode_query_len=5)
+        runner = SimpleNamespace(
+            uniform_decode_query_len=5,
+            cudagraph_dispatcher=dispatcher,
+        )
+
+        with _runner_query_width(runner, 4):
             self.assertEqual(runner.uniform_decode_query_len, 4)
             self.assertEqual(dispatcher.uniform_decode_query_len, 4)
 

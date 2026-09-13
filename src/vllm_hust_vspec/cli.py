@@ -1055,6 +1055,10 @@ def build_environment(
         )
     environment.setdefault("PYTHONUNBUFFERED", "1")
     environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    if options.graph_mode != "eager":
+        # The PyTorch 2.10+ AOT artifact loader is not reliable on the tested
+        # Ascend stack. Keep the regular compile cache unless explicitly overridden.
+        environment.setdefault("VLLM_USE_AOT_COMPILE", "0")
     if options.device is not None:
         environment["ASCEND_RT_VISIBLE_DEVICES"] = str(options.device)
 
