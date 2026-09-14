@@ -34,6 +34,8 @@ build() {
     \( -name '*.whl' -o -name '*.tar.gz' \) -type f -delete
   if command -v uv >/dev/null 2>&1; then
     uv build --no-sources --out-dir "$DIST_DIR" "$PLUGIN_DIR"
+    # uv creates this marker in custom output directories; it is not a release artifact.
+    find "$DIST_DIR" -mindepth 1 -maxdepth 1 -name '.gitignore' -type f -delete
   else
     printf '%s\n' 'vSpec release: uv unavailable; falling back to python -m build' >&2
     "$PYTHON_BIN" -m build --outdir "$DIST_DIR" "$PLUGIN_DIR"
