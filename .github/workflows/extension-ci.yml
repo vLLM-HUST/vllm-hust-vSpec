@@ -45,7 +45,8 @@ jobs:
           python -m venv /tmp/vspec-management-test
           VERSION=$(python -c 'from vllm_hust_vspec._version import __version__; print(__version__)')
           WHEEL="dist/vllm_hust_vspec-${VERSION}-py3-none-any.whl"
-          ./manage.sh --python /tmp/vspec-management-test/bin/python install --wheel "$WHEEL"
+          ./manage.sh --python /tmp/vspec-management-test/bin/python install \
+            --wheel "$WHEEL" --skip-model-setup
           /tmp/vspec-management-test/bin/python -c \
             'import importlib.metadata; assert importlib.metadata.version("vllm-hust-vspec")'
           ./manage.sh --python /tmp/vspec-management-test/bin/python uninstall
