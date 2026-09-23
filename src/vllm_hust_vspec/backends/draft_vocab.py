@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import MethodType
 from typing import Any
 
 import torch
 
-from .eagle_draft import quantize_active_lm_head_chunks
+from .eagle_draft import (
+    ActiveVocabLogits,
+    ChunkedQuantizedLogits,
+    _compute_quantized_logits,
+    quantize_active_lm_head_chunks,
+)
 from .eagle_target import load_active_vocab_ids
 
 DRAFT_ACTIVE_VOCAB_SIZE = "VLLM_ASCEND_DRAFT_ACTIVE_VOCAB_SIZE"
@@ -52,6 +58,7 @@ def _configure_serial_draft_active_vocab(proposer: Any) -> bool:
     if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
         raise RuntimeError("Draft active vocabulary requires a 2-D LM head")
     vocab_size = int(weight.shape[0])
+    proposer._vspec_draft_full_vocab_size = vocab_size
     if active_ids_path:
         active_ids = load_active_vocab_ids(
             Path(active_ids_path),
@@ -101,6 +108,56 @@ def _configure_serial_draft_active_vocab(proposer: Any) -> bool:
             active_weight
         )
         proposer._eagle_draft_active_lm_head_weight = None
+
+    model = proposer.model
+    quant_chunks = proposer._eagle_draft_active_lm_head_w8a16_chunks
+    projection_weight = proposer._eagle_draft_active_lm_head_weight
+
+    def compute_active_logits(
+        _model: Any,
+        hidden_states: torch.Tensor,
+    ) -> ActiveVocabLogits:
+        if quant_chunks is None:
+            assert projection_weight is not None
+            compact_logits = torch.nn.functional.linear(
+                hidden_states,
+                projection_weight,
+                active_bias,
+            )
+        elif os.environ.get("VSPEC_DRAFT_CHUNKED_QUANT_ARGMAX") == "1":
+            compact_logits = ChunkedQuantizedLogits(
+                hidden_states,
+                quant_chunks,
+                active_bias,
+                use_w8a8,
+            )
+        else:
+            compact_logits = _compute_quantized_logits(
+                hidden_states,
+                quant_chunks,
+                active_bias,
+                use_w8a8,
+            )
+        return ActiveVocabLogits(compact_logits, active_ids)
+
+    if not hasattr(model, "_vspec_original_compute_logits"):
+        model._vspec_original_compute_logits = model.compute_logits
+    model.compute_logits = MethodType(compute_active_logits, model)
+
+    logits_processor = getattr(getattr(model, "model", None), "logits_processor", None)
+    if logits_processor is not None and not hasattr(
+        logits_processor,
+        "_vspec_original_gather_logits",
+    ):
+        original_gather = logits_processor._gather_logits
+
+        def gather_logits(_processor: Any, logits: Any) -> Any:
+            if isinstance(logits, ActiveVocabLogits):
+                return logits
+            return original_gather(logits)
+
+        logits_processor._vspec_original_gather_logits = original_gather
+        logits_processor._gather_logits = MethodType(gather_logits, logits_processor)
 
     proposer._vspec_draft_vocab_configured = True
     return True

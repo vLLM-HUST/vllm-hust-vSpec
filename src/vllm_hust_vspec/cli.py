@@ -100,6 +100,7 @@ DRAFT_ENVIRONMENT_NAMES = (
     "VLLM_ASCEND_DRAFT_LM_HEAD_W8A16",
     "VLLM_ASCEND_DRAFT_LM_HEAD_W8A8",
     "VLLM_ASCEND_DRAFT_TARGET_ACTIVE_VOCAB_IDS_PATH",
+    "VSPEC_DRAFT_BODY_W8A16",
 )
 
 SERVE_CONFIG_KEYS = frozenset(
@@ -136,6 +137,12 @@ SERVE_CONFIG_KEYS = frozenset(
         "draft_active_vocab_ids",
         "draft_target_active_vocab_ids",
         "draft_lm_head_quantization",
+        "draft_body_quantization",
+        "draft_parallel_graph_updates",
+        "draft_target_parallel_graph_updates",
+        "draft_exact_repetition_topk",
+        "draft_exact_repetition_trace",
+        "draft_exact_repetition_sync_proof",
         "eagle_tree_width",
         "eagle_draft_active_vocab_size",
         "eagle_draft_active_vocab_ids",
@@ -337,7 +344,13 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
     parser.add_argument("--device")
     parser.add_argument(
         "--graph-mode",
-        choices=("eager", "piecewise", "full-decode-only", "full"),
+        choices=(
+            "eager",
+            "piecewise",
+            "full-decode-only",
+            "full-and-piecewise",
+            "full",
+        ),
         default="full-decode-only",
     )
     parser.add_argument(
@@ -397,6 +410,43 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
         "--draft-lm-head-quantization",
         choices=("none", "w8a16", "w8a8"),
         default="none",
+    )
+    parser.add_argument(
+        "--draft-body-quantization",
+        choices=("none", "w8a16"),
+        default="none",
+    )
+    parser.add_argument(
+        "--draft-parallel-graph-updates",
+        type=nonnegative_int,
+        default=0,
+        help="Number of parallel Draft graph-update workers (0 disables it).",
+    )
+    parser.add_argument(
+        "--draft-target-parallel-graph-updates",
+        type=nonnegative_int,
+        default=0,
+        help="Number of parallel Target graph-update workers (0 disables it).",
+    )
+    parser.add_argument(
+        "--draft-exact-repetition-topk",
+        type=nonnegative_int,
+        default=0,
+        help="Exact repetition-aware greedy Top-K candidate count (0 disables it).",
+    )
+    parser.add_argument(
+        "--draft-exact-repetition-trace",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--draft-exact-repetition-sync-proof",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Synchronize exact Top-K proof before accepting a candidate; "
+            "disable only for bounded-candidate performance experiments."
+        ),
     )
     parser.add_argument("--eagle-tree-width", type=positive_int, default=1)
     parser.add_argument(
@@ -770,7 +820,8 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
         namespace.merged_full = (
             namespace.adaptive_full_graph
             and namespace.method == "draft_model"
-            and namespace.graph_mode in {"full", "full-decode-only"}
+            and namespace.graph_mode
+            in {"full", "full-decode-only", "full-and-piecewise"}
         )
         if not namespace.merged_full:
             namespace.merged_full_max_batch = 0
@@ -799,6 +850,12 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
         or namespace.draft_active_vocab_ids is not None
         or namespace.draft_target_active_vocab_ids is not None
         or namespace.draft_lm_head_quantization != "none"
+        or namespace.draft_body_quantization != "none"
+        or namespace.draft_parallel_graph_updates > 0
+        or namespace.draft_target_parallel_graph_updates > 0
+        or namespace.draft_exact_repetition_topk > 0
+        or namespace.draft_exact_repetition_trace
+        or not namespace.draft_exact_repetition_sync_proof
     )
     if draft_only_requested and namespace.method != "draft_model":
         parser.error("the selected Draft optimization only supports --method draft")
@@ -895,6 +952,7 @@ def build_vllm_command(options: argparse.Namespace) -> list[str]:
         graph_modes = {
             "piecewise": "PIECEWISE",
             "full-decode-only": "FULL_DECODE_ONLY",
+            "full-and-piecewise": "FULL_AND_PIECEWISE",
             "full": "FULL",
         }
         graph_mode = graph_modes[options.graph_mode]
@@ -947,6 +1005,15 @@ def build_environment(
         max_num_seqs=options.max_num_seqs,
         draft_active_vocab=draft_active_vocab,
         draft_target_active_vocab=draft_target_active_vocab,
+        draft_parallel_graph_updates=options.draft_parallel_graph_updates,
+        draft_target_parallel_graph_updates=(
+            options.draft_target_parallel_graph_updates
+        ),
+        draft_exact_repetition_topk=options.draft_exact_repetition_topk,
+        draft_exact_repetition_trace=options.draft_exact_repetition_trace,
+        draft_exact_repetition_sync_proof=(
+            options.draft_exact_repetition_sync_proof
+        ),
         eagle_tree_width=options.eagle_tree_width,
         eagle_draft_active_vocab=eagle_draft_active_vocab,
         eagle_target_active_vocab=eagle_target_active_vocab,
@@ -989,6 +1056,8 @@ def build_environment(
     for name in EAGLE_ENVIRONMENT_NAMES:
         environment.pop(name, None)
     if options.method == "draft_model":
+        if options.draft_body_quantization == "w8a16":
+            environment["VSPEC_DRAFT_BODY_W8A16"] = "1"
         if options.draft_active_vocab_size > 0:
             environment["VLLM_ASCEND_DRAFT_ACTIVE_VOCAB_SIZE"] = str(
                 options.draft_active_vocab_size

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -25,6 +26,8 @@ class _WeightOnlyLinearMethod:
         import torch_npu
 
         quant_bias = layer._vspec_w8a16_bias if bias is not None else None
+        if quant_bias is not None and quant_bias.dtype != x.dtype:
+            quant_bias = quant_bias.to(dtype=x.dtype)
         return torch_npu.npu_weight_quant_batchmatmul(
             x,
             layer._vspec_w8a16_weight,
@@ -64,8 +67,33 @@ def _selected_layers() -> set[str] | None:
 
 def _install_compiler_compatibility() -> None:
     """Bridge a torch_npu config mismatch in weight-quant graph lowering."""
+    try:
+        from npugraph_ex.configs.experimental_config import _ExperimentalConfig
+    except ModuleNotFoundError:
+        # CANN 9.1 flattened the experimental options into CompilerConfig, but
+        # its weight-quant lowering still dereferences experimental_config.
+        from npugraph_ex.configs.compiler_config import CompilerConfig
+
+        if getattr(CompilerConfig, COMPILER_COMPAT_MARKER, False):
+            return
+        original_init = CompilerConfig.__init__
+
+        def init(self: Any) -> None:
+            original_init(self)
+            if hasattr(self, "experimental_config"):
+                return
+            object.__setattr__(
+                self,
+                "experimental_config",
+                SimpleNamespace(enable_view_optimize=True),
+            )
+            self._fixed_attrs.append("experimental_config")
+
+        CompilerConfig.__init__ = init
+        setattr(CompilerConfig, COMPILER_COMPAT_MARKER, True)
+        return
+
     from npugraph_ex.configs._option_base import OptionValue
-    from npugraph_ex.configs.experimental_config import _ExperimentalConfig
 
     if getattr(_ExperimentalConfig, COMPILER_COMPAT_MARKER, False):
         return
@@ -138,7 +166,9 @@ def _configure_body_quantization(proposer: Any) -> None:
         layer.register_buffer("_vspec_w8a16_weight", quant_weight)
         layer.register_buffer("_vspec_w8a16_scale", quant_scale)
         bias = getattr(layer, "bias", None)
-        quant_bias = bias.float().contiguous() if isinstance(bias, torch.Tensor) else None
+        quant_bias = (
+            bias.to(dtype=weight.dtype).contiguous() if isinstance(bias, torch.Tensor) else None
+        )
         layer.register_buffer("_vspec_w8a16_bias", quant_bias)
         layer.quant_method = _WeightOnlyLinearMethod()
         configured.append(name)

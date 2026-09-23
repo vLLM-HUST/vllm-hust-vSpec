@@ -293,7 +293,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--execution-mode",
-        choices=("eager", "piecewise", "full-decode-only", "full"),
+        choices=(
+            "eager",
+            "piecewise",
+            "full-decode-only",
+            "full-and-piecewise",
+            "full",
+        ),
         required=True,
     )
     parser.add_argument("--batches", default="8,32,64,128")

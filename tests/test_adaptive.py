@@ -6,6 +6,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
@@ -26,15 +27,23 @@ from vllm_hust_vspec.adaptive.profiling import (
     measurement_to_samples,
 )
 from vllm_hust_vspec.adaptive.runtime import (
+    _adaptive_capture_query_lens,
+    _adaptive_draft_capture_gammas,
     _adaptive_scheduled_batch_size,
     _adaptive_target_query_lens,
     _add_adaptive_decode_graph_keys,
     _batch_descriptor_query_width,
+    _can_use_stable_configured_draft_path,
     _copy_dynamic_draft_tokens,
     _current_eagle_confidence_accept_enabled,
     _current_target_is_target_only,
     _disable_fixed_width_eagle_state_kernel,
+    _draft_capture_gamma,
+    _draft_capture_query_width,
+    _draft_capture_request_count,
+    _draft_capture_runnable,
     _draft_entropy_matrix,
+    _draft_full_graph_batch_matches_capture,
     _full_graph_batch_matches_capture,
     _initialize_adaptive_decode_only_graph_keys,
     _install_draft_entropy_probe,
@@ -44,6 +53,7 @@ from vllm_hust_vspec.adaptive.runtime import (
     _proposal_input_query_width,
     _run_with_runtime_gamma,
     _runner_query_width,
+    _runtime_draft_continuation_query_width,
     _runtime_dynamic_eagle_state_kernel,
     _runtime_eager_dispatch,
     _runtime_eager_proposer,
@@ -1282,6 +1292,49 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(_proposal_execution_gamma("draft", 3, 4), 3)
         self.assertEqual(_proposal_execution_gamma("eagle", 0, 1), 0)
 
+    def test_stable_configured_draft_path_requires_unchanged_max_gamma(self) -> None:
+        self.assertTrue(
+            _can_use_stable_configured_draft_path(
+                "draft_model",
+                2,
+                2,
+                2,
+                adaptive_full_graph=True,
+                entropy_stop=False,
+            )
+        )
+        for requested, previous in ((1, 2), (2, 1), (1, 1)):
+            self.assertFalse(
+                _can_use_stable_configured_draft_path(
+                    "draft_model",
+                    requested,
+                    previous,
+                    2,
+                    adaptive_full_graph=True,
+                    entropy_stop=False,
+                )
+            )
+        self.assertFalse(
+            _can_use_stable_configured_draft_path(
+                "eagle",
+                2,
+                2,
+                2,
+                adaptive_full_graph=True,
+                entropy_stop=False,
+            )
+        )
+        self.assertFalse(
+            _can_use_stable_configured_draft_path(
+                "draft_model",
+                2,
+                2,
+                2,
+                adaptive_full_graph=True,
+                entropy_stop=True,
+            )
+        )
+
     def test_dynamic_eagle_disables_fixed_width_state_kernel(self) -> None:
         environment = {"VLLM_ASCEND_EAGLE_UNIFORM_STATE_KERNEL": "1"}
         self.assertTrue(_disable_fixed_width_eagle_state_kernel("eagle", 0, 4, environment))
@@ -1440,6 +1493,85 @@ class AdaptiveControllerTest(unittest.TestCase):
             (1, 2, 3, 4, 5),
         )
 
+    def test_serial_draft_capture_adds_continuation_query_width(self) -> None:
+        self.assertEqual(
+            _adaptive_capture_query_lens((1,), 4, "draft_model"),
+            (1, 2, 3, 4, 5, 6),
+        )
+        self.assertEqual(
+            _adaptive_capture_query_lens((1,), 4, "eagle"),
+            (1, 2, 3, 4, 5),
+        )
+
+    def test_draft_capture_query_width_marks_and_restores_dispatcher(self) -> None:
+        dispatcher = SimpleNamespace(
+            _vspec_draft_merged_query_lens=(3, 4, 5, 6),
+        )
+        runner = SimpleNamespace(cudagraph_dispatcher=dispatcher)
+
+        with _draft_capture_query_width(runner, 6):
+            self.assertEqual(
+                dispatcher._vspec_capture_uniform_query_len,
+                6,
+            )
+
+        self.assertFalse(hasattr(dispatcher, "_vspec_capture_uniform_query_len"))
+
+    def test_draft_capture_uses_descriptor_request_count(self) -> None:
+        descriptor = SimpleNamespace(
+            num_tokens=96,
+            num_reqs=16,
+            uniform=True,
+        )
+        dispatcher = SimpleNamespace(
+            _vspec_draft_merged_query_lens=(6,),
+        )
+        proposer = SimpleNamespace(
+            method="draft_model",
+            runner=SimpleNamespace(cudagraph_dispatcher=dispatcher),
+            extra_slots_per_request=5,
+        )
+
+        self.assertEqual(
+            _draft_capture_request_count(
+                proposer,
+                {"batch_descriptor": descriptor, "num_reqs": 16},
+            ),
+            16,
+        )
+        self.assertEqual(
+            _draft_capture_gamma(
+                proposer,
+                {"batch_descriptor": descriptor, "num_reqs": 16},
+            ),
+            4,
+        )
+
+        graph_runnable = mock.Mock(return_value="captured")
+        runnable = _draft_capture_runnable(proposer, graph_runnable, 16)
+        token_indices = torch.arange(96)
+        self.assertEqual(
+            runnable(batch_size=19, token_indices_to_sample=token_indices),
+            "captured",
+        )
+        self.assertEqual(graph_runnable.call_args.kwargs["batch_size"], 16)
+        self.assertEqual(
+            graph_runnable.call_args.kwargs["token_indices_to_sample"].shape,
+            (80,),
+        )
+
+    def test_adaptive_draft_continuation_captures_only_matching_gamma(self) -> None:
+        self.assertEqual(
+            _adaptive_draft_capture_gammas(4, 1, None),
+            (4, 3, 2, 1),
+        )
+        self.assertEqual(
+            _adaptive_draft_capture_gammas(4, 1, 2),
+            (2,),
+        )
+        with self.assertRaisesRegex(RuntimeError, "outside the configured range"):
+            _adaptive_draft_capture_gammas(4, 1, 5)
+
     def test_runtime_target_query_width_uses_current_draft_frame(self) -> None:
         output = SimpleNamespace(
             num_scheduled_tokens={"a": 4, "b": 4},
@@ -1523,6 +1655,30 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(runner.uniform_decode_query_len, 5)
         self.assertEqual(dispatcher.uniform_decode_query_len, 5)
 
+    def test_runtime_draft_continuation_width_is_scoped_to_gamma(self) -> None:
+        dispatcher = SimpleNamespace(
+            _vspec_draft_merged_query_lens=(3, 4, 5, 6),
+            _vspec_active_uniform_query_len=5,
+        )
+        proposer = SimpleNamespace(
+            runner=SimpleNamespace(cudagraph_dispatcher=dispatcher),
+        )
+
+        with _runtime_draft_continuation_query_width(proposer, gamma=4):
+            self.assertEqual(
+                dispatcher._vspec_active_uniform_query_len,
+                6,
+            )
+            self.assertEqual(
+                dispatcher._vspec_runtime_draft_query_len,
+                6,
+            )
+
+        self.assertEqual(dispatcher._vspec_active_uniform_query_len, 5)
+        self.assertFalse(
+            hasattr(dispatcher, "_vspec_runtime_draft_query_len")
+        )
+
     def test_runner_query_width_is_scoped_for_graph_capture(self) -> None:
         dispatcher = SimpleNamespace(uniform_decode_query_len=5)
         runner = SimpleNamespace(
@@ -1537,7 +1693,7 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(runner.uniform_decode_query_len, 5)
         self.assertEqual(dispatcher.uniform_decode_query_len, 5)
 
-    def test_eager_dispatch_disables_uniform_decode_temporarily(self) -> None:
+    def test_eager_dispatch_forces_graph_mode_none_temporarily(self) -> None:
         calls: list[bool] = []
 
         class Dispatcher:
@@ -1550,9 +1706,15 @@ class AdaptiveControllerTest(unittest.TestCase):
         proposer = SimpleNamespace(runner=SimpleNamespace(cudagraph_dispatcher=dispatcher))
 
         with _runtime_eager_dispatch(proposer, True):
-            self.assertFalse(dispatcher.dispatch(uniform_decode=True))
+            runtime_mode, descriptor = dispatcher.dispatch(
+                num_tokens=4,
+                uniform_decode=True,
+            )
+            self.assertEqual(runtime_mode.name, "NONE")
+            self.assertEqual(descriptor.num_tokens, 4)
+            self.assertFalse(descriptor.uniform)
 
-        self.assertEqual(calls, [False])
+        self.assertEqual(calls, [])
         self.assertEqual(dispatcher.dispatch, original_dispatch)
 
     def test_eager_proposer_disables_graph_temporarily(self) -> None:
@@ -1637,6 +1799,59 @@ class AdaptiveControllerTest(unittest.TestCase):
                 collided_descriptor,
                 gamma=2,
                 capture_sizes=[6, 9, 10],
+            )
+        )
+
+    def test_draft_full_graph_guard_accepts_padded_request_bucket(self) -> None:
+        continuation_descriptors = [
+            SimpleNamespace(num_tokens=6, num_reqs=1, uniform=True),
+            SimpleNamespace(num_tokens=12, num_reqs=2, uniform=True),
+            SimpleNamespace(num_tokens=24, num_reqs=4, uniform=True),
+            SimpleNamespace(num_tokens=48, num_reqs=8, uniform=True),
+            SimpleNamespace(num_tokens=96, num_reqs=16, uniform=True),
+        ]
+        dispatcher = SimpleNamespace(
+            _vspec_draft_merged_query_lens=(3, 4, 5, 6),
+            cudagraph_keys={"full": continuation_descriptors},
+        )
+        proposer = SimpleNamespace(
+            runner=SimpleNamespace(cudagraph_dispatcher=dispatcher),
+        )
+        metadata = SimpleNamespace(
+            batch_size=lambda: 7,
+            num_actual_tokens=35,
+        )
+        target_descriptor = SimpleNamespace(num_tokens=40, num_reqs=8)
+
+        self.assertTrue(
+            _draft_full_graph_batch_matches_capture(
+                proposer,
+                metadata,
+                None,
+                gamma=4,
+            )
+        )
+
+        metadata.batch_size = lambda: 17
+        metadata.num_actual_tokens = 85
+        self.assertFalse(
+            _draft_full_graph_batch_matches_capture(
+                proposer,
+                metadata,
+                target_descriptor,
+                gamma=4,
+            )
+        )
+
+        dispatcher._vspec_draft_merged_query_lens = (3, 4, 5)
+        metadata.batch_size = lambda: 7
+        metadata.num_actual_tokens = 35
+        self.assertFalse(
+            _draft_full_graph_batch_matches_capture(
+                proposer,
+                metadata,
+                target_descriptor,
+                gamma=4,
             )
         )
 

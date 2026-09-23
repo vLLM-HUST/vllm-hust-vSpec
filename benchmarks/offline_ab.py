@@ -318,7 +318,8 @@ def configure_plugin(args: argparse.Namespace) -> tuple[str, str, str, str]:
         use_merged_full=(
             method == "draft_model"
             and (not adaptive or args.adaptive_full_graph)
-            and args.execution_mode in {"full", "full-decode-only"}
+            and args.execution_mode
+            in {"full", "full-decode-only", "full-and-piecewise"}
         ),
         max_num_seqs=args.batch_size,
         draft_active_vocab=draft_active_vocab,

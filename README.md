@@ -152,7 +152,7 @@ post-install hook；使用这种安装方式后需另行执行 `vllm-hust-vspec-
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.13.2-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.13.3-py3-none-any.whl
 vllm-hust-vspec-models
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
@@ -253,10 +253,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.13.2 --enable
+./manage.sh upgrade --version 0.13.3 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.13.2-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.13.3-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -280,12 +280,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.13.2` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由 `v0.13.3` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.13.2
+export VSPEC_RELEASE_CONFIRM=0.13.3
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```
@@ -349,9 +349,10 @@ Qwen2.5 14B/0.5B、B128 的已验证性能预设可直接启动：
 ./run.sh draft-adaptive
 ```
 
-该预设使用 `--adaptive-refill-batch 8` 和动态 gamma 的精确图桶，并显式设置
-`--confidence-accept-margin 5.25`。margin 会放宽 greedy 验收，不保证逐 token 与
-Target-only 完全一致；不接受该质量折中的场景应删除此参数，继续使用严格验收。
+该预设使用 `--adaptive-refill-batch 8` 和动态 gamma 的精确图桶，默认采用严格
+top-1 验收。可比性能回归必须使用 `temperature=0`，且不得传入
+`--confidence-accept-margin`。Draft 的 repetition-penalty 路径使用独立的严格
+Triton argmax finalize，不承担近似验收的额外计算和 buffer 开销。
 
 这里的 `--gamma 4` 是运行时搜索、静态 buffer 和 Graph capture 的上界，不会
 把每轮投机长度固定为 4。`online` 模式不接收 `--adaptive-profile`。

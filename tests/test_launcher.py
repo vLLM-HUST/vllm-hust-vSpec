@@ -3,22 +3,44 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import sys
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import torch
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 
 from vllm_hust_vspec.backends.draft import (
+    _add_draft_continuation_graph_keys,
     _bind_host_attn_update,
     _call_host_query_padding,
+    _draft_request_buckets,
+    _enable_merged_graph_replay,
     _install_inner_logits_processor_alias,
+    _select_draft_continuation_graph,
+    _uniform_descriptor_request_count,
+)
+from vllm_hust_vspec.backends.draft_parallel_update import (
+    _chunk_descriptors,
+    _DenseFIAParam,
+    _graph_plan_scope,
+    _normalize_dense_fia_param,
+    _UpdateDescriptor,
+)
+from vllm_hust_vspec.backends.draft_repetition import (
+    _collect_unique_history,
+    _row_layout,
+    select_exact_repetition_topk,
 )
 from vllm_hust_vspec.backends.draft_vocab import (
     _configure_serial_draft_active_vocab,
 )
+from vllm_hust_vspec.backends.eagle_body_quant import _WeightOnlyLinearMethod
 from vllm_hust_vspec.backends.eagle_draft import (
     ActiveVocabLogits,
     _configure_draft_active_vocab,
@@ -31,8 +53,11 @@ from vllm_hust_vspec.backends.eagle_graph import (
 from vllm_hust_vspec.backends.eagle_rejection import (
     _confidence_accept_inputs,
     _confidence_accept_margin,
+    _confidence_accept_selected_inputs,
     _forward_greedy_token_ids,
     _forward_linear_eagle,
+    _has_active_non_argmax_processor,
+    _sparse_repetition_greedy,
 )
 from vllm_hust_vspec.backends.eagle_target import (
     _configure_target_active_vocab,
@@ -58,7 +83,12 @@ from vllm_hust_vspec.config import (
     ENV_CONFIDENCE_ACCEPT_MARGIN,
     ENV_CONFIDENCE_PROTECTED_TOKEN_IDS,
     ENV_DRAFT_ACTIVE_VOCAB,
+    ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF,
+    ENV_DRAFT_EXACT_REPETITION_TOPK,
+    ENV_DRAFT_EXACT_REPETITION_TRACE,
+    ENV_DRAFT_PARALLEL_GRAPH_UPDATES,
     ENV_DRAFT_TARGET_ACTIVE_VOCAB,
+    ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES,
     ENV_EAGLE_RELAXED_ACCEPT_TOPK,
     ENV_ENABLED,
     ENV_MAX_NUM_SEQS,
@@ -68,6 +98,320 @@ from vllm_hust_vspec.config import (
 
 
 class LauncherTest(unittest.TestCase):
+    def test_weight_only_linear_aligns_bias_with_input_dtype(self) -> None:
+        captured: dict[str, torch.Tensor | None] = {}
+
+        def weight_quant_matmul(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale: torch.Tensor,
+            *,
+            bias: torch.Tensor | None,
+        ) -> torch.Tensor:
+            captured["bias"] = bias
+            return x
+
+        layer = SimpleNamespace(
+            _vspec_w8a16_weight=torch.empty((64, 64), dtype=torch.int8),
+            _vspec_w8a16_scale=torch.ones(64, dtype=torch.float16),
+            _vspec_w8a16_bias=torch.ones(64, dtype=torch.float32),
+        )
+        torch_npu = SimpleNamespace(
+            npu_weight_quant_batchmatmul=weight_quant_matmul,
+        )
+        x = torch.ones((1, 64), dtype=torch.float16)
+
+        with mock.patch.dict(sys.modules, {"torch_npu": torch_npu}):
+            output = _WeightOnlyLinearMethod().apply(
+                layer,
+                x,
+                bias=layer._vspec_w8a16_bias,
+            )
+
+        self.assertIs(output, x)
+        self.assertEqual(captured["bias"].dtype, torch.float16)
+
+    def test_draft_parallel_update_normalizes_current_dense_fia_abi(
+        self,
+    ) -> None:
+        captured = tuple(range(21)) + ("model.layers.7.self_attn.attn",)
+
+        normalized = _normalize_dense_fia_param(captured)
+
+        self.assertIsNotNone(normalized)
+        assert normalized is not None
+        self.assertEqual(normalized.layer_name, captured[21])
+        self.assertEqual(normalized.sliding_window, captured[16])
+        self.assertEqual(normalized.c8_k_scale, captured[17])
+        self.assertEqual(normalized.c8_v_scale, captured[19])
+
+    def test_draft_parallel_update_chunks_static_descriptors(self) -> None:
+        param = _DenseFIAParam(*range(16), "layer", None)
+        descriptors = [_UpdateDescriptor(param, index, index, 0, "layer", 3) for index in range(7)]
+
+        chunks = _chunk_descriptors(descriptors, 3)
+
+        self.assertEqual(
+            [[descriptor.handle for descriptor in chunk] for chunk in chunks],
+            [[0, 3, 6], [1, 4], [2, 5]],
+        )
+
+    def test_draft_parallel_update_plan_scope_isolates_graphs(self) -> None:
+        first_table = object()
+        second_table = object()
+
+        first = _graph_plan_scope("draft", first_table, [1, 2])
+        same = _graph_plan_scope("draft", first_table, [3, 4])
+        grown = _graph_plan_scope("draft", first_table, [1, 2, 3])
+        other = _graph_plan_scope("draft", second_table, [1, 2])
+
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, grown)
+        self.assertNotEqual(first, other)
+
+    def test_inactive_builtin_logits_processor_does_not_block_fast_path(self) -> None:
+        inactive = SimpleNamespace(biases={}, min_toks={})
+        metadata = SimpleNamespace(logitsprocs=SimpleNamespace(non_argmax_invariant=[inactive]))
+        self.assertFalse(_has_active_non_argmax_processor(metadata))
+
+        active = SimpleNamespace(biases={"request": {1: 2.0}}, min_toks={})
+        metadata.logitsprocs.non_argmax_invariant = [active]
+        self.assertTrue(_has_active_non_argmax_processor(metadata))
+
+        metadata.logitsprocs.non_argmax_invariant = [object()]
+        self.assertTrue(_has_active_non_argmax_processor(metadata))
+
+    def test_draft_repetition_history_is_unique_and_bounded(self) -> None:
+        rows, truncated = _collect_unique_history(
+            prompt_token_ids=torch.tensor(
+                [[1, 2, 1, 99], [4, 5, 0, 0]],
+                dtype=torch.int32,
+            ),
+            prompt_lengths=[3, 2],
+            output_token_ids=[[3, 2, -1], [5, 6, 7]],
+            num_rows=2,
+            vocab_size=8,
+            history_width=3,
+        )
+
+        self.assertEqual(rows, [[1, 2, 3], [5, 6, 7]])
+        self.assertTrue(truncated)
+
+    def test_fused_repetition_row_layout_matches_target_and_bonus_rows(self) -> None:
+        repeat_indices, local_positions = _row_layout([2, 1])
+
+        self.assertEqual(repeat_indices, [0, 0, 1, 0, 1])
+        self.assertEqual(local_positions, [0, 1, 0, 2, 1])
+
+    def test_exact_repetition_topk_proves_global_winner(self) -> None:
+        winner_ids, proven = select_exact_repetition_topk(
+            torch.tensor([[10.0, 9.0, 8.0], [10.0, 9.0, 8.0]]),
+            torch.tensor([[4, 2, 1], [4, 2, 1]]),
+            torch.tensor(
+                [[True, False, False], [True, True, True]],
+            ),
+            torch.tensor([2.0, 2.0]),
+            vocab_size=6,
+            has_outside_candidates=True,
+        )
+
+        self.assertEqual(winner_ids.tolist(), [2, 4])
+        self.assertEqual(proven.tolist(), [True, False])
+
+    def test_proven_repetition_topk_matches_full_vocab_argmax(self) -> None:
+        generator = torch.Generator().manual_seed(0)
+        for _ in range(20):
+            logits = torch.randn((8, 97), generator=generator)
+            seen = torch.rand((8, 97), generator=generator) < 0.35
+            penalties = 1.0 + torch.rand((8,), generator=generator)
+            full_values = torch.where(
+                seen,
+                torch.where(
+                    logits > 0,
+                    logits / penalties.unsqueeze(-1),
+                    logits * penalties.unsqueeze(-1),
+                ),
+                logits,
+            )
+            expected = full_values.argmax(dim=-1)
+            values, ids = logits.topk(16, dim=-1, sorted=True)
+            candidate_seen = seen.gather(1, ids)
+            actual, proven = select_exact_repetition_topk(
+                values,
+                ids,
+                candidate_seen,
+                penalties,
+                vocab_size=logits.shape[-1],
+                has_outside_candidates=True,
+            )
+            self.assertTrue(torch.equal(actual[proven], expected[proven]))
+
+    def test_draft_continuation_graph_keys_cover_gamma_plus_two(self) -> None:
+        graph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
+            CUDAGraphMode.FULL: set(),
+        }
+        dispatcher = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                speculative_config=SimpleNamespace(method="draft_model"),
+                scheduler_config=SimpleNamespace(max_num_seqs=16),
+            ),
+            cudagraph_keys=graph_keys,
+            _get_lora_cases=lambda: [0],
+            add_cudagraph_key=lambda mode, descriptor: graph_keys[mode].add(descriptor),
+        )
+
+        added = _add_draft_continuation_graph_keys(
+            dispatcher,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            6,
+        )
+
+        self.assertEqual(_draft_request_buckets(16), (1, 2, 4, 8, 16))
+        self.assertEqual(added, 5)
+        self.assertEqual(
+            sorted(descriptor.num_tokens for descriptor in graph_keys[CUDAGraphMode.FULL]),
+            [7, 14, 28, 56, 112],
+        )
+
+    def test_draft_request_buckets_include_configured_sizes(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"VSPEC_DRAFT_REQUEST_BUCKETS": "3, 9,15"},
+        ):
+            self.assertEqual(
+                _draft_request_buckets(16),
+                (1, 2, 3, 4, 8, 9, 15, 16),
+            )
+
+    def test_draft_request_buckets_reject_out_of_range_sizes(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"VSPEC_DRAFT_REQUEST_BUCKETS": "17"},
+        ):
+            with self.assertRaisesRegex(ValueError, r"\[1, 16\]"):
+                _draft_request_buckets(16)
+
+    def test_adaptive_draft_continuation_graph_keys_cover_each_gamma(self) -> None:
+        graph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
+            CUDAGraphMode.FULL: set(),
+        }
+        dispatcher = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                speculative_config=SimpleNamespace(method="draft_model"),
+                scheduler_config=SimpleNamespace(max_num_seqs=16),
+            ),
+            cudagraph_keys=graph_keys,
+            _get_lora_cases=lambda: [0],
+            add_cudagraph_key=lambda mode, descriptor: graph_keys[mode].add(descriptor),
+        )
+
+        added = _add_draft_continuation_graph_keys(
+            dispatcher,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            5,
+            query_lens=(3, 4, 5, 6),
+        )
+
+        self.assertEqual(added, 20)
+        self.assertEqual(
+            dispatcher._vspec_draft_merged_query_lens,
+            (3, 4, 5, 6),
+        )
+        self.assertEqual(
+            sorted(
+                (descriptor.num_reqs, descriptor.num_tokens)
+                for descriptor in graph_keys[CUDAGraphMode.FULL]
+            ),
+            sorted(
+                (num_reqs, num_reqs * query_len)
+                for query_len in (3, 4, 5, 6)
+                for num_reqs in (1, 2, 4, 8, 16)
+            ),
+        )
+
+    def test_draft_continuation_dispatch_uses_request_bucket(self) -> None:
+        descriptors = {
+            BatchDescriptor(
+                num_tokens=num_reqs * 7,
+                num_reqs=num_reqs,
+                uniform=True,
+            )
+            for num_reqs in (1, 2, 4, 8, 16)
+        }
+        dispatcher = SimpleNamespace(
+            _vspec_active_num_reqs=10,
+            _vspec_draft_merged_query_lens=(7,),
+            _vspec_draft_continuation_query_len=7,
+            uniform_decode_query_len=6,
+            cudagraph_keys={CUDAGraphMode.FULL: descriptors},
+        )
+
+        descriptor = _select_draft_continuation_graph(
+            dispatcher,
+            70,
+            True,
+            False,
+            0,
+            None,
+            None,
+        )
+
+        self.assertIsNotNone(descriptor)
+        assert descriptor is not None
+        self.assertEqual(descriptor.num_tokens, 112)
+        self.assertEqual(descriptor.num_reqs, 16)
+
+    def test_compact_request_count_uses_runtime_descriptor(self) -> None:
+        descriptor = BatchDescriptor(
+            num_tokens=4,
+            num_reqs=1,
+            uniform=True,
+        )
+
+        self.assertEqual(
+            _uniform_descriptor_request_count(descriptor, 4, 4),
+            1,
+        )
+        self.assertIsNone(
+            _uniform_descriptor_request_count(descriptor, 8, 4)
+        )
+
+    def test_merged_draft_reuses_host_graph_without_replay_barrier(self) -> None:
+        from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+
+        wrapper = ACLGraphWrapper.__new__(ACLGraphWrapper)
+        wrapper.use_eagle = False
+
+        self.assertTrue(_enable_merged_graph_replay(wrapper, True))
+        self.assertTrue(wrapper.use_eagle)
+
+    def test_disabled_merged_draft_keeps_host_graph_barrier(self) -> None:
+        from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+
+        wrapper = ACLGraphWrapper.__new__(ACLGraphWrapper)
+        wrapper.use_eagle = False
+
+        self.assertFalse(_enable_merged_graph_replay(wrapper, False))
+        self.assertFalse(wrapper.use_eagle)
+
+    def test_draft_body_quantization_cli_environment(self) -> None:
+        options, configured = parse_args(
+            [
+                "--target-model",
+                "/target",
+                "--draft-model",
+                "/draft",
+                "--method",
+                "draft",
+                "--draft-body-quantization",
+                "w8a16",
+            ]
+        )
+
+        environment = build_environment(options, configured, {})
+
+        self.assertEqual(environment["VSPEC_DRAFT_BODY_W8A16"], "1")
+
     def test_draft_reduce_sample_aliases_outer_logits_processor(self) -> None:
         inner_model = SimpleNamespace()
         logits_processor = object()
@@ -299,11 +643,108 @@ class LauncherTest(unittest.TestCase):
         self.assertIs(result, sentinel)
         self.assertNotIn("relaxed_draft_mask", fast_path.call_args.kwargs)
 
+    def test_penalized_greedy_verification_uses_processed_token_ids(self) -> None:
+        @dataclass
+        class Sampling:
+            all_greedy: bool = True
+            max_num_logprobs: int | None = None
+            logprob_token_ids: list[int] | None = None
+            no_penalties: bool = False
+            output_token_ids: list[list[int]] | None = None
+
+        metadata = SimpleNamespace(
+            max_spec_len=1,
+            target_logits_indices=torch.tensor([0]),
+            bonus_logits_indices=torch.tensor([1]),
+        )
+        sampling_metadata = Sampling(output_token_ids=[[1]])
+        logits = torch.tensor([[4.0, 1.0], [2.0, 3.0]])
+        bonus_output = SimpleNamespace(sampled_token_ids=torch.tensor([[1]]))
+        sampler = SimpleNamespace(
+            sampler=mock.Mock(return_value=bonus_output),
+            apply_logits_processors=mock.Mock(return_value=torch.tensor([[1.0, 5.0]])),
+        )
+        sentinel = object()
+        with mock.patch(
+            "vllm_hust_vspec.backends.eagle_rejection._forward_greedy_token_ids",
+            return_value=sentinel,
+        ) as fast_path:
+            result = _forward_linear_eagle(
+                sampler,
+                metadata,
+                None,
+                logits,
+                sampling_metadata,
+            )
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(fast_path.call_args.args[2].tolist(), [1])
+        self.assertTrue(fast_path.call_args.kwargs["target_rows_selected"])
+        self.assertEqual(
+            fast_path.call_args.kwargs["bonus_token_ids"].tolist(),
+            [[1]],
+        )
+        self.assertIsNone(sampler.sampler.call_args.kwargs["sampling_metadata"].max_num_logprobs)
+
+    def test_sparse_repetition_greedy_penalizes_seen_candidates(self) -> None:
+        metadata = SimpleNamespace(
+            num_draft_tokens=[2],
+            cu_num_draft_tokens=torch.tensor([2]),
+            target_logits_indices=torch.tensor([0, 1]),
+            bonus_logits_indices=torch.tensor([2]),
+        )
+        sampling_metadata = SimpleNamespace(
+            _vspec_repetition_only=True,
+            prompt_token_ids=torch.tensor([[0, 4]]),
+            repetition_penalties=torch.tensor([2.0]),
+            output_token_ids=[[3]],
+            spec_token_ids=[[1, 2]],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids=None,
+            logitsprocs=SimpleNamespace(non_argmax_invariant=[]),
+            thinking_budget_state_holder=None,
+        )
+        logits = torch.tensor(
+            [
+                [10.0, 9.0, 1.0, 0.0, 0.0, 0.0],
+                [1.0, 10.0, 9.0, 0.0, 0.0, 0.0],
+                [1.0, 2.0, 10.0, 0.0, 0.0, 9.0],
+            ]
+        )
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "HUST_VSPEC_METHOD": "draft_model",
+                    "VSPEC_DRAFT_SPARSE_REPETITION_TOPK": "3",
+                },
+            ),
+            mock.patch(
+                "vllm_ascend.sample.rejection_sampler.expand_batch_to_tokens",
+                return_value=torch.tensor([0, 0]),
+            ),
+        ):
+            result = _sparse_repetition_greedy(
+                metadata,
+                logits,
+                sampling_metadata,
+            )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        target_ids, bonus_ids = result
+        self.assertEqual(target_ids.tolist(), [1, 2])
+        self.assertEqual(bonus_ids.tolist(), [[5]])
+
     def test_serial_draft_active_vocab_maps_full_token_ids(self) -> None:
         class TinyDraftModel(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
                 self.lm_head = torch.nn.Linear(4, 1200, bias=False)
+
+            def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+                return self.lm_head(hidden_states)
 
         with tempfile.TemporaryDirectory() as directory:
             ids_path = Path(directory) / "active.json"
@@ -327,12 +768,10 @@ class LauncherTest(unittest.TestCase):
             with mock.patch.dict(os.environ, environment, clear=False):
                 self.assertTrue(_configure_serial_draft_active_vocab(proposer))
 
-        compact_logits = torch.nn.functional.linear(
-            torch.ones(2, 4),
-            proposer._eagle_draft_active_lm_head_weight,
-        )
-        selected = proposer._eagle_draft_active_vocab_ids[compact_logits.argmax(dim=-1)]
-        self.assertEqual(selected.tolist(), [1100, 1100])
+        compact_logits = model.compute_logits(torch.ones(2, 4))
+        self.assertIsInstance(compact_logits, ActiveVocabLogits)
+        self.assertEqual(compact_logits.shape, (2, 1024))
+        self.assertEqual(compact_logits.argmax(dim=-1).tolist(), [1100, 1100])
         self.assertFalse(_configure_serial_draft_active_vocab(proposer))
 
     def test_w8a16_active_lm_head_quantization(self) -> None:
@@ -584,6 +1023,27 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(target_ids.tolist(), [0, 1, 2])
         self.assertEqual(relaxed_mask.tolist(), [True, False])
 
+    def test_selected_confidence_accept_compares_processed_rows(self) -> None:
+        metadata = SimpleNamespace(
+            draft_token_ids=torch.tensor([1, 0], dtype=torch.int32),
+            num_draft_tokens=[2],
+        )
+        target_logits = torch.tensor(
+            [
+                [3.0, 2.7, 0.0],
+                [2.0, 4.0, 0.0],
+            ]
+        )
+
+        target_ids, relaxed_mask = _confidence_accept_selected_inputs(
+            target_logits,
+            metadata,
+            0.5,
+        )
+
+        self.assertEqual(target_ids.tolist(), [0, 1])
+        self.assertEqual(relaxed_mask.tolist(), [True, False])
+
     def test_eagle_confidence_accept_can_preserve_first_position(self) -> None:
         metadata = SimpleNamespace(
             target_logits_indices=torch.tensor([0, 1, 2]),
@@ -791,6 +1251,28 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(options.method, "eagle")
         self.assertEqual(options.served_model_name, "qwen2.5-14b-eagle-vspec-fp16")
 
+    def test_full_and_piecewise_graph_mode_is_forwarded(self) -> None:
+        options, _ = parse_args(
+            [
+                "--target-model",
+                "/models/target",
+                "--draft-model",
+                "/models/draft",
+                "--no-adaptive-speculation",
+                "--graph-mode",
+                "full-and-piecewise",
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+
+        command = build_vllm_command(options)
+        compilation = command[command.index("--compilation-config") + 1]
+        self.assertEqual(
+            compilation,
+            '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}',
+        )
+
     def test_cli_overrides_toml_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "valid.toml"
@@ -949,6 +1431,36 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(
             environment["VLLM_ASCEND_DRAFT_TARGET_ACTIVE_VOCAB_IDS_PATH"],
             "/tmp/target-active.json",
+        )
+
+    def test_draft_runtime_optimization_environment(self) -> None:
+        options, configured_environment = parse_args(
+            [
+                "--target-model",
+                "/models/target",
+                "--draft-model",
+                "/models/draft",
+                "--draft-parallel-graph-updates",
+                "4",
+                "--draft-target-parallel-graph-updates",
+                "3",
+                "--draft-exact-repetition-topk",
+                "64",
+                "--draft-exact-repetition-trace",
+                "--no-draft-exact-repetition-sync-proof",
+            ]
+        )
+        environment = build_environment(options, configured_environment, {})
+        self.assertEqual(environment[ENV_DRAFT_PARALLEL_GRAPH_UPDATES], "4")
+        self.assertEqual(
+            environment[ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES],
+            "3",
+        )
+        self.assertEqual(environment[ENV_DRAFT_EXACT_REPETITION_TOPK], "64")
+        self.assertEqual(environment[ENV_DRAFT_EXACT_REPETITION_TRACE], "1")
+        self.assertEqual(
+            environment[ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF],
+            "0",
         )
 
     def test_eagle_command_and_optimized_environment(self) -> None:

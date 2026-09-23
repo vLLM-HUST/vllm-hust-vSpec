@@ -38,6 +38,74 @@ class ActiveVocabLogits:
         return ActiveVocabLogits(self.logits[key], self.active_ids)
 
 
+class ChunkedQuantizedLogits:
+    """Lazy quantized projection that reduces each vocabulary chunk in place."""
+
+    def __init__(
+        self,
+        hidden_states: torch.Tensor,
+        chunks: list[tuple[int, torch.Tensor, torch.Tensor]],
+        bias: torch.Tensor | None,
+        use_w8a8: bool,
+    ) -> None:
+        self.hidden_states = hidden_states
+        self.chunks = chunks
+        self.bias = bias
+        self.use_w8a8 = use_w8a8
+        self.vocab_size = sum(chunk[1].shape[1] for chunk in chunks)
+
+    @property
+    def shape(self) -> torch.Size:
+        return torch.Size((*self.hidden_states.shape[:-1], self.vocab_size))
+
+    def argmax(self, dim: int = -1, keepdim: bool = False) -> torch.Tensor:
+        if dim not in (-1, len(self.shape) - 1):
+            raise ValueError("Chunked quantized logits only support vocabulary argmax")
+
+        quant_hidden_states, pertoken_scale = _quantize_hidden_states(
+            self.hidden_states,
+            self.use_w8a8,
+        )
+        best_values = None
+        best_ids = None
+        for start, quant_weight, quant_scale in self.chunks:
+            output = _compute_quantized_chunk(
+                self.hidden_states,
+                quant_hidden_states,
+                pertoken_scale,
+                start,
+                quant_weight,
+                quant_scale,
+                self.bias,
+                self.use_w8a8,
+            )
+            chunk_values, chunk_ids = output.max(dim=-1)
+            chunk_ids = chunk_ids.add(start)
+            if best_values is None:
+                best_values = chunk_values
+                best_ids = chunk_ids
+                continue
+            replace = chunk_values > best_values
+            best_values = torch.where(replace, chunk_values, best_values)
+            best_ids = torch.where(replace, chunk_ids, best_ids)
+
+        if best_ids is None:
+            raise RuntimeError("Quantized LM head has no vocabulary chunks")
+        return best_ids.unsqueeze(-1) if keepdim else best_ids
+
+    def contiguous(self) -> ChunkedQuantizedLogits:
+        self.hidden_states = self.hidden_states.contiguous()
+        return self
+
+    def __getitem__(self, key: Any) -> ChunkedQuantizedLogits:
+        return ChunkedQuantizedLogits(
+            self.hidden_states[key],
+            self.chunks,
+            self.bias,
+            self.use_w8a8,
+        )
+
+
 def quantize_active_lm_head_w8a16(
     weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -75,42 +143,77 @@ def quantize_active_lm_head_chunks(
     return chunks
 
 
+def _quantize_hidden_states(
+    hidden_states: torch.Tensor,
+    use_w8a8: bool,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if not use_w8a8:
+        return None, None
+    import torch_npu
+
+    return torch_npu.npu_dynamic_quant(
+        hidden_states,
+        dst_type=torch.int8,
+    )
+
+
+def _compute_quantized_chunk(
+    hidden_states: torch.Tensor,
+    quant_hidden_states: torch.Tensor | None,
+    pertoken_scale: torch.Tensor | None,
+    start: int,
+    quant_weight: torch.Tensor,
+    quant_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    use_w8a8: bool,
+) -> torch.Tensor:
+    import torch_npu
+
+    end = start + quant_weight.shape[1]
+    chunk_bias = bias[start:end] if bias is not None else None
+    if use_w8a8:
+        assert quant_hidden_states is not None
+        assert pertoken_scale is not None
+        return torch_npu.npu_quant_matmul(
+            quant_hidden_states,
+            quant_weight,
+            quant_scale,
+            pertoken_scale=pertoken_scale,
+            bias=chunk_bias,
+            output_dtype=hidden_states.dtype,
+        )
+    return torch_npu.npu_weight_quant_batchmatmul(
+        hidden_states,
+        quant_weight,
+        quant_scale,
+        bias=chunk_bias,
+    )
+
+
 def _compute_quantized_logits(
     hidden_states: torch.Tensor,
     chunks: list[tuple[int, torch.Tensor, torch.Tensor]],
     bias: torch.Tensor | None,
     use_w8a8: bool,
 ) -> torch.Tensor:
-    import torch_npu
-
-    quant_hidden_states = None
-    pertoken_scale = None
-    if use_w8a8:
-        quant_hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
-            hidden_states,
-            dst_type=torch.int8,
-        )
+    quant_hidden_states, pertoken_scale = _quantize_hidden_states(
+        hidden_states,
+        use_w8a8,
+    )
     outputs = []
     for start, quant_weight, quant_scale in chunks:
-        end = start + quant_weight.shape[1]
-        chunk_bias = bias[start:end] if bias is not None else None
-        if use_w8a8:
-            output = torch_npu.npu_quant_matmul(
-                quant_hidden_states,
-                quant_weight,
-                quant_scale,
-                pertoken_scale=pertoken_scale,
-                bias=chunk_bias,
-                output_dtype=hidden_states.dtype,
-            )
-        else:
-            output = torch_npu.npu_weight_quant_batchmatmul(
+        outputs.append(
+            _compute_quantized_chunk(
                 hidden_states,
+                quant_hidden_states,
+                pertoken_scale,
+                start,
                 quant_weight,
                 quant_scale,
-                bias=chunk_bias,
+                bias,
+                use_w8a8,
             )
-        outputs.append(output)
+        )
     return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
 
 

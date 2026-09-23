@@ -93,6 +93,7 @@ def _configure_target_active_vocab_for_method(
     runner._eagle_target_active_vocab_ids = None
     runner._eagle_target_active_lm_head_weight = None
     runner._eagle_target_active_lm_head_bias = None
+    runner._eagle_target_full_vocab_size = None
     runner._eagle_relaxed_accept_topk = 1
     runner._eagle_relaxed_accept_after_tokens = 0
     runner._eagle_relaxed_accept_max_margin = None
@@ -146,6 +147,7 @@ def _configure_target_active_vocab_for_method(
     runner._eagle_target_active_vocab_ids = active_ids
     runner._eagle_target_active_lm_head_weight = active_weight
     runner._eagle_target_active_lm_head_bias = active_bias
+    runner._eagle_target_full_vocab_size = int(weight.shape[0])
     runner._eagle_relaxed_accept_topk = topk
     runner._eagle_relaxed_accept_after_tokens = after_tokens
     runner._eagle_relaxed_accept_max_margin = max_margin
@@ -180,10 +182,71 @@ def _sample_target_active_vocab(
 ) -> SamplerOutput:
     runner.input_batch.update_async_output_token_ids()
     sampling_metadata = runner.input_batch.sampling_metadata
-    if not _bare_greedy_sampling(sampling_metadata):
-        raise RuntimeError("EAGLE Target active vocabulary requires bare greedy sampling")
-
     active_ids = runner._eagle_target_active_vocab_ids
+    full_vocab_size = runner._eagle_target_full_vocab_size
+    if not _bare_greedy_sampling(sampling_metadata):
+        from .eagle_rejection import _has_active_non_argmax_processor
+
+        repetition_only = (
+            sampling_metadata.all_greedy
+            and sampling_metadata.max_num_logprobs is None
+            and not sampling_metadata.logprob_token_ids
+            and getattr(sampling_metadata, "_vspec_repetition_only", False)
+            and sampling_metadata.allowed_token_ids_mask is None
+            and not sampling_metadata.bad_words_token_ids
+            and not _has_active_non_argmax_processor(sampling_metadata)
+        )
+        thinking_state = sampling_metadata.thinking_budget_state_holder
+        repetition_only &= thinking_state is None or not thinking_state.has_tracked_requests()
+        if not repetition_only:
+            raise RuntimeError(
+                "Target active vocabulary requires greedy sampling with no processor "
+                "other than repetition penalty"
+            )
+
+        if spec_decode_metadata is None:
+            from .draft_repetition import fused_draft_repetition_greedy
+            from .eagle_draft import ActiveVocabLogits
+
+            runner._vspec_draft_full_vocab_size = full_vocab_size
+            target_token_ids = fused_draft_repetition_greedy(
+                runner,
+                ActiveVocabLogits(logits, active_ids),
+                sampling_metadata,
+                [],
+            )
+            if target_token_ids is None:
+                raise RuntimeError(
+                    "Target active vocabulary could not apply exact repetition penalty"
+                )
+            return SamplerOutput(
+                sampled_token_ids=target_token_ids.to(torch.int32).view(-1, 1),
+                logprobs_tensors=None,
+            )
+
+        from .draft_repetition import fused_repetition_greedy
+
+        fused_tokens = fused_repetition_greedy(
+            runner.rejection_sampler,
+            spec_decode_metadata,
+            logits,
+            sampling_metadata,
+            active_ids=active_ids,
+            full_vocab_size=full_vocab_size,
+        )
+        if fused_tokens is None:
+            raise RuntimeError(
+                "Target active vocabulary could not apply exact repetition penalty"
+            )
+        target_token_ids, bonus_token_ids, _ = fused_tokens
+        return runner.rejection_sampler.forward_greedy_token_ids(
+            spec_decode_metadata,
+            target_token_ids,
+            sampling_metadata,
+            target_rows_selected=True,
+            bonus_token_ids=bonus_token_ids,
+        )
+
     topk = min(runner._eagle_relaxed_accept_topk, logits.shape[-1])
     candidates = None
     candidate_values = None

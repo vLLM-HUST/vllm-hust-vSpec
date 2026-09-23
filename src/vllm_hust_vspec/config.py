@@ -15,6 +15,15 @@ ENV_MERGED_FULL_MAX_BATCH = "HUST_VSPEC_MERGED_FULL_MAX_BATCH"
 ENV_MAX_NUM_SEQS = "HUST_VSPEC_MAX_NUM_SEQS"
 ENV_DRAFT_ACTIVE_VOCAB = "HUST_VSPEC_DRAFT_ACTIVE_VOCAB"
 ENV_DRAFT_TARGET_ACTIVE_VOCAB = "HUST_VSPEC_DRAFT_TARGET_ACTIVE_VOCAB"
+ENV_DRAFT_PARALLEL_GRAPH_UPDATES = "HUST_VSPEC_DRAFT_PARALLEL_GRAPH_UPDATES"
+ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES = (
+    "HUST_VSPEC_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES"
+)
+ENV_DRAFT_EXACT_REPETITION_TOPK = "HUST_VSPEC_DRAFT_EXACT_REPETITION_TOPK"
+ENV_DRAFT_EXACT_REPETITION_TRACE = "HUST_VSPEC_DRAFT_EXACT_REPETITION_TRACE"
+ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF = (
+    "HUST_VSPEC_DRAFT_EXACT_REPETITION_SYNC_PROOF"
+)
 ENV_EAGLE_TREE_WIDTH = "HUST_VSPEC_EAGLE_TREE_WIDTH"
 ENV_EAGLE_DRAFT_ACTIVE_VOCAB = "HUST_VSPEC_EAGLE_DRAFT_ACTIVE_VOCAB"
 ENV_EAGLE_TARGET_ACTIVE_VOCAB = "HUST_VSPEC_EAGLE_TARGET_ACTIVE_VOCAB"
@@ -173,6 +182,11 @@ class PluginSettings:
     max_num_seqs: int = 128
     draft_active_vocab: bool = False
     draft_target_active_vocab: bool = False
+    draft_parallel_graph_updates: int = 0
+    draft_target_parallel_graph_updates: int = 0
+    draft_exact_repetition_topk: int = 0
+    draft_exact_repetition_trace: bool = False
+    draft_exact_repetition_sync_proof: bool = True
     eagle_tree_width: int = 1
     eagle_draft_active_vocab: bool = False
     eagle_target_active_vocab: bool = False
@@ -300,6 +314,34 @@ class PluginSettings:
                 values,
                 ENV_DRAFT_TARGET_ACTIVE_VOCAB,
                 False,
+            ),
+            draft_parallel_graph_updates=_read_int(
+                values,
+                ENV_DRAFT_PARALLEL_GRAPH_UPDATES,
+                0,
+                0,
+            ),
+            draft_target_parallel_graph_updates=_read_int(
+                values,
+                ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES,
+                0,
+                0,
+            ),
+            draft_exact_repetition_topk=_read_int(
+                values,
+                ENV_DRAFT_EXACT_REPETITION_TOPK,
+                0,
+                0,
+            ),
+            draft_exact_repetition_trace=_read_bool(
+                values,
+                ENV_DRAFT_EXACT_REPETITION_TRACE,
+                False,
+            ),
+            draft_exact_repetition_sync_proof=_read_bool(
+                values,
+                ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF,
+                True,
             ),
             eagle_tree_width=_read_int(
                 values,
@@ -500,6 +542,21 @@ class PluginSettings:
             ENV_MAX_NUM_SEQS: str(self.max_num_seqs),
             ENV_DRAFT_ACTIVE_VOCAB: ("1" if self.draft_active_vocab else "0"),
             ENV_DRAFT_TARGET_ACTIVE_VOCAB: ("1" if self.draft_target_active_vocab else "0"),
+            ENV_DRAFT_PARALLEL_GRAPH_UPDATES: str(
+                self.draft_parallel_graph_updates
+            ),
+            ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES: str(
+                self.draft_target_parallel_graph_updates
+            ),
+            ENV_DRAFT_EXACT_REPETITION_TOPK: str(
+                self.draft_exact_repetition_topk
+            ),
+            ENV_DRAFT_EXACT_REPETITION_TRACE: (
+                "1" if self.draft_exact_repetition_trace else "0"
+            ),
+            ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF: (
+                "1" if self.draft_exact_repetition_sync_proof else "0"
+            ),
             ENV_EAGLE_TREE_WIDTH: str(self.eagle_tree_width),
             ENV_EAGLE_DRAFT_ACTIVE_VOCAB: ("1" if self.eagle_draft_active_vocab else "0"),
             ENV_EAGLE_TARGET_ACTIVE_VOCAB: ("1" if self.eagle_target_active_vocab else "0"),

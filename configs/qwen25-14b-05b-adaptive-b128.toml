@@ -23,7 +23,6 @@ merged_full = true
 merged_full_max_batch = 0
 capture_policy = "exact"
 disable_log_stats = true
-confidence_accept_margin = 5.25
 adaptive_speculation = true
 adaptive_policy = "online"
 adaptive_min_gamma = 1

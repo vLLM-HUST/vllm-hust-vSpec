@@ -98,6 +98,17 @@ def _adaptive_target_query_lens(existing: Any, max_gamma: int) -> tuple[int, ...
     return tuple(sorted(widths))
 
 
+def _adaptive_capture_query_lens(
+    existing: Any,
+    max_gamma: int,
+    method: str,
+) -> tuple[int, ...]:
+    widths = set(_adaptive_target_query_lens(existing, max_gamma))
+    if method == "draft_model":
+        widths.add(max_gamma + 2)
+    return tuple(sorted(widths))
+
+
 def _uses_width_isolated_target_graph_params(cudagraph_mode: Any) -> bool:
     """Return whether Target graph state is independent for each query width."""
     return getattr(cudagraph_mode, "name", "") == "FULL_DECODE_ONLY"
@@ -289,6 +300,35 @@ def _runner_query_width(
 
 
 @contextmanager
+def _draft_capture_query_width(
+    runner: Any,
+    query_width: int | None,
+) -> Any:
+    """Expose continuation-only widths to the Draft graph dispatcher."""
+    dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    merged_query_lens = getattr(
+        dispatcher,
+        "_vspec_draft_merged_query_lens",
+        (),
+    )
+    if dispatcher is None or query_width not in merged_query_lens:
+        yield
+        return
+
+    attribute = "_vspec_capture_uniform_query_len"
+    had_attribute = hasattr(dispatcher, attribute)
+    previous_value = getattr(dispatcher, attribute, None)
+    setattr(dispatcher, attribute, query_width)
+    try:
+        yield
+    finally:
+        if had_attribute:
+            setattr(dispatcher, attribute, previous_value)
+        else:
+            delattr(dispatcher, attribute)
+
+
+@contextmanager
 def _runtime_runner_query_width(
     proposer: Any,
     query_width: int | None,
@@ -296,6 +336,51 @@ def _runtime_runner_query_width(
     """Temporarily align shared runner state with the current Target frame."""
     with _runner_query_width(getattr(proposer, "runner", None), query_width):
         yield
+
+
+@contextmanager
+def _runtime_draft_continuation_query_width(
+    proposer: Any,
+    gamma: int,
+) -> Any:
+    """Bind the continuation width so padded metadata cannot mask tail batches."""
+    dispatcher = getattr(
+        getattr(proposer, "runner", None),
+        "cudagraph_dispatcher",
+        None,
+    )
+    query_width = gamma + 2
+    if query_width not in getattr(
+        dispatcher,
+        "_vspec_draft_merged_query_lens",
+        (),
+    ):
+        yield
+        return
+
+    attribute = "_vspec_active_uniform_query_len"
+    runtime_attribute = "_vspec_runtime_draft_query_len"
+    had_attribute = hasattr(dispatcher, attribute)
+    previous_value = getattr(dispatcher, attribute, None)
+    had_runtime_attribute = hasattr(dispatcher, runtime_attribute)
+    previous_runtime_value = getattr(dispatcher, runtime_attribute, None)
+    setattr(dispatcher, attribute, query_width)
+    setattr(dispatcher, runtime_attribute, query_width)
+    try:
+        yield
+    finally:
+        if had_attribute:
+            setattr(dispatcher, attribute, previous_value)
+        else:
+            delattr(dispatcher, attribute)
+        if had_runtime_attribute:
+            setattr(
+                dispatcher,
+                runtime_attribute,
+                previous_runtime_value,
+            )
+        else:
+            delattr(dispatcher, runtime_attribute)
 
 
 @contextmanager
@@ -307,13 +392,21 @@ def _runtime_eager_dispatch(proposer: Any, enabled: bool) -> Any:
         yield
         return
 
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import BatchDescriptor
+
     previous_dispatch = dispatcher.dispatch
 
-    def dispatch_nonuniform(*args: Any, **kwargs: Any) -> Any:
-        kwargs["uniform_decode"] = False
-        return previous_dispatch(*args, **kwargs)
+    def dispatch_eager(*args: Any, **kwargs: Any) -> Any:
+        num_tokens = kwargs.get(
+            "num_tokens",
+            args[0] if args else None,
+        )
+        if num_tokens is None:
+            raise RuntimeError("eager Draft dispatch requires num_tokens")
+        return CUDAGraphMode.NONE, BatchDescriptor(int(num_tokens))
 
-    dispatcher.dispatch = dispatch_nonuniform
+    dispatcher.dispatch = dispatch_eager
     try:
         yield
     finally:
@@ -414,6 +507,25 @@ def _proposal_execution_gamma(
     if method == "eagle" and 0 < requested_gamma < previous_gamma:
         return previous_gamma
     return requested_gamma
+
+
+def _can_use_stable_configured_draft_path(
+    method: str | None,
+    requested_gamma: int,
+    previous_gamma: int,
+    configured_gamma: int,
+    *,
+    adaptive_full_graph: bool,
+    entropy_stop: bool,
+) -> bool:
+    """Return whether serial Draft can keep its native configured state."""
+    return (
+        method == "draft_model"
+        and adaptive_full_graph
+        and not entropy_stop
+        and requested_gamma == configured_gamma
+        and previous_gamma == configured_gamma
+    )
 
 
 def _copy_dynamic_draft_tokens(
@@ -641,6 +753,83 @@ def _get_full_graph_runnable_for_gamma(
     return runnables[gamma]
 
 
+def _draft_capture_request_count(proposer: Any, kwargs: dict[str, Any]) -> int | None:
+    """Return the logical batch encoded by a Draft continuation descriptor."""
+    if getattr(proposer, "method", None) != "draft_model":
+        return None
+    descriptor = kwargs.get("batch_descriptor")
+    num_reqs = kwargs.get("num_reqs")
+    descriptor_reqs = getattr(descriptor, "num_reqs", None)
+    if not descriptor_reqs or num_reqs is None:
+        return None
+    query_width = _batch_descriptor_query_width(descriptor)
+    dispatcher = getattr(getattr(proposer, "runner", None), "cudagraph_dispatcher", None)
+    continuation_widths = getattr(
+        dispatcher,
+        "_vspec_draft_merged_query_lens",
+        (),
+    )
+    if query_width not in continuation_widths:
+        return None
+    if int(num_reqs) != int(descriptor_reqs):
+        raise RuntimeError(
+            "Draft continuation capture request count does not match its descriptor: "
+            f"runtime={num_reqs}, descriptor={descriptor_reqs}"
+        )
+    return int(num_reqs)
+
+
+def _draft_capture_gamma(
+    proposer: Any,
+    kwargs: dict[str, Any],
+) -> int | None:
+    """Map a continuation capture descriptor to its runtime gamma."""
+    if _draft_capture_request_count(proposer, kwargs) is None:
+        return None
+    query_width = _batch_descriptor_query_width(
+        kwargs.get("batch_descriptor")
+    )
+    if query_width is None or query_width < 3:
+        return None
+    return query_width - 2
+
+
+def _adaptive_draft_capture_gammas(
+    configured_gamma: int,
+    min_gamma: int,
+    capture_gamma: int | None,
+) -> tuple[int, ...]:
+    """Select the runtime gamma(s) compatible with a capture descriptor."""
+    graph_min_gamma = max(1, min_gamma)
+    if capture_gamma is None:
+        return tuple(range(configured_gamma, graph_min_gamma - 1, -1))
+    if not graph_min_gamma <= capture_gamma <= configured_gamma:
+        raise RuntimeError(
+            "Draft continuation capture gamma is outside the configured range: "
+            f"capture={capture_gamma}, range=[{graph_min_gamma}, "
+            f"{configured_gamma}]"
+        )
+    return (capture_gamma,)
+
+
+def _draft_capture_runnable(
+    proposer: Any,
+    graph_runnable: Any,
+    num_reqs: int,
+) -> Any:
+    """Force the graph output batch to use descriptor request rows."""
+
+    def run_with_descriptor_batch(*args: Any, **kwargs: Any) -> Any:
+        kwargs["batch_size"] = num_reqs
+        token_indices = kwargs.get("token_indices_to_sample")
+        if token_indices is not None:
+            token_count = num_reqs * proposer.extra_slots_per_request
+            kwargs["token_indices_to_sample"] = token_indices[:token_count]
+        return graph_runnable(*args, **kwargs)
+
+    return run_with_descriptor_batch
+
+
 def _capture_all_adaptive_draft_graphs(
     proposer: Any,
     callback: Any,
@@ -669,6 +858,9 @@ def _capture_all_adaptive_draft_graphs(
     )
 
     previous_runnable = proposer._runnable
+    capture_num_reqs = _draft_capture_request_count(proposer, kwargs)
+    capture_gamma = _draft_capture_gamma(proposer, kwargs)
+    discarded_graph_params: dict[int, Any] = {}
     previous_entropy_enabled = getattr(
         proposer,
         "_vspec_entropy_measure_enabled",
@@ -677,14 +869,34 @@ def _capture_all_adaptive_draft_graphs(
     configured_result = None
     try:
         # Capture the largest graph first so smaller graphs reuse its pool.
-        graph_min_gamma = max(1, min_gamma)
-        for gamma in range(configured_gamma, graph_min_gamma - 1, -1):
+        capture_gammas = _adaptive_draft_capture_gammas(
+            configured_gamma,
+            min_gamma,
+            capture_gamma,
+        )
+        for gamma in capture_gammas:
             proposer._vspec_entropy_measure_enabled = gamma >= _MIN_CONFIDENCE_STOP_GAMMA
             if getattr(proposer, "_vspec_entropy_probe_installed", False):
                 proposer._vspec_entropy_recent_values = []
-            proposer._runnable = runnables[gamma]
+            graph_runnable = runnables[gamma]
+            proposer._runnable = (
+                _draft_capture_runnable(
+                    proposer,
+                    graph_runnable,
+                    capture_num_reqs,
+                )
+                if capture_num_reqs is not None
+                else graph_runnable
+            )
             if graph_params_by_gamma is not None:
-                acl_graph_module._draft_graph_params = graph_params_by_gamma[gamma]
+                if gamma == capture_gamma:
+                    selected_graph_params = graph_params_by_gamma[gamma]
+                else:
+                    selected_graph_params = discarded_graph_params.setdefault(
+                        gamma,
+                        _empty_graph_params_like(base_graph_params),
+                    )
+                acl_graph_module._draft_graph_params = selected_graph_params
             result = _run_with_runtime_gamma(
                 proposer,
                 gamma,
@@ -701,7 +913,7 @@ def _capture_all_adaptive_draft_graphs(
                         gamma,
                         {},
                     )[captured_batch] = captured
-            if gamma == configured_gamma:
+            if gamma == configured_gamma or capture_gamma is not None:
                 configured_result = result
     finally:
         proposer._vspec_entropy_measure_enabled = previous_entropy_enabled
@@ -737,9 +949,56 @@ def _full_graph_batch_matches_capture(
     return num_tokens == actual_tokens
 
 
+def _draft_full_graph_batch_matches_capture(
+    proposer: Any,
+    common_attn_metadata: Any,
+    _target_model_batch_desc: Any,
+    gamma: int,
+) -> bool:
+    """Return whether a padded Draft continuation graph covers this batch."""
+    if common_attn_metadata is None:
+        return False
+
+    actual_batch = int(common_attn_metadata.batch_size())
+    if actual_batch <= 0:
+        return False
+
+    dispatcher = getattr(
+        getattr(proposer, "runner", None),
+        "cudagraph_dispatcher",
+        None,
+    )
+    continuation_width = gamma + 2
+    if continuation_width not in getattr(
+        dispatcher,
+        "_vspec_draft_merged_query_lens",
+        (),
+    ):
+        return False
+
+    graph_keys = getattr(dispatcher, "cudagraph_keys", {})
+    descriptor_groups = graph_keys.values() if hasattr(graph_keys, "values") else ()
+    return any(
+        bool(getattr(descriptor, "uniform", False))
+        and getattr(descriptor, "num_reqs", None) is not None
+        and int(descriptor.num_reqs) >= actual_batch
+        and int(getattr(descriptor, "num_tokens", 0))
+        == int(descriptor.num_reqs) * continuation_width
+        for descriptors in descriptor_groups
+        for descriptor in descriptors
+    )
+
+
 def apply_adaptive_patches(settings: PluginSettings) -> bool:
     """Install scheduler feedback and Ascend dynamic-gamma runtime hooks."""
     if not settings.adaptive_speculation:
+        return False
+    if settings.adaptive_min_gamma == settings.adaptive_max_gamma:
+        logger.warning(
+            "vSpec Adaptive gamma range is fixed at %d; using the native "
+            "fixed-gamma runtime",
+            settings.adaptive_max_gamma,
+        )
         return False
 
     if _disable_fixed_width_eagle_state_kernel(
@@ -1279,6 +1538,44 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 self._vspec_adaptive_previous_proposal_gamma = 0
                 return next_token_ids.new_empty((num_reqs, 0))
 
+            previous_proposal_gamma = int(
+                getattr(
+                    self,
+                    "_vspec_adaptive_previous_proposal_gamma",
+                    requested_gamma,
+                )
+            )
+            if _can_use_stable_configured_draft_path(
+                getattr(self, "method", None),
+                requested_gamma,
+                previous_proposal_gamma,
+                configured_gamma,
+                adaptive_full_graph=settings.adaptive_full_graph,
+                entropy_stop=settings.adaptive_entropy_stop,
+            ):
+                # The configured gamma already owns the native runnable and
+                # graph-parameter table. Keep only the two width bindings that
+                # serial Draft needs for padded tail batches; bypassing those
+                # bindings makes FIA see a stale actualSequenceLengthQ shape.
+                target_query_width = _proposal_input_query_width(
+                    kwargs.get("common_attn_metadata"),
+                    kwargs.get("target_model_batch_desc"),
+                )
+                with _runtime_runner_query_width(
+                    self,
+                    target_query_width,
+                ):
+                    with _runtime_draft_continuation_query_width(
+                        self,
+                        configured_gamma,
+                    ):
+                        result = original_propose(
+                            self,
+                            *args,
+                            **kwargs,
+                        )
+                self._vspec_adaptive_previous_proposal_gamma = requested_gamma
+                return result
             previous_runnable = self._runnable
             previous_entropy_enabled = getattr(
                 self,
@@ -1289,13 +1586,6 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             from vllm_ascend.compilation import acl_graph as acl_graph_module
 
             previous_graph_params = acl_graph_module._draft_graph_params
-            previous_proposal_gamma = int(
-                getattr(
-                    self,
-                    "_vspec_adaptive_previous_proposal_gamma",
-                    requested_gamma,
-                )
-            )
             execution_gamma = _proposal_execution_gamma(
                 getattr(self, "method", None),
                 requested_gamma,
@@ -1311,12 +1601,20 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             proposal_force_eager = False
             if settings.adaptive_full_graph:
                 if previous_proposal_gamma == execution_gamma:
-                    graph_batch_matches = _full_graph_batch_matches_capture(
-                        kwargs.get("common_attn_metadata"),
-                        kwargs.get("target_model_batch_desc"),
-                        execution_gamma,
-                        list(self.vllm_config.compilation_config.cudagraph_capture_sizes),
-                    )
+                    if settings.method == "draft_model":
+                        graph_batch_matches = _draft_full_graph_batch_matches_capture(
+                            self,
+                            kwargs.get("common_attn_metadata"),
+                            kwargs.get("target_model_batch_desc"),
+                            execution_gamma,
+                        )
+                    else:
+                        graph_batch_matches = _full_graph_batch_matches_capture(
+                            kwargs.get("common_attn_metadata"),
+                            kwargs.get("target_model_batch_desc"),
+                            execution_gamma,
+                            list(self.vllm_config.compilation_config.cudagraph_capture_sizes),
+                        )
                     if graph_batch_matches:
                         self._runnable = _get_full_graph_runnable_for_gamma(
                             self,
@@ -1393,21 +1691,25 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                     self,
                     target_query_width,
                 ):
-                    with _runtime_eager_proposer(
+                    with _runtime_draft_continuation_query_width(
                         self,
-                        proposal_force_eager,
+                        execution_gamma,
                     ):
-                        with _runtime_eager_dispatch(
+                        with _runtime_eager_proposer(
                             self,
                             proposal_force_eager,
                         ):
-                            result = _run_with_runtime_gamma(
+                            with _runtime_eager_dispatch(
                                 self,
-                                execution_gamma,
-                                original_propose,
-                                *args,
-                                **proposal_kwargs,
-                            )
+                                proposal_force_eager,
+                            ):
+                                result = _run_with_runtime_gamma(
+                                    self,
+                                    execution_gamma,
+                                    original_propose,
+                                    *args,
+                                    **proposal_kwargs,
+                                )
                 if execution_gamma != requested_gamma:
                     result = result[:, :requested_gamma]
                 self._vspec_adaptive_previous_proposal_gamma = requested_gamma
@@ -1528,10 +1830,14 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 "_nanoparl_uniform_decode_query_lens",
                 (self.uniform_decode_query_len,),
             )
-            self._nanoparl_uniform_decode_query_lens = _adaptive_target_query_lens(
+            adaptive_query_widths = _adaptive_capture_query_lens(
                 existing_widths,
                 settings.adaptive_max_gamma,
+                settings.method,
             )
+            # Serial Draft's gamma + 2 descriptor passes through the shared
+            # Target capture wrapper, so the helper includes that width too.
+            self._nanoparl_uniform_decode_query_lens = adaptive_query_widths
             if measure_step_latency:
                 self._vspec_adaptive_pending_measurements = deque()
 
@@ -1837,13 +2143,14 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             acl_graph_module._graph_params = graph_params_by_width[query_width]
             try:
                 with _runner_query_width(self, query_width):
-                    return original_warmup_and_capture(
-                        self,
-                        desc,
-                        cudagraph_runtime_mode,
-                        *args,
-                        **kwargs,
-                    )
+                    with _draft_capture_query_width(self, query_width):
+                        return original_warmup_and_capture(
+                            self,
+                            desc,
+                            cudagraph_runtime_mode,
+                            *args,
+                            **kwargs,
+                        )
             finally:
                 acl_graph_module._graph_params = base_graph_params
 
@@ -2020,6 +2327,23 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                         cudagraph_mode,
                         self._nanoparl_uniform_decode_query_lens,
                     )
+                    if settings.method == "draft_model":
+                        from ..backends.draft import (
+                            _add_draft_continuation_graph_keys,
+                        )
+
+                        graph_min_gamma = max(1, settings.adaptive_min_gamma)
+                        _add_draft_continuation_graph_keys(
+                            dispatcher,
+                            cudagraph_mode,
+                            settings.adaptive_max_gamma + 1,
+                            query_lens=tuple(
+                                range(
+                                    graph_min_gamma + 2,
+                                    settings.adaptive_max_gamma + 3,
+                                )
+                            ),
+                        )
                     return None
                 result = original_initialize(cudagraph_mode, uniform_decode_query_len)
                 _add_adaptive_decode_graph_keys(
