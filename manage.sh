@@ -19,28 +19,22 @@ usage() {
   cat <<'EOF'
 Usage:
   ./manage.sh [--python PATH] [--dry-run] install [--editable] [--wheel PATH] [--enable]
-      [--model-dir PATH] [--model-registry PATH]
-      [--model-download|--no-model-download|--skip-model-setup]
   ./manage.sh [--python PATH] [--dry-run] upgrade --version VERSION [--enable]
   ./manage.sh [--python PATH] [--dry-run] upgrade --wheel PATH [--enable]
   ./manage.sh [--python PATH] [--dry-run] rollback --version VERSION [--enable]
   ./manage.sh [--python PATH] [--dry-run] rollback --wheel PATH [--enable]
   ./manage.sh [--python PATH] [--dry-run] uninstall
   ./manage.sh [--python PATH] [--dry-run] list [--json]
-  ./manage.sh [--python PATH] [--dry-run] models [--model-dir PATH]
-      [--model-registry PATH] [--no-download]
   ./manage.sh [--python PATH] [--dry-run] validate|inspect|check|status|plan|render
   ./manage.sh [--python PATH] [--dry-run] enable|disable|forget
   ./manage.sh [--python PATH] [--dry-run] run [--dry-run] -- COMMAND [ARG ...]
 
 Commands:
   install     Install the current release wheel, or source with --editable.
-              Ask before downloading default Draft/EAGLE models.
   upgrade     Upgrade to an exact package version or local wheel.
   rollback    Force-reinstall an exact package version or local wheel.
   uninstall   Disable and forget Manager intent, then uninstall only vSpec.
   list        List installed Extension Bundles.
-  models      Detect/download default models and write the runtime registry.
   validate    Validate the static vSpec manifest.
   check       Check host and protocol compatibility.
   plan        Preview the lifecycle and launch actions.
@@ -56,8 +50,6 @@ Environment overrides:
   PYTHON_BIN              Python interpreter whose environment is managed.
   VSPEC_MANAGER_BIN       vllm-hust-ext executable to use.
   VSPEC_MANAGE_DRY_RUN=1  Print commands without changing the environment.
-  HUST_VSPEC_MODEL_DIR    Default directory for downloaded models.
-  HUST_VSPEC_MODEL_REGISTRY  Override the model registry JSON path.
 EOF
 }
 
@@ -149,49 +141,6 @@ check_with_manager() {
   run "$manager" extension check "$EXTENSION_ID"
 }
 
-setup_models() {
-  local model_dir=$1
-  local registry=$2
-  local download=$3
-  local allow_missing=$4
-  local -a arguments=()
-  if [[ -n "$model_dir" ]]; then
-    arguments+=(--model-dir "$model_dir")
-  fi
-  if [[ -n "$registry" ]]; then
-    arguments+=(--registry "$registry")
-  fi
-  if [[ "$download" != 1 ]]; then
-    arguments+=(--no-download)
-  fi
-  if [[ "$allow_missing" == 1 ]]; then
-    arguments+=(--allow-missing)
-  fi
-  run "$PYTHON_BIN" -m vllm_hust_vspec.model_store "${arguments[@]}"
-}
-
-confirm_model_download() {
-  local answer
-  if [[ "$DRY_RUN" == 1 ]]; then
-    printf '%s\n' \
-      'vSpec manager: dry-run defaults to no model download; use --model-download to preview it'
-    return 1
-  fi
-  if [[ ! -t 0 ]]; then
-    printf '%s\n' \
-      'vSpec manager: non-interactive install will not download models.' \
-      'Re-run with --model-download or use vllm-hust-vspec-models later.' >&2
-    return 1
-  fi
-  printf '%s' \
-    'Download missing default Draft and EAGLE models now? [y/N] ' >&2
-  IFS= read -r answer || answer=
-  case "$answer" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 install_release() {
   local operation=$1
   local version=$2
@@ -251,10 +200,6 @@ case "$COMMAND" in
     EDITABLE=0
     ENABLE=0
     WHEEL_PATH=
-    MODEL_DIR=
-    MODEL_REGISTRY=
-    MODEL_DOWNLOAD=ask
-    MODEL_SETUP=1
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --editable)
@@ -269,28 +214,6 @@ case "$COMMAND" in
           [[ $# -ge 2 ]] || die "--wheel requires a path"
           WHEEL_PATH=$2
           shift 2
-          ;;
-        --model-dir)
-          [[ $# -ge 2 ]] || die "--model-dir requires a path"
-          MODEL_DIR=$2
-          shift 2
-          ;;
-        --model-registry)
-          [[ $# -ge 2 ]] || die "--model-registry requires a path"
-          MODEL_REGISTRY=$2
-          shift 2
-          ;;
-        --no-model-download)
-          MODEL_DOWNLOAD=0
-          shift
-          ;;
-        --model-download)
-          MODEL_DOWNLOAD=1
-          shift
-          ;;
-        --skip-model-setup)
-          MODEL_SETUP=0
-          shift
           ;;
         *)
           die "unknown install option: $1"
@@ -312,20 +235,6 @@ case "$COMMAND" in
       [[ -f "$WHEEL_PATH" ]] || die \
         "release wheel not found: $WHEEL_PATH (build it or use --editable)"
       run "$PYTHON_BIN" -m pip install --force-reinstall --no-deps "$WHEEL_PATH"
-    fi
-    if [[ "$MODEL_SETUP" == 1 ]]; then
-      if [[ "$MODEL_DOWNLOAD" == ask ]]; then
-        if confirm_model_download; then
-          MODEL_DOWNLOAD=1
-        else
-          MODEL_DOWNLOAD=0
-        fi
-      fi
-      if [[ "$MODEL_DOWNLOAD" == 1 ]]; then
-        setup_models "$MODEL_DIR" "$MODEL_REGISTRY" 1 0
-      else
-        setup_models "$MODEL_DIR" "$MODEL_REGISTRY" 0 1
-      fi
     fi
     inspect_if_available
     if [[ "$ENABLE" == 1 ]]; then
@@ -396,33 +305,6 @@ case "$COMMAND" in
     fi
     MANAGER_BIN=$(require_manager)
     run "$MANAGER_BIN" extension list "$@"
-    ;;
-  models)
-    MODEL_DIR=
-    MODEL_REGISTRY=
-    MODEL_DOWNLOAD=1
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --model-dir)
-          [[ $# -ge 2 ]] || die "--model-dir requires a path"
-          MODEL_DIR=$2
-          shift 2
-          ;;
-        --model-registry)
-          [[ $# -ge 2 ]] || die "--model-registry requires a path"
-          MODEL_REGISTRY=$2
-          shift 2
-          ;;
-        --no-download)
-          MODEL_DOWNLOAD=0
-          shift
-          ;;
-        *)
-          die "unknown models option: $1"
-          ;;
-      esac
-    done
-    setup_models "$MODEL_DIR" "$MODEL_REGISTRY" "$MODEL_DOWNLOAD" 0
     ;;
   validate|inspect|check|status|plan|render|enable|disable|forget)
     [[ $# -eq 0 ]] || die "$COMMAND does not accept additional arguments"

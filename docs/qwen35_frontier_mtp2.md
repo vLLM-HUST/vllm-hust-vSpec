@@ -1,8 +1,12 @@
-# Qwen3.5 Frontier MTP2 验证
+# Qwen3.5 Frontier 固定 MTP2 历史验证
 
 ## 结论
 
-vSpec 已完成 Qwen3.5-35B-A3B Frontier 固定 MTP2 路径的本地适配。服务保持
+本报告记录 vSpec 0.14.2 的固定 MTP2 实验，不代表当前默认启动参数。当前版本默认开启
+自动 gamma（候选 `2/4/6`）和自动 refill；B16 命令见
+[`qwen35_mtp2_b16_graph_benchmark_commands.md`](qwen35_mtp2_b16_graph_benchmark_commands.md)。
+
+vSpec 已完成 Qwen3.5-35B-A3B Frontier 固定 MTP2 路径的本地适配。历史服务保持
 `TP2 + APC + MTP2 + async scheduling + FULL_AND_PIECEWISE + 256K`，没有切换到
 EAGLE，也没有通过修改 gamma 获得结果。
 
@@ -67,19 +71,22 @@ vllm-hust-vspec \
 
 ## 回归命令
 
-以下命令会依次运行 target-only 和 MTP2，检查 token 数一致、校验图日志，并在加速低于
-`1.10x` 时返回非零状态：
+当前脚本默认依次运行 target-only 和自适应 MTP2，检查 token 数一致、校验图日志，并在
+加速低于 `1.10x` 时返回非零状态：
 
 ```bash
-MAX_CONCURRENCY=4 \
-  scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh pair
+scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh pair
 ```
 
 也可以分别运行：
 
 ```bash
 scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh baseline
-scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh mtp2
+scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh adaptive
+
+# 复现本报告的历史固定 gamma=2、C4 口径
+ADAPTIVE_SPECULATION=0 SPEC_GAMMA=2 MAX_CONCURRENCY=4 \
+  scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh pair
 ```
 
 默认测试为 GSM8K 固定顺序前 200 条、输出长度 256、`request-rate=inf`、

@@ -37,6 +37,7 @@ adaptive_online_window = 32
 adaptive_online_exploration = 0.0
 adaptive_online_warmup_samples = 2
 adaptive_online_warmup_return = "best"
+adaptive_refill_batch = 4
 adaptive_trace = false
 graph_event_ordering = true
 eagle_spec_metadata_cache = true

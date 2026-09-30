@@ -18,42 +18,42 @@ Extension Manager ID：`org.vllm-hust.vspec`。插件遵循 Manifest
 |---|---|---|---|
 | `draft` | `draft_model` | Qwen2.5-14B-Instruct | Qwen2.5-0.5B-Instruct |
 | `eagle` | `eagle` | Qwen2.5-14B-Instruct | Eagle-Qwen2.5-14B-Instruct |
-| `eagle-relaxed` | `eagle` | Qwen2.5-14B-Instruct | Eagle-Qwen2.5-14B-Instruct |
+| `qwen35-eagle3` | `eagle3` | Qwen3.5-35B-A3B | Qwen3.5-35B-A3B-Eagle3-Specforge |
 | `qwen35-frontier-mtp2` | `mtp` | Qwen3.5-35B-A3B | checkpoint 内置 MTP head |
 
-`eagle-relaxed` 是显式性能/质量折中预设，会使用 top-K relaxed acceptance，
-输出不保证与严格 greedy EAGLE 一致。普通 `eagle` 始终默认 top-1 严格验收。
+`qwen35-eagle3` 默认开启 `1~6` 自动 gamma 和在线 cohort refill，并使用 TP2、EP2、
+`FULL_AND_PIECEWISE` Graph。Target 与 EAGLE3 Drafter 都必须由用户提前下载或挂载。
 
 Qwen3.5 MTP 使用宿主 vLLM-HUST/vLLM-Ascend-HUST 的原生实现。`--method mtp`
-不需要 `--draft-model`，未显式设置 `--gamma` 时默认使用 MTP2；文本数据可配合
-`--language-model-only` 跳过视觉编码器。MTP 当前采用固定预算，不启用 vSpec Adaptive。
-默认的 `--mtp-strict-graph` 会在任一 MTP decode 批次未命中完整图时终止服务，避免
-静默 eager 回退污染性能结果。
+不需要 `--draft-model`；MTP2 表示 checkpoint 内置的两 token MTP head，运行时默认在
+`2/4/6` 三个投机预算间在线选择。自动 gamma 和 cohort refill 默认开启，可分别通过
+`--no-adaptive-speculation` 和对应环境变量显式关闭。文本数据可配合
+`--language-model-only` 跳过视觉编码器。默认的 `--mtp-strict-graph` 会在任一 MTP
+decode 批次未命中完整图时终止服务，避免静默 eager 回退污染性能结果。
 
 Qwen3.5 的 Ascend 自定义算子必须使用与 `vllm-ascend` 二进制构建时一致的 CANN
 运行时。本仓库的验证环境为 CANN 9.1；若误加载 CANN 9.0，会出现
 `npu_gemma_rms_norm`、`moe_gating_top_k` 或 `npu_causal_conv1d_custom` 缺失，
 这不是模型权重问题。Frontier 固定协议、图模式证据、并发边界和 GSM8K 结果见
 [`docs/qwen35_frontier_mtp2.md`](docs/qwen35_frontier_mtp2.md)。可直接交付给测试人员的
-模型准备、数据集物化、服务启动和 MTP2 GSM8K 压测命令见
-[`docs/qwen35_frontier_mtp2_gsm8k_commands.md`](docs/qwen35_frontier_mtp2_gsm8k_commands.md)。
+模型准备、服务启动和 B16 MTP2 GSM8K 压测命令见
+[`docs/qwen35_mtp2_b16_graph_benchmark_commands.md`](docs/qwen35_mtp2_b16_graph_benchmark_commands.md)。
 
 ```bash
 # Qwen3.5-35B-A3B Frontier：TP2 + APC + async +
-# FULL_AND_PIECEWISE + 256K + fixed MTP2
+# FULL_AND_PIECEWISE + 256K + adaptive MTP2 (gamma 2/4/6 + refill)
 vllm-hust-vspec \
   --protocol qwen35-frontier-mtp2 \
   --target-model /workspace/models/Qwen3.5-35B-A3B \
   --device 0,1
 
-# 同配置 GSM8K target-only / MTP2 配对回归；默认门槛 1.10x
+# 同配置 GSM8K target-only / adaptive MTP2 配对回归；默认门槛 1.10x
 scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh pair
 ```
 
-当前固定协议在 GSM8K N200、输出长度 256、客户端并发 4 下从
-`171.47 tok/s` 提升到 `235.44 tok/s`，即 `1.373x`。并发 16 时 target 已接近饱和，
-MTP2 不再有收益；完整结果不能外推到未测试的负载。该协议会拒绝覆盖 method、
-gamma、TP、256K、APC、async 或 graph mode，避免启动参数静默偏离验证条件。
+当前协议固定 method、gamma 上限、TP、256K、APC、async 和 graph mode，避免启动参数
+静默偏离验证条件；控制器在上限内自动选择 gamma。历史固定 gamma=2 的 C4 结果为
+`1.373x`，不能作为当前自适应 B16 配置的新性能结论，正式发布前需按精简命令重新回归。
 
 Agent 长上下文负载可使用 AgentX 256K 官方闭环回放。插件提供 target-only/MTP2
 配置模板和 SPEED-Bench 强制验收长度入口；指标解释、公平对照要求与当前证据缺口见
@@ -92,6 +92,7 @@ vllm-hust-vSpec/
 │   ├── qwen25-14b-eagle.toml
 │   ├── qwen25-14b-eagle-arc-easy.toml
 │   ├── qwen25-14b-eagle-relaxed.toml
+│   ├── qwen35-35b-a3b-eagle3.toml
 │   ├── qwen35-35b-a3b-mtp2.toml
 │   └── qwen35-35b-a3b-frontier-mtp2.toml
 ├── profiles/
@@ -159,51 +160,26 @@ cd /root/data/vllm-hust-vSpec
 `vllm_hust.extension_bundles` entry point。默认安装不会自动启用；`--enable` 会在
 Manager 完成静态发现和兼容性检查后显式启用。
 
-`manage.sh install` 和 `install.sh` 会询问是否准备两个默认 Drafter，默认回答为不下载：
+安装器不检测、不询问、也不下载任何模型。用户需要自行下载或挂载目标模型与 Drafter；
+只有在实际启动对应投机方法时，vSpec 才检查显式本地路径，并在缺失时列出所需模型和
+`--draft-model` 参数。常用模型如下：
 
 | 方法 | 默认仓库 | 默认目录名 |
 |---|---|---|
 | Draft | `Qwen/Qwen2.5-0.5B-Instruct` | `Qwen2.5-0.5B-Instruct` |
 | EAGLE | `Zjcxy-SmartAI/Eagle-Qwen2.5-14B-Instruct` | `Eagle-Qwen2.5-14B-Instruct` |
 
-选择下载后，安装器先检查环境变量、已有登记和 `/data/shared-models` 下的模型，并校验
-`config.json`、architecture、非空权重及 Draft tokenizer；只在没有可用副本时通过
-`huggingface_hub` 下载已验证 revision。选择不下载时，安装仍会成功，并只登记已经存在
-且校验通过的模型。结果写入
-`${XDG_CONFIG_HOME:-$HOME/.config}/vllm-hust-vspec/models.json`。下载根目录优先使用
-可写的 `/data/shared-models`，否则使用
-`${XDG_DATA_HOME:-$HOME/.local/share}/vllm-hust-vspec/models`。
-
-```bash
-# 自定义下载目录和登记文件
-./manage.sh install --editable \
-  --model-download \
-  --model-dir /models/vspec \
-  --model-registry /etc/vllm-hust-vspec/models.json
-
-# 非交互环境显式下载
-./manage.sh install --editable --model-download
-
-# 只登记已有模型，不下载；缺少的模型不会阻止插件安装
-./manage.sh install --editable --no-model-download
-
-# 单独补做模型准备
-./manage.sh models
-```
-
-`HUST_VSPEC_DRAFT_MODEL`、`HUST_VSPEC_EAGLE_MODEL`、`HUST_VSPEC_MODEL_DIR` 和
-`HUST_VSPEC_MODEL_REGISTRY` 可覆盖对应位置。标准 `pip install` 不执行联网的
-post-install hook；使用这种安装方式后需另行执行 `vllm-hust-vspec-models`。
-确实不希望安装器处理模型时可传 `--skip-model-setup`。
+Qwen3.5 MTP2 只需要 `Qwen/Qwen3.5-35B-A3B`，MTP head 已包含在 target checkpoint
+中。Draft/EAGLE 可显式传入本地路径；为了兼容已有部署，也可用
+`HUST_VSPEC_DRAFT_MODEL`、`HUST_VSPEC_EAGLE_MODEL`、`HUST_VSPEC_MODEL_DIR` 或
+`HUST_VSPEC_MODEL_REGISTRY` 解析已经存在的本地模型。这些入口均不会触发联网下载。
 
 正式 wheel 安装与 Extension Manager 静态发现：
 
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.14.2-py3-none-any.whl
-# 可选：需要默认 Draft/EAGLE 模型时再执行
-vllm-hust-vspec-models
+python -m pip install /path/to/vllm_hust_vspec-0.14.3-py3-none-any.whl
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
 
@@ -307,10 +283,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.14.2 --enable
+./manage.sh upgrade --version 0.14.3 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.14.2-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.14.3-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -334,12 +310,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.14.2` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由 `v0.14.3` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.14.2
+export VSPEC_RELEASE_CONFIRM=0.14.3
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```
@@ -362,6 +338,9 @@ Token 只从环境或 CI Secret 读取，不写入源码、配置和日志。当
 
 # 明确选择近似验收配置
 ./run.sh eagle-relaxed
+
+# Qwen3.5-35B-A3B EAGLE3，默认自动 gamma 1~6 和自动 refill
+./run.sh qwen35-eagle3
 ```
 
 预设后可继续传入参数覆盖 TOML：

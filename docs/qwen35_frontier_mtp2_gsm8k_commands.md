@@ -1,4 +1,8 @@
-# Qwen3.5 Frontier MTP2 GSM8K 测试命令
+# Qwen3.5 Frontier 固定 MTP2 C4 历史测试命令
+
+> 本文档保留 vSpec 0.14.2 固定 gamma=2、并发 4 的历史复现实验。当前默认的自动
+> gamma、自动 refill、并发 16 命令见
+> [`qwen35_mtp2_b16_graph_benchmark_commands.md`](qwen35_mtp2_b16_graph_benchmark_commands.md)。
 
 ## 需要的模型
 

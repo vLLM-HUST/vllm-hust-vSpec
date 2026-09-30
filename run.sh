@@ -38,6 +38,10 @@ case "$PRESET" in
     DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen3-8b-eagle3.toml
     shift
     ;;
+  qwen35-eagle3)
+    DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen35-35b-a3b-eagle3.toml
+    shift
+    ;;
   *)
     DEFAULT_CONFIG=$PLUGIN_DIR/configs/qwen25-14b-05b.toml
     ;;

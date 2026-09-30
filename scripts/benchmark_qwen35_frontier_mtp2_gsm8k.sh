@@ -3,14 +3,26 @@
 set -Eeuo pipefail
 
 MODE=${1:-pair}
-SPEC_GAMMA=${SPEC_GAMMA:-2}
-if [[ ! "${SPEC_GAMMA}" =~ ^[1-4]$ ]]; then
-  echo "SPEC_GAMMA must be 1, 2, 3, or 4" >&2
+SPEC_GAMMA=${SPEC_GAMMA:-6}
+ADAPTIVE_SPECULATION=${ADAPTIVE_SPECULATION:-1}
+if [[ ! "${SPEC_GAMMA}" =~ ^(2|4|6)$ ]]; then
+  echo "SPEC_GAMMA must be 2, 4, or 6" >&2
   exit 2
 fi
-SPEC_MODE="mtp${SPEC_GAMMA}"
+if [[ "${ADAPTIVE_SPECULATION}" == 1 ]]; then
+  if [[ "${SPEC_GAMMA}" != 6 ]]; then
+    echo "adaptive MTP2 uses SPEC_GAMMA=6 as the 2/4/6 search upper bound" >&2
+    exit 2
+  fi
+  SPEC_MODE=adaptive
+elif [[ "${ADAPTIVE_SPECULATION}" == 0 ]]; then
+  SPEC_MODE="mtp${SPEC_GAMMA}"
+else
+  echo "ADAPTIVE_SPECULATION must be 0 or 1" >&2
+  exit 2
+fi
 if [[ "${MODE}" != "pair" && "${MODE}" != "baseline" && "${MODE}" != "${SPEC_MODE}" ]]; then
-  echo "usage: SPEC_GAMMA=${SPEC_GAMMA} $0 {pair|baseline|${SPEC_MODE}}" >&2
+  echo "usage: ADAPTIVE_SPECULATION=${ADAPTIVE_SPECULATION} SPEC_GAMMA=${SPEC_GAMMA} $0 {pair|baseline|${SPEC_MODE}}" >&2
   exit 2
 fi
 
@@ -22,19 +34,23 @@ RUN_ID=${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}
 if [[ "${MODE}" == "pair" ]]; then
   PAIR_DIR=${OUTPUT_DIR:-${ROOT}/benchmark_results/qwen35_frontier_mtp2_gsm8k/${RUN_ID}-pair}
   mkdir -p "${PAIR_DIR}"
-  OUTPUT_DIR="${PAIR_DIR}/baseline" RUN_ID="${RUN_ID}" "$0" baseline
-  OUTPUT_DIR="${PAIR_DIR}/${SPEC_MODE}" RUN_ID="${RUN_ID}" "$0" "${SPEC_MODE}"
+  OUTPUT_DIR="${PAIR_DIR}/baseline" RUN_ID="${RUN_ID}" \
+    SPEC_GAMMA="${SPEC_GAMMA}" ADAPTIVE_SPECULATION="${ADAPTIVE_SPECULATION}" \
+    "$0" baseline
+  OUTPUT_DIR="${PAIR_DIR}/${SPEC_MODE}" RUN_ID="${RUN_ID}" \
+    SPEC_GAMMA="${SPEC_GAMMA}" ADAPTIVE_SPECULATION="${ADAPTIVE_SPECULATION}" \
+    "$0" "${SPEC_MODE}"
   "${VENV}/bin/python" - \
     "${PAIR_DIR}/baseline/gsm8k.json" \
     "${PAIR_DIR}/${SPEC_MODE}/gsm8k.json" \
     "${PAIR_DIR}/comparison.json" \
-    "${MIN_SPEEDUP}" "${SPEC_GAMMA}" <<'PY'
+    "${MIN_SPEEDUP}" "${SPEC_GAMMA}" "${ADAPTIVE_SPECULATION}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-baseline_path, mtp_path, output_path, minimum, gamma = sys.argv[1:]
-label = f"mtp{gamma}"
+baseline_path, mtp_path, output_path, minimum, gamma, adaptive = sys.argv[1:]
+label = "adaptive_mtp2" if adaptive == "1" else f"mtp{gamma}"
 baseline = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
 mtp = json.loads(Path(mtp_path).read_text(encoding="utf-8"))
 if baseline["completed"] != mtp["completed"]:
@@ -51,6 +67,7 @@ summary = {
     "baseline_output_tokens": baseline["total_output_tokens"],
     f"{label}_output_tokens": mtp["total_output_tokens"],
     "gamma": int(gamma),
+    "adaptive_speculation": adaptive == "1",
     "speedup": speedup,
     "minimum_speedup": float(minimum),
     "passed": speedup >= float(minimum),
@@ -74,10 +91,10 @@ NPU_IDS=${NPU_IDS:-0,1}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-18185}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
-MAX_CONCURRENCY=${MAX_CONCURRENCY:-4}
+MAX_CONCURRENCY=${MAX_CONCURRENCY:-16}
 MTP_LOCAL_ARGMAX=${MTP_LOCAL_ARGMAX:-0}
 MTP_GRAPH_TRACE=${MTP_GRAPH_TRACE:-0}
-MTP_COHORT_REFILL=${MTP_COHORT_REFILL:-0}
+MTP_COHORT_REFILL=${MTP_COHORT_REFILL:-1}
 MTP_COHORT_REFILL_THRESHOLD=${MTP_COHORT_REFILL_THRESHOLD:-8}
 ENABLE_PROFILE=${ENABLE_PROFILE:-0}
 ASCEND_ADDITIONAL_CONFIG=${ASCEND_ADDITIONAL_CONFIG:-'{"enable_cpu_binding":true}'}
@@ -174,12 +191,13 @@ else
     1) MTP_ARGMAX_FLAG=--mtp-local-argmax-reduction ;;
     *) echo "MTP_LOCAL_ARGMAX must be 0 or 1" >&2; exit 2 ;;
   esac
-  if [[ "${SPEC_GAMMA}" == 2 ]]; then
+  if [[ "${ADAPTIVE_SPECULATION}" == 1 ]]; then
     FRONTIER_OPTIONS=(--protocol qwen35-frontier-mtp2)
   else
     FRONTIER_OPTIONS=(
       --config "${ROOT}/configs/qwen35-35b-a3b-frontier-mtp2.toml"
       --gamma "${SPEC_GAMMA}"
+      --no-adaptive-speculation
     )
   fi
   SERVER_CMD=(
@@ -240,8 +258,8 @@ print_command() {
 
 print_command "${SERVER_CMD[@]}" >"${OUTPUT_DIR}/serve_cmd.txt"
 print_command "${BENCHMARK_COMMON[@]}" >"${OUTPUT_DIR}/benchmark_common_cmd.txt"
-printf 'MODE=%s\nSPEC_GAMMA=%s\nMAX_NUM_SEQS=%s\nMAX_CONCURRENCY=%s\nMTP_LOCAL_ARGMAX=%s\nMTP_GRAPH_TRACE=%s\nMTP_COHORT_REFILL=%s\nMTP_COHORT_REFILL_THRESHOLD=%s\nENABLE_PROFILE=%s\nASCEND_ADDITIONAL_CONFIG=%s\n' \
-  "${MODE}" "${SPEC_GAMMA}" "${MAX_NUM_SEQS}" "${MAX_CONCURRENCY}" "${MTP_LOCAL_ARGMAX}" \
+printf 'MODE=%s\nSPEC_GAMMA=%s\nADAPTIVE_SPECULATION=%s\nMAX_NUM_SEQS=%s\nMAX_CONCURRENCY=%s\nMTP_LOCAL_ARGMAX=%s\nMTP_GRAPH_TRACE=%s\nMTP_COHORT_REFILL=%s\nMTP_COHORT_REFILL_THRESHOLD=%s\nENABLE_PROFILE=%s\nASCEND_ADDITIONAL_CONFIG=%s\n' \
+  "${MODE}" "${SPEC_GAMMA}" "${ADAPTIVE_SPECULATION}" "${MAX_NUM_SEQS}" "${MAX_CONCURRENCY}" "${MTP_LOCAL_ARGMAX}" \
   "${MTP_GRAPH_TRACE}" "${MTP_COHORT_REFILL}" "${MTP_COHORT_REFILL_THRESHOLD}" \
   "${ENABLE_PROFILE}" "${ASCEND_ADDITIONAL_CONFIG}" >"${OUTPUT_DIR}/benchmark_env.txt"
 

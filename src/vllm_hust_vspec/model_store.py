@@ -1,12 +1,10 @@
-"""Install-time discovery and runtime resolution of bundled default models."""
+"""Runtime discovery and validation of optional local speculative models."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,7 +17,7 @@ CONTAINER_MODEL_DIR = Path("/model")
 
 
 class ModelStoreError(ValueError):
-    """Raised when a configured or downloaded default model is unusable."""
+    """Raised when configured local model metadata is unusable."""
 
 
 @dataclass(frozen=True)
@@ -193,140 +191,22 @@ def resolve_default_model(
     registry_path: Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> Path | None:
-    """Resolve the install-time default for Draft or EAGLE."""
+    """Resolve an optional local default for Draft or EAGLE."""
     spec = _spec_for_method(method)
     if spec is None:
         return None
     return find_model(spec, registry_path=registry_path, environment=environment)
 
 
-def _write_registry(path: Path, resolved: Mapping[str, Path]) -> None:
-    document = {
-        "schema_version": REGISTRY_SCHEMA_VERSION,
-        "models": {
-            spec.key: {
-                "method": spec.method,
-                "path": str(resolved[spec.key]),
-                "repo_id": spec.repo_id,
-                "revision": spec.revision,
-            }
-            for spec in DEFAULT_MODEL_SPECS
-            if spec.key in resolved
-        },
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        delete=False,
-    ) as temporary:
-        json.dump(document, temporary, indent=2, sort_keys=True)
-        temporary.write("\n")
-        temporary_path = Path(temporary.name)
-    temporary_path.replace(path)
-
-
-def _download_model(spec: ModelSpec, destination: Path) -> None:
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError as exc:
-        raise ModelStoreError(
-            "huggingface_hub is required to download default models; install it in the "
-            "selected vLLM environment"
-        ) from exc
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=spec.repo_id,
-        revision=spec.revision,
-        local_dir=destination,
+def missing_model_message(method: str) -> str:
+    """Describe how to provide a required local Draft or EAGLE model."""
+    spec = _spec_for_method(method)
+    if spec is None:
+        return f"--draft-model is required for --method {method}"
+    common_path = CONTAINER_MODEL_DIR / spec.directory_name
+    return (
+        f"no usable local model was found for --method {method}. "
+        f"Download or mount {spec.repo_id}, then pass --draft-model PATH "
+        f"(common container path: {common_path}) or set {spec.override_environment}. "
+        "vSpec installation does not download models."
     )
-
-
-def bootstrap_default_models(
-    *,
-    model_dir: Path | None = None,
-    registry_path: Path | None = None,
-    download: bool = True,
-    allow_missing: bool = False,
-    environment: Mapping[str, str] | None = None,
-) -> dict[str, Path]:
-    values = os.environ if environment is None else environment
-    root = default_model_dir(values) if model_dir is None else model_dir.expanduser()
-    registry = (
-        default_registry_path(values) if registry_path is None else registry_path.expanduser()
-    )
-    resolved: dict[str, Path] = {}
-    for spec in DEFAULT_MODEL_SPECS:
-        model = find_model(
-            spec,
-            model_dir=root,
-            registry_path=registry,
-            environment=values,
-        )
-        if model is None:
-            if not download:
-                if allow_missing:
-                    print(
-                        f"Skipping missing {spec.key} model ({spec.repo_id}); "
-                        "configure it before using this method",
-                        flush=True,
-                    )
-                    continue
-                raise ModelStoreError(
-                    f"no usable {spec.key} model found; expected {spec.repo_id} under {root}"
-                )
-            destination = root / spec.directory_name
-            print(f"Downloading {spec.repo_id} to {destination}", flush=True)
-            _download_model(spec, destination)
-            reason = validate_model(destination, spec)
-            if reason is not None:
-                raise ModelStoreError(
-                    f"downloaded {spec.repo_id} is unusable at {destination}: {reason}"
-                )
-            model = destination.resolve()
-        else:
-            print(f"Using {spec.key} model at {model}", flush=True)
-        resolved[spec.key] = model
-    _write_registry(registry, resolved)
-    print(f"Wrote model registry to {registry}", flush=True)
-    return resolved
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="vllm-hust-vspec-models",
-        description="Detect or download the default vSpec Draft and EAGLE models.",
-    )
-    parser.add_argument("--model-dir", type=Path)
-    parser.add_argument("--registry", type=Path)
-    parser.add_argument(
-        "--download",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Download missing models from Hugging Face (enabled by default).",
-    )
-    parser.add_argument(
-        "--allow-missing",
-        action="store_true",
-        help="Write entries for models that already exist without failing on missing models.",
-    )
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    options = build_parser().parse_args(argv)
-    try:
-        bootstrap_default_models(
-            model_dir=options.model_dir,
-            registry_path=options.registry,
-            download=options.download,
-            allow_missing=options.allow_missing,
-        )
-    except ModelStoreError as exc:
-        raise SystemExit(f"vSpec model setup: {exc}") from exc
-
-
-if __name__ == "__main__":
-    main()

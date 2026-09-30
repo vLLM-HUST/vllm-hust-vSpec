@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import METHOD_ALIASES, PluginSettings
-from .model_store import ModelStoreError, resolve_default_model
+from .model_store import ModelStoreError, missing_model_message, resolve_default_model
 
 PLUGIN_ENTRY_POINT = "vspec"
 ASCEND_PLATFORM_PLUGIN = "ascend"
@@ -44,7 +44,7 @@ SERVE_PROTOCOLS: dict[str, dict[str, Any]] = {
     "qwen35-frontier-mtp2": {
         "method": "mtp",
         "served_model_name": "qwen3.5-35b-a3b-frontier-mtp2",
-        "gamma": 2,
+        "gamma": 6,
         "max_num_seqs": 16,
         "max_num_batched_tokens": 8192,
         "max_model_len": 262144,
@@ -64,7 +64,15 @@ SERVE_PROTOCOLS: dict[str, dict[str, Any]] = {
         "language_model_only": True,
         "capture_policy": "exact",
         "disable_log_stats": False,
-        "adaptive_speculation": False,
+        "adaptive_speculation": True,
+        "adaptive_policy": "online",
+        "adaptive_min_gamma": 2,
+        "adaptive_max_gamma_step": 2,
+        "adaptive_hysteresis": 0.03,
+        "adaptive_online_exploration": 0.0,
+        "adaptive_online_warmup_samples": 2,
+        "adaptive_online_warmup_return": "best",
+        "adaptive_refill_batch": 8,
         "mtp_strict_graph": True,
         "mtp_local_argmax_reduction": False,
         "extra_args": [
@@ -374,7 +382,7 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
     parser.add_argument(
         "--model-registry",
         type=Path,
-        help="Override the install-time default model registry.",
+        help="Read optional local Draft/EAGLE paths from this model registry.",
     )
     parser.add_argument(
         "--method",
@@ -386,7 +394,7 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
         "--gamma",
         type=positive_int,
         default=None,
-        help=("Maximum speculative tokens. Defaults to 2 for MTP and 4 for Draft/EAGLE methods."),
+        help=("Maximum speculative tokens. Defaults to 6 for MTP and 4 for Draft/EAGLE methods."),
     )
     parser.add_argument("--max-num-seqs", type=positive_int, default=128)
     parser.add_argument("--max-num-batched-tokens", type=positive_int, default=8192)
@@ -805,7 +813,15 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
     namespace = parser.parse_args(raw_args)
     namespace.method = METHOD_ALIASES[namespace.method]
     if namespace.gamma is None:
-        namespace.gamma = 2 if namespace.method == "mtp" else 4
+        namespace.gamma = 6 if namespace.method == "mtp" else 4
+    if namespace.method == "mtp":
+        if "--adaptive-min-gamma" not in raw_args and "adaptive_min_gamma" not in defaults:
+            namespace.adaptive_min_gamma = 2
+        if (
+            "--adaptive-max-gamma-step" not in raw_args
+            and "adaptive_max_gamma_step" not in defaults
+        ):
+            namespace.adaptive_max_gamma_step = 2
     if namespace.synthetic_acceptance_length is not None and not (
         1.0 <= namespace.synthetic_acceptance_length <= namespace.gamma + 1
     ):
@@ -815,7 +831,7 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
     if namespace.protocol == "qwen35-frontier-mtp2":
         frontier_contract = {
             "method": "mtp",
-            "gamma": 2,
+            "gamma": 6,
             "tensor_parallel_size": 2,
             "max_model_len": 262144,
             "prefix_caching": True,
@@ -850,12 +866,7 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
         except ModelStoreError as exc:
             parser.error(str(exc))
         if default_model is None:
-            if namespace.method in {"draft_model", "eagle"}:
-                parser.error(
-                    f"no installed default model for {namespace.method}; run "
-                    "'./manage.sh models' or pass --draft-model"
-                )
-            parser.error(f"--draft-model is required for --method {namespace.method}")
+            parser.error(missing_model_message(namespace.method))
         namespace.draft_model = str(default_model)
     adaptive_explicitly_enabled = "--adaptive-speculation" in raw_args or (
         "adaptive_speculation" in defaults and bool(defaults["adaptive_speculation"])
@@ -864,17 +875,14 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
     if namespace.adaptive_profile is not None and not adaptive_policy_explicit:
         namespace.adaptive_policy = "profile"
     if namespace.method == "mtp" and namespace.adaptive_speculation:
-        if not (adaptive_explicitly_enabled or adaptive_policy_explicit):
-            namespace.adaptive_speculation = False
-        else:
-            if namespace.adaptive_policy != "online":
-                parser.error("adaptive MTP supports only --adaptive-policy online")
-            if namespace.adaptive_min_gamma < 2:
-                parser.error("adaptive MTP requires --adaptive-min-gamma >= 2")
-            if namespace.adaptive_min_gamma % 2 or namespace.gamma % 2:
-                parser.error("adaptive MTP gamma candidates must be multiples of 2")
-            if namespace.adaptive_max_gamma_step < 2:
-                parser.error("adaptive MTP requires --adaptive-max-gamma-step >= 2")
+        if namespace.adaptive_policy != "online":
+            parser.error("adaptive MTP supports only --adaptive-policy online")
+        if namespace.adaptive_min_gamma < 2:
+            parser.error("adaptive MTP requires --adaptive-min-gamma >= 2")
+        if namespace.adaptive_min_gamma % 2 or namespace.gamma % 2:
+            parser.error("adaptive MTP gamma candidates must be multiples of 2")
+        if namespace.adaptive_max_gamma_step < 2:
+            parser.error("adaptive MTP requires --adaptive-max-gamma-step >= 2")
     if namespace.synthetic_acceptance_length is not None and namespace.adaptive_speculation:
         parser.error(
             "--synthetic-acceptance-length requires fixed gamma; pass --no-adaptive-speculation"
@@ -1221,6 +1229,10 @@ def build_environment(
         adaptive_entropy_scale=options.adaptive_entropy_scale,
     )
     environment.update(plugin_settings.as_environment())
+    if options.adaptive_speculation and options.method == "mtp":
+        environment.setdefault("HUST_VSPEC_MTP_COHORT_REFILL", "1")
+    if options.adaptive_speculation and options.method == "eagle3":
+        environment.setdefault("HUST_VSPEC_EAGLE3_COHORT_REFILL", "1")
     for name in DRAFT_ENVIRONMENT_NAMES:
         environment.pop(name, None)
     for name in EAGLE_ENVIRONMENT_NAMES:
@@ -1326,6 +1338,27 @@ def is_plugin_installed() -> bool:
     )
 
 
+def validate_local_model_paths(options: argparse.Namespace) -> None:
+    """Fail early for explicit local model paths that are not mounted."""
+    references = (("target", options.target_model), ("draft", options.draft_model))
+    for role, reference in references:
+        if not reference or not str(reference).startswith(("/", "./", "../", "~")):
+            continue
+        path = Path(reference).expanduser()
+        if path.is_dir():
+            continue
+        expected = (
+            "Qwen/Qwen3.5-35B-A3B"
+            if role == "target" and options.protocol == "qwen35-frontier-mtp2"
+            else f"the requested {role} model"
+        )
+        raise SystemExit(
+            f"vSpec: {role} model path does not exist or is not a directory: {path}. "
+            f"Download or mount {expected}, then retry with --{role}-model PATH. "
+            "vSpec does not download models during installation or launch."
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     options, configured_environment = parse_args(argv)
     command = build_vllm_command(options)
@@ -1333,11 +1366,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     if options.dry_run:
         plugin_environment = PluginSettings.from_environment(environment).as_environment()
         plugin_environment.update(
-            {name: environment[name] for name in EAGLE_ENVIRONMENT_NAMES if name in environment}
+            {
+                name: value
+                for name, value in environment.items()
+                if name.startswith(("HUST_VSPEC_", "VLLM_ASCEND_", "VSPEC_"))
+            }
         )
         print(json.dumps(plugin_environment, indent=2, sort_keys=True))
         print(shlex.join(command))
         return
+    validate_local_model_paths(options)
     if not is_plugin_installed():
         raise SystemExit("vspec entry point is not installed; run ./install.sh first")
     os.execvpe(command[0], command, environment)

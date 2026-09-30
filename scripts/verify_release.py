@@ -55,6 +55,11 @@ def verify_source() -> str:
         registrations.get(EXTENSION_ID) == "vllm_hust_vspec.manifests",
         "Bundle entry point does not target the manifests package",
     )
+    scripts = metadata["scripts"]
+    require(
+        "vllm-hust-vspec-models" not in scripts,
+        "release must not expose an automatic model download command",
+    )
     require((MANIFEST_DIR / "__init__.py").is_file(), "manifests package is missing")
     require(MANIFEST.is_file(), "0.2 manifest is missing")
     require(
@@ -134,6 +139,7 @@ def verify_sdist(path: Path, version: str) -> None:
         f"{prefix}/docs/arc_easy_regression.md",
         f"{prefix}/docs/agentx_256k_benchmark.md",
         f"{prefix}/docs/qwen35_frontier_mtp2.md",
+        f"{prefix}/docs/qwen35_mtp2_b16_graph_benchmark_commands.md",
         f"{prefix}/scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh",
         f"{prefix}/scripts/verify_release.py",
         f"{prefix}/src/vllm_hust_vspec/_version.py",

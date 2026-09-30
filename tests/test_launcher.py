@@ -77,6 +77,7 @@ from vllm_hust_vspec.cli import (
     generate_capture_sizes,
     load_config,
     parse_args,
+    validate_local_model_paths,
 )
 from vllm_hust_vspec.compatibility import (
     inspect_host_compatibility,
@@ -1361,8 +1362,8 @@ class LauncherTest(unittest.TestCase):
                     self.assertIn("--async-scheduling", command)
                     self.assertIn("--language-model-only", command)
 
-    def test_qwen35_frontier_protocol_is_fixed_mtp2_contract(self) -> None:
-        options, _ = parse_args(
+    def test_qwen35_frontier_protocol_defaults_to_adaptive_mtp2(self) -> None:
+        options, configured_environment = parse_args(
             [
                 "--protocol",
                 "qwen35-frontier-mtp2",
@@ -1374,7 +1375,7 @@ class LauncherTest(unittest.TestCase):
         )
 
         self.assertEqual(options.method, "mtp")
-        self.assertEqual(options.gamma, 2)
+        self.assertEqual(options.gamma, 6)
         self.assertEqual(options.tensor_parallel_size, 2)
         self.assertEqual(options.max_model_len, 262144)
         self.assertEqual(options.graph_mode, "full-and-piecewise")
@@ -1384,13 +1385,16 @@ class LauncherTest(unittest.TestCase):
         self.assertTrue(options.language_model_only)
         self.assertTrue(options.mtp_strict_graph)
         self.assertFalse(options.mtp_local_argmax_reduction)
-        self.assertFalse(options.adaptive_speculation)
+        self.assertTrue(options.adaptive_speculation)
+        self.assertEqual(options.adaptive_min_gamma, 2)
+        self.assertEqual(options.adaptive_max_gamma_step, 2)
+        self.assertEqual(options.adaptive_refill_batch, 8)
 
         command = build_vllm_command(options)
         speculative = command[command.index("--speculative-config") + 1]
         self.assertEqual(
             speculative,
-            '{"method":"mtp","num_speculative_tokens":2,'
+            '{"method":"mtp","num_speculative_tokens":6,'
             '"enforce_eager":false,"use_local_argmax_reduction":false}',
         )
         self.assertEqual(command[command.index("--tensor-parallel-size") + 1], "2")
@@ -1406,10 +1410,12 @@ class LauncherTest(unittest.TestCase):
         )
         capture_start = command.index("--cudagraph-capture-sizes") + 1
         capture_end = command.index("--enable-expert-parallel")
-        self.assertEqual(
-            [int(value) for value in command[capture_start:capture_end]],
-            [3, 6, 9, 12, 18, 24, 48],
-        )
+        capture_sizes = [int(value) for value in command[capture_start:capture_end]]
+        self.assertIn(48, capture_sizes)
+        self.assertIn(80, capture_sizes)
+        self.assertIn(112, capture_sizes)
+        environment = build_environment(options, configured_environment, {})
+        self.assertEqual(environment["HUST_VSPEC_MTP_COHORT_REFILL"], "1")
 
     def test_qwen35_frontier_b16_performance_preset(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -1423,18 +1429,20 @@ class LauncherTest(unittest.TestCase):
         )
 
         self.assertEqual(options.method, "mtp")
-        self.assertEqual(options.gamma, 4)
+        self.assertEqual(options.gamma, 6)
         self.assertEqual(options.max_num_seqs, 16)
+        self.assertTrue(options.adaptive_speculation)
+        self.assertEqual(options.adaptive_refill_batch, 8)
         self.assertEqual(environment["HUST_VSPEC_MTP_COHORT_REFILL"], "1")
         self.assertEqual(environment["HUST_VSPEC_REFILL_MAX_HOLDS"], "8")
 
         command = build_vllm_command(options)
         capture_start = command.index("--cudagraph-capture-sizes") + 1
         capture_end = command.index("--enable-expert-parallel")
-        self.assertEqual(
-            [int(value) for value in command[capture_start:capture_end]],
-            [5, 10, 20, 40, 80],
-        )
+        capture_sizes = [int(value) for value in command[capture_start:capture_end]]
+        self.assertIn(48, capture_sizes)
+        self.assertIn(80, capture_sizes)
+        self.assertIn(112, capture_sizes)
         additional_config = command[command.index("--additional-config") + 1]
         self.assertEqual(additional_config, '{"enable_cpu_binding":true}')
 
@@ -1468,7 +1476,7 @@ class LauncherTest(unittest.TestCase):
 
     def test_qwen35_eagle3_adaptive_captures_every_verification_width(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        options, _ = parse_args(
+        options, configured_environment = parse_args(
             [
                 "--config",
                 str(root / "configs/qwen35-35b-a3b-eagle3-adaptive.toml"),
@@ -1481,6 +1489,9 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(options.gamma, 6)
         self.assertEqual(options.adaptive_min_gamma, 1)
         self.assertTrue(options.adaptive_speculation)
+        self.assertEqual(options.adaptive_refill_batch, 4)
+        environment = build_environment(options, configured_environment, {})
+        self.assertEqual(environment["HUST_VSPEC_EAGLE3_COHORT_REFILL"], "1")
 
         command = build_vllm_command(options)
         capture_start = command.index("--cudagraph-capture-sizes") + 1
@@ -1490,6 +1501,25 @@ class LauncherTest(unittest.TestCase):
             for batch_size in range(1, 17):
                 self.assertIn(batch_size * query_width, capture_sizes)
         self.assertIn(112, capture_sizes)
+
+    def test_qwen35_eagle3_default_config_enables_adaptive_gamma_and_refill(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        options, configured_environment = parse_args(
+            [
+                "--config",
+                str(root / "configs/qwen35-35b-a3b-eagle3.toml"),
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+
+        self.assertEqual(options.method, "eagle3")
+        self.assertEqual(options.gamma, 6)
+        self.assertEqual(options.adaptive_min_gamma, 1)
+        self.assertTrue(options.adaptive_speculation)
+        self.assertEqual(options.adaptive_refill_batch, 4)
+        environment = build_environment(options, configured_environment, {})
+        self.assertEqual(environment["HUST_VSPEC_EAGLE3_COHORT_REFILL"], "1")
 
     def test_adaptive_mtp_rejects_non_even_candidate_range(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
@@ -1543,6 +1573,7 @@ class LauncherTest(unittest.TestCase):
                 "/models/Qwen3.5-35B-A3B",
                 "--synthetic-acceptance-length",
                 "2.4",
+                "--no-adaptive-speculation",
                 "--vllm-executable",
                 "/usr/bin/vllm",
             ]
@@ -1552,7 +1583,7 @@ class LauncherTest(unittest.TestCase):
         speculative = command[command.index("--speculative-config") + 1]
         self.assertEqual(
             speculative,
-            '{"method":"mtp","num_speculative_tokens":2,'
+            '{"method":"mtp","num_speculative_tokens":6,'
             '"enforce_eager":false,"rejection_sample_method":"synthetic",'
             '"synthetic_acceptance_length":2.4,'
             '"use_local_argmax_reduction":false}',
@@ -1744,6 +1775,20 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(explicit.draft_model, "/models/explicit")
         resolver.assert_not_called()
 
+    def test_launch_reports_missing_local_model_without_downloading(self) -> None:
+        options, _ = parse_args(
+            [
+                "--protocol",
+                "qwen35-frontier-mtp2",
+                "--target-model",
+                "/missing/Qwen3.5-35B-A3B",
+            ]
+        )
+
+        with self.assertRaisesRegex(SystemExit, "Qwen/Qwen3.5-35B-A3B") as raised:
+            validate_local_model_paths(options)
+        self.assertIn("does not download models", str(raised.exception))
+
     def test_adaptive_defaults_online_and_can_be_disabled(self) -> None:
         default, _ = parse_args(
             ["--target-model", "/models/target", "--draft-model", "/models/draft"]
@@ -1793,7 +1838,7 @@ class LauncherTest(unittest.TestCase):
                     ]
                 )
 
-    def test_mtp_uses_target_checkpoint_and_defaults_to_mtp2_graph(self) -> None:
+    def test_mtp_uses_target_checkpoint_and_defaults_to_adaptive_mtp2(self) -> None:
         with mock.patch("vllm_hust_vspec.cli.resolve_default_model") as resolver:
             options, _ = parse_args(
                 [
@@ -1811,15 +1856,17 @@ class LauncherTest(unittest.TestCase):
 
         resolver.assert_not_called()
         self.assertEqual(options.method, "mtp")
-        self.assertEqual(options.gamma, 2)
+        self.assertEqual(options.gamma, 6)
+        self.assertEqual(options.adaptive_min_gamma, 2)
+        self.assertEqual(options.adaptive_max_gamma_step, 2)
         self.assertIsNone(options.draft_model)
-        self.assertFalse(options.adaptive_speculation)
+        self.assertTrue(options.adaptive_speculation)
 
         command = build_vllm_command(options)
         speculative = command[command.index("--speculative-config") + 1]
         self.assertEqual(
             speculative,
-            '{"method":"mtp","num_speculative_tokens":2,"enforce_eager":false,'
+            '{"method":"mtp","num_speculative_tokens":6,"enforce_eager":false,'
             '"use_local_argmax_reduction":false}',
         )
         self.assertIn("--language-model-only", command)
@@ -1827,12 +1874,13 @@ class LauncherTest(unittest.TestCase):
         compilation = command[command.index("--compilation-config") + 1]
         self.assertEqual(compilation, '{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY"}')
         capture_index = command.index("--cudagraph-capture-sizes") + 1
-        self.assertEqual(
-            [int(value) for value in command[capture_index:]],
-            [3, 6, 9, 12, 18, 24, 48],
-        )
+        capture_sizes = [int(value) for value in command[capture_index:]]
+        self.assertIn(48, capture_sizes)
+        self.assertIn(80, capture_sizes)
+        self.assertIn(112, capture_sizes)
         environment = build_environment(options, {}, {})
         self.assertEqual(environment[ENV_MTP_STRICT_GRAPH], "1")
+        self.assertEqual(environment["HUST_VSPEC_MTP_COHORT_REFILL"], "1")
 
     def test_mtp_local_argmax_can_be_enabled(self) -> None:
         options, _ = parse_args(
@@ -2012,7 +2060,10 @@ class LauncherTest(unittest.TestCase):
                     ]
                 )
                 self.assertEqual(options.method, "mtp")
-                self.assertEqual(options.gamma, 2)
+                self.assertEqual(options.gamma, 6)
+                self.assertTrue(options.adaptive_speculation)
+                self.assertEqual(options.adaptive_min_gamma, 2)
+                self.assertEqual(options.adaptive_max_gamma_step, 2)
 
     def test_mtp_strict_graph_detects_only_uniform_decode_fallbacks(self) -> None:
         dispatcher = SimpleNamespace(
@@ -2068,9 +2119,11 @@ class LauncherTest(unittest.TestCase):
                 "mtp",
                 "--gamma",
                 "3",
+                "--no-adaptive-speculation",
             ]
         )
         self.assertEqual(options.gamma, 3)
+        self.assertFalse(options.adaptive_speculation)
 
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
@@ -2082,18 +2135,6 @@ class LauncherTest(unittest.TestCase):
                         "mtp",
                         "--draft-model",
                         "/models/not-used",
-                    ]
-                )
-
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                parse_args(
-                    [
-                        "--target-model",
-                        "/models/Qwen3.5-35B-A3B",
-                        "--method",
-                        "mtp",
-                        "--adaptive-speculation",
                     ]
                 )
 
