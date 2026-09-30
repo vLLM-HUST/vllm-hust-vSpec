@@ -1,9 +1,7 @@
 # vllm-hust-vSpec
 
 `vllm-hust-vSpec` 是面向 vLLM-HUST + vLLM-Ascend-HUST 的独立
-`vllm.general_plugins` 投机解码插件。插件支持动态 gamma，并提供已验证的 Draft 和
-EAGLE 投机解码方案，以及 Qwen3.5 原生 MTP、模型配置、Eager/Graph 启动参数和
-Ascend 方法专属优化。
+`vllm.general_plugins` 投机解码插件。插件支持动态 gamma，并提供已验证的 Draft 、EAGLE 和 MTP 投机解码方案。
 
 Extension Manager ID：`org.vllm-hust.vspec`。插件遵循 Manifest
 `0.2-experimental` 的 `in_process_plugin` 边界，同时注册
