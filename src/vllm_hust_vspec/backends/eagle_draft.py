@@ -272,9 +272,7 @@ def _configure_draft_active_vocab(proposer: Any) -> None:
         lm_head.register_buffer("_vspec_w8a16_scale", quant_scale)
         bias = getattr(lm_head, "bias", None)
         quant_bias = (
-            bias.to(dtype=weight.dtype).contiguous()
-            if isinstance(bias, torch.Tensor)
-            else None
+            bias.to(dtype=weight.dtype).contiguous() if isinstance(bias, torch.Tensor) else None
         )
         lm_head.register_buffer("_vspec_w8a16_bias", quant_bias)
         lm_head.quant_method = _WeightOnlyLinearMethod()

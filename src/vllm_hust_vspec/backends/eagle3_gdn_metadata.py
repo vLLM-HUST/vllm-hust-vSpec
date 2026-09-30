@@ -83,17 +83,15 @@ def apply_eagle3_gdn_metadata_sharing_patch() -> bool:
             self._vspec_gdn_seen_generation = state.generation
             if _is_uniform_spec_decode(metadata, common_attn_metadata.num_reqs):
                 kv_spec = self.kv_cache_spec
-                start_indices = (
-                    (common_attn_metadata.seq_lens - 1) // kv_spec.block_size
-                ).clamp(min=0)
+                start_indices = ((common_attn_metadata.seq_lens - 1) // kv_spec.block_size).clamp(
+                    min=0
+                )
                 offsets = torch.arange(
                     1 + kv_spec.num_speculative_blocks,
                     device=common_attn_metadata.block_table_tensor.device,
                     dtype=torch.int32,
                 )
-                state.gather_indices = (
-                    start_indices.unsqueeze(1) + offsets
-                ).to(torch.int64)
+                state.gather_indices = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
             return metadata
 
         source = state.metadata
@@ -173,8 +171,7 @@ def apply_eagle3_gdn_metadata_sharing_patch() -> bool:
         metadata.non_spec_decode_metadata = None
         if not state.logged:
             logger.info(
-                "vSpec EAGLE3 enabled shared GDN speculative metadata for "
-                "uniform Graph batches"
+                "vSpec EAGLE3 enabled shared GDN speculative metadata for uniform Graph batches"
             )
             state.logged = True
         return metadata

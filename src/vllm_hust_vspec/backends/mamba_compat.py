@@ -17,8 +17,7 @@ def iter_cache_tensors(kv_caches: Any) -> Any:
             yield from iter_cache_tensors(cache)
         else:
             raise TypeError(
-                "vSpec expected a KV-cache Tensor or plane sequence, "
-                f"got {type(cache).__name__}"
+                f"vSpec expected a KV-cache Tensor or plane sequence, got {type(cache).__name__}"
             )
 
 
@@ -80,9 +79,7 @@ def normalize_mamba_state_copy_funcs(
             "vSpec expected Mamba state copy functions as a tuple or mapping, "
             f"got {type(copy_funcs).__name__}"
         )
-    return {
-        spec.mamba_type: copy_funcs for spec in get_current_mamba_groups(kv_cache_config)
-    }
+    return {spec.mamba_type: copy_funcs for spec in get_current_mamba_groups(kv_cache_config)}
 
 
 def install_current_mamba_runtime_api() -> None:

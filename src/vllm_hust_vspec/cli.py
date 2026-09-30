@@ -314,10 +314,7 @@ def generate_capture_sizes(
             request_buckets.extend(size for size in (1, 2, 4, 8) if size <= max_num_seqs)
         elif (
             policy == "exact"
-            and (
-                method in {"eagle", "eagle3"}
-                or (method == "mtp" and dynamic_widths)
-            )
+            and (method in {"eagle", "eagle3"} or (method == "mtp" and dynamic_widths))
             and max_num_seqs <= 16
         ):
             # At small serving batches, every live-request count is cheap to
@@ -338,9 +335,7 @@ def generate_capture_sizes(
         verification_widths = range(3, verification_width + 1, 2)
     else:
         verification_widths = (
-            range(2, verification_width + 1)
-            if dynamic_widths
-            else (verification_width,)
+            range(2, verification_width + 1) if dynamic_widths else (verification_width,)
         )
     capture_sizes = set(request_buckets) | {
         batch_size * width for batch_size in request_buckets for width in verification_widths

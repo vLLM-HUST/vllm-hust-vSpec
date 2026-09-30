@@ -59,7 +59,5 @@ def apply_eagle3_replicated_sample_patch() -> bool:
 
     setattr(compute_draft_token_ids, PATCH_MARKER, True)
     AscendSpecDecodeBaseProposer.compute_draft_token_ids = compute_draft_token_ids
-    logger.info(
-        "vSpec enabled collective-free EAGLE3 sampling for replicated draft TP=1"
-    )
+    logger.info("vSpec enabled collective-free EAGLE3 sampling for replicated draft TP=1")
     return True

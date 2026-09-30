@@ -33,9 +33,7 @@ def main() -> None:
     if unresolved:
         raise RuntimeError(f"unresolved source references: {unresolved}")
     dataset = dataset.map(
-        lambda row: {
-            "messages": [{"role": "user", "content": turn} for turn in row["turns"]]
-        },
+        lambda row: {"messages": [{"role": "user", "content": turn} for turn in row["turns"]]},
         remove_columns=["turns"],
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)

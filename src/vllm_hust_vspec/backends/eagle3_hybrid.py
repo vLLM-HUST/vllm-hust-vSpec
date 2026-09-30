@@ -33,40 +33,30 @@ def _build_compact_group_layer_names(
     target_names = [
         name
         for name, spec in kv_cache_spec.items()
-        if name.startswith(_QWEN35_TARGET_LAYER_PREFIX)
-        and isinstance(spec, FullAttentionSpec)
+        if name.startswith(_QWEN35_TARGET_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
     ]
     draft_names = [
         name
         for name, spec in kv_cache_spec.items()
-        if name.startswith(_QWEN35_DRAFT_LAYER_PREFIX)
-        and isinstance(spec, FullAttentionSpec)
+        if name.startswith(_QWEN35_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
     ]
     mamba_names = [
         name
         for name, spec in kv_cache_spec.items()
-        if name.startswith(_QWEN35_TARGET_LAYER_PREFIX)
-        and isinstance(spec, MambaSpec)
+        if name.startswith(_QWEN35_TARGET_LAYER_PREFIX) and isinstance(spec, MambaSpec)
     ]
     if (
         not target_names
         or not draft_names
         or not mamba_names
-        or len(target_names) + len(draft_names) + len(mamba_names)
-        != len(kv_cache_spec)
+        or len(target_names) + len(draft_names) + len(mamba_names) != len(kv_cache_spec)
     ):
         return None
 
     page_sizes = {spec.page_size_bytes for spec in kv_cache_spec.values()}
-    target_block_sizes = {
-        kv_cache_spec[name].block_size for name in target_names + mamba_names
-    }
+    target_block_sizes = {kv_cache_spec[name].block_size for name in target_names + mamba_names}
     draft_block_sizes = {kv_cache_spec[name].block_size for name in draft_names}
-    if (
-        len(page_sizes) != 1
-        or len(target_block_sizes) != 1
-        or len(draft_block_sizes) != 1
-    ):
+    if len(page_sizes) != 1 or len(target_block_sizes) != 1 or len(draft_block_sizes) != 1:
         return None
     if group_size <= 0:
         raise ValueError("VSPEC_EAGLE3_KV_GROUP_SIZE must be positive")
@@ -115,14 +105,11 @@ def apply_eagle3_fused_mamba_precopy_patch() -> bool:
         speculative_config = getattr(self, "speculative_config", None)
         if (
             getattr(speculative_config, "method", None) == "eagle3"
-            and getattr(getattr(self, "cache_config", None), "mamba_cache_mode", None)
-            == "align"
+            and getattr(getattr(self, "cache_config", None), "mamba_cache_mode", None) == "align"
         ):
             mamba_bufs = self._get_mamba_bufs()
             if mamba_bufs.postprocess_align is not None:
-                mamba_bufs.preprocess._vspec_eagle3_align_ctx = (
-                    mamba_bufs.postprocess_align
-                )
+                mamba_bufs.preprocess._vspec_eagle3_align_ctx = mamba_bufs.postprocess_align
         return original_prepare_inputs(self, *args, **kwargs)
 
     @wraps(original_preprocess_mamba)
@@ -343,9 +330,7 @@ def apply_eagle3_hybrid_group_annotation_patch() -> bool:
         if not any(str(model_type).startswith("qwen3_5") for model_type in model_types):
             return
 
-        draft_layers = {
-            name for name in kv_cache_spec if name.startswith("model.layers.")
-        }
+        draft_layers = {name for name in kv_cache_spec if name.startswith("model.layers.")}
         if not draft_layers:
             raise RuntimeError("vSpec could not identify the Qwen3.5 EAGLE3 KV-cache layer")
         annotated = []
@@ -385,6 +370,7 @@ def apply_eagle3_compact_group_patch() -> bool:
     """Avoid one KV group per Qwen3.5 layer when EAGLE3 uses small blocks."""
     from vllm.logger import logger
     from vllm.v1.core import kv_cache_utils
+
     original = kv_cache_utils._get_kv_cache_groups_uniform_page_size
     if getattr(original, COMPACT_GROUP_PATCH_MARKER, False):
         return False
@@ -402,8 +388,7 @@ def apply_eagle3_compact_group_patch() -> bool:
             grouped_names,
         )
         target_count = sum(
-            name.startswith(_QWEN35_TARGET_LAYER_PREFIX)
-            and "self_attn" in name
+            name.startswith(_QWEN35_TARGET_LAYER_PREFIX) and "self_attn" in name
             for name in kv_cache_spec
         )
         mamba_count = sum("linear_attn" in name for name in kv_cache_spec)

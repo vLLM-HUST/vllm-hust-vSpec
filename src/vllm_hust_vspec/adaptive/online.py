@@ -122,9 +122,7 @@ class OnlineGammaController:
         if max_gamma > min_gamma and max_gamma_step < candidate_stride:
             raise ValueError("max_gamma_step must reach the next candidate gamma")
 
-        self.candidate_gammas = tuple(
-            range(min_gamma, max_gamma + 1, candidate_stride)
-        )
+        self.candidate_gammas = tuple(range(min_gamma, max_gamma + 1, candidate_stride))
         batch_limits = dict(candidate_batch_limits or {})
         invalid_limits = set(batch_limits).difference(self.candidate_gammas)
         if invalid_limits:
@@ -892,9 +890,7 @@ class OnlineGammaController:
                     required_probe_gain = max(self.hysteresis, self.exploration)
                     for target in unlaunched:
                         target_index = self.candidate_gammas.index(target)
-                        boundary_index = target_index + (
-                            -1 if target > feedback_anchor else 1
-                        )
+                        boundary_index = target_index + (-1 if target > feedback_anchor else 1)
                         if not 0 <= boundary_index < len(self.candidate_gammas):
                             continue
                         boundary = self.candidate_gammas[boundary_index]

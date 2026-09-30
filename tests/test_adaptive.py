@@ -522,34 +522,18 @@ class AdaptiveControllerTest(unittest.TestCase):
 
     def test_arrival_gate_releases_after_burst_quiets(self) -> None:
         scheduler = SimpleNamespace()
-        self.assertTrue(
-            _should_hold_growing_initial_cohort(
-                scheduler, 0, 1, 10.0, 0.001, 0.006
-            )
-        )
-        self.assertTrue(
-            _should_hold_growing_initial_cohort(
-                scheduler, 0, 8, 10.0005, 0.001, 0.006
-            )
-        )
+        self.assertTrue(_should_hold_growing_initial_cohort(scheduler, 0, 1, 10.0, 0.001, 0.006))
+        self.assertTrue(_should_hold_growing_initial_cohort(scheduler, 0, 8, 10.0005, 0.001, 0.006))
         self.assertFalse(
-            _should_hold_growing_initial_cohort(
-                scheduler, 0, 8, 10.0016, 0.001, 0.006
-            )
+            _should_hold_growing_initial_cohort(scheduler, 0, 8, 10.0016, 0.001, 0.006)
         )
         self.assertFalse(hasattr(scheduler, "_vspec_adaptive_arrival_gate"))
 
     def test_arrival_gate_has_a_hard_latency_bound(self) -> None:
         scheduler = SimpleNamespace()
-        self.assertTrue(
-            _should_hold_growing_initial_cohort(
-                scheduler, 0, 1, 10.0, 0.003, 0.006
-            )
-        )
+        self.assertTrue(_should_hold_growing_initial_cohort(scheduler, 0, 1, 10.0, 0.003, 0.006))
         self.assertFalse(
-            _should_hold_growing_initial_cohort(
-                scheduler, 0, 16, 10.006, 0.003, 0.006
-            )
+            _should_hold_growing_initial_cohort(scheduler, 0, 16, 10.006, 0.003, 0.006)
         )
 
     def test_eagle3_graph_budget_preserves_hot_high_concurrency_arms(self) -> None:

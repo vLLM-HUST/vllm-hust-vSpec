@@ -94,9 +94,9 @@ def apply_eagle_patches(settings: PluginSettings) -> bool:
     if draft_body_w8a16 or draft_body_w8a8:
         from .eagle_body_quant import apply_eagle_body_quantization_patch
 
-        applied = apply_eagle_body_quantization_patch(
-            "w8a8" if draft_body_w8a8 else "w8a16"
-        ) or applied
+        applied = (
+            apply_eagle_body_quantization_patch("w8a8" if draft_body_w8a8 else "w8a16") or applied
+        )
     target_w8a16 = os.environ.get("VSPEC_TARGET_BODY_W8A16") == "1"
     target_w8a8 = os.environ.get("VSPEC_TARGET_BODY_W8A8") == "1"
     if target_w8a16 and target_w8a8:
@@ -134,10 +134,13 @@ def apply_eagle_patches(settings: PluginSettings) -> bool:
     if settings.eagle_target_active_vocab:
         from .eagle_target import apply_target_active_vocab_patch
 
-        applied = apply_target_active_vocab_patch(
-            required_method=settings.method,
-            feature_name=f"{settings.method.upper()} Target",
-        ) or applied
+        applied = (
+            apply_target_active_vocab_patch(
+                required_method=settings.method,
+                feature_name=f"{settings.method.upper()} Target",
+            )
+            or applied
+        )
     if settings.eagle_draft_active_vocab:
         from .eagle_draft import apply_draft_active_vocab_patch
 
@@ -175,10 +178,13 @@ def apply_eagle_patches(settings: PluginSettings) -> bool:
             applied = apply_eagle3_replicated_sample_patch() or applied
         applied = apply_eagle3_fused_mamba_precopy_patch() or applied
         if os.environ.get("HUST_VSPEC_EAGLE3_DEVICE_COUNTS", "0") == "1":
-            applied = _patch_async_mtp_device_counts(
-                methods=frozenset({"eagle3"}),
-                enabled=True,
-            ) or applied
+            applied = (
+                _patch_async_mtp_device_counts(
+                    methods=frozenset({"eagle3"}),
+                    enabled=True,
+                )
+                or applied
+            )
         applied = apply_eagle3_cohort_refill_patch() or applied
         applied = apply_eagle3_compact_group_patch() or applied
         if os.environ.get("HUST_VSPEC_EAGLE3_GDN_METADATA_SHARE", "0") == "1":

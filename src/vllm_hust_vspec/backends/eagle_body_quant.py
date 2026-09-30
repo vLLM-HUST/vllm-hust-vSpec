@@ -207,8 +207,7 @@ def _configure_body_quantization(proposer: Any, mode: str) -> None:
         missing = selected.difference(available)
         if missing:
             raise RuntimeError(
-                "Unknown EAGLE body quantization layer(s): "
-                + ", ".join(sorted(missing))
+                "Unknown EAGLE body quantization layer(s): " + ", ".join(sorted(missing))
             )
     if not configured:
         raise RuntimeError("EAGLE body quantization found no eligible linear layers")

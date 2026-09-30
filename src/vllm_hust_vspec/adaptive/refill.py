@@ -133,9 +133,7 @@ class OnlineRefillController:
         future_steps = self.future_discount * admitted_requests
         target_hold = self._state(target_count, gamma)["hold"]
         current_value = hold.mean_goodput if hold.observations else current_goodput
-        target_value = (
-            target_hold.mean_goodput if target_hold.observations else target_goodput
-        )
+        target_value = target_hold.mean_goodput if target_hold.observations else target_goodput
         if admit.observations == 0:
             # Use the current stable step as a conservative immediate-reward
             # prior. Admit only when the measured/predicted destination state
@@ -168,8 +166,10 @@ class OnlineRefillController:
         )
 
         def ucb(reward: _ActionReward) -> float:
-            bonus = self.exploration * reward_scale * math.sqrt(
-                math.log(total_observations + 1) / reward.observations
+            bonus = (
+                self.exploration
+                * reward_scale
+                * math.sqrt(math.log(total_observations + 1) / reward.observations)
             )
             return reward.mean_goodput + bonus
 
@@ -354,11 +354,7 @@ def install_online_refill_patch(
                 useful_tokens=useful_tokens,
                 latency_ms=time.perf_counter() * 1000.0 - scheduled_at_ms,
             )
-        if (
-            trace
-            and not self.requests
-            and not getattr(self, "_vspec_refill_summary_logged", False)
-        ):
+        if trace and not self.requests and not getattr(self, "_vspec_refill_summary_logged", False):
             logger.warning("vSpec refill summary: %s", get_controller(self).summary())
             self._vspec_refill_summary_logged = True
         elif self.requests:

@@ -36,10 +36,7 @@ def test_qwen35_eagle3_compact_groups_preserve_small_draft_blocks() -> None:
             for index in range(10)
         },
         "model.layers.40.self_attn.attn": draft,
-        **{
-            f"language_model.model.layers.{index}.linear_attn": mamba
-            for index in range(30)
-        },
+        **{f"language_model.model.layers.{index}.linear_attn": mamba for index in range(30)},
     }
 
     groups = _build_compact_group_layer_names(specs, group_size=4)

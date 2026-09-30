@@ -40,6 +40,7 @@ def _install_current_mamba_runtime_api() -> None:
 def _patch_mtp_mamba_group_api() -> bool:
     return mamba_compat.apply_mamba_runtime_compatibility_patch()
 
+
 _REQUIRED_ASCEND_MTP_OPS = (
     "npu_gemma_rms_norm",
     "moe_gating_top_k",
@@ -231,14 +232,8 @@ def _patch_step3p5_incremental_layers() -> bool:
         if len(self.draft_attn_groups) < self.num_speculative_tokens:
             return per_group, per_step
 
-        input_batch_size = (
-            int(common_attn_metadata.num_reqs)
-            if self.use_cuda_graph
-            else batch_size
-        )
-        runtime_mode = (
-            CUDAGraphMode.FULL if self.use_cuda_graph else CUDAGraphMode.NONE
-        )
+        input_batch_size = int(common_attn_metadata.num_reqs) if self.use_cuda_graph else batch_size
+        runtime_mode = CUDAGraphMode.FULL if self.use_cuda_graph else CUDAGraphMode.NONE
         token_indices = common_attn_metadata.query_start_loc[1 : batch_size + 1] - 1
         if self.uses_mrope:
             used_positions = self.mrope_positions[:, token_indices]
@@ -304,9 +299,7 @@ def _patch_step3p5_incremental_layers() -> bool:
         for draft_step in range(self.num_speculative_tokens - 1):
             spec_step_idx = draft_step + 1
             if spec_step_idx >= len(multi_steps_attn_metadata):
-                raise AssertionError(
-                    "Step3.5 MTP metadata must contain one entry per draft step"
-                )
+                raise AssertionError("Step3.5 MTP metadata must contain one entry per draft step")
             step_metadata = next(iter(multi_steps_attn_metadata[spec_step_idx].values()))
             input_batch_size = max(
                 batch_size,
@@ -323,18 +316,14 @@ def _patch_step3p5_incremental_layers() -> bool:
             input_ids = draft_token_ids_list[-1].int()
             positions = positions + 1
             if self.uses_mrope:
-                exceeds_max_model_len = (
-                    positions[0] >= self.vllm_config.model_config.max_model_len
-                )
+                exceeds_max_model_len = positions[0] >= self.vllm_config.model_config.max_model_len
                 clamped_positions = torch.where(
                     exceeds_max_model_len.unsqueeze(0),
                     torch.zeros_like(positions),
                     positions,
                 )
             else:
-                exceeds_max_model_len = (
-                    positions >= self.vllm_config.model_config.max_model_len
-                )
+                exceeds_max_model_len = positions >= self.vllm_config.model_config.max_model_len
                 clamped_positions = torch.where(
                     exceeds_max_model_len,
                     0,
@@ -384,12 +373,10 @@ def _patch_step3p5_incremental_layers() -> bool:
                 hidden_states = ret_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
-            last_hidden_states, model_positions, hidden_states = (
-                self.maybe_all_gather_and_unpad(
-                    last_hidden_states,
-                    model_positions,
-                    hidden_states,
-                )
+            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
+                last_hidden_states,
+                model_positions,
+                hidden_states,
             )
 
             draft_token_ids, draft_probs = self._sample_draft_tokens_for_step(
@@ -452,8 +439,7 @@ def _is_async_hybrid_mamba_runner(
         getattr(speculative_config, "method", None) in methods
         and getattr(runner, "use_async_scheduling", False)
         and getattr(getattr(runner, "model_config", None), "is_hybrid", False)
-        and getattr(getattr(runner, "cache_config", None), "mamba_cache_mode", None)
-        == "align"
+        and getattr(getattr(runner, "cache_config", None), "mamba_cache_mode", None) == "align"
     )
 
 
@@ -496,10 +482,8 @@ def _has_mamba_state_transition(
             prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
         num_blocks = (
-            (req_state.num_computed_tokens + num_scheduled_tokens + block_size - 1)
-            // block_size
-            + num_speculative_blocks
-        )
+            req_state.num_computed_tokens + num_scheduled_tokens + block_size - 1
+        ) // block_size + num_speculative_blocks
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
             return True
@@ -529,22 +513,12 @@ def _patch_async_mtp_device_counts(
     original_sync_counts = NPUModelRunner._sync_num_accepted_tokens
     original_event_synchronize = torch.npu.Event.synchronize
     original_preprocess_mamba = mamba_utils.preprocess_mamba
-    diagnostic_host_wait = (
-        os.getenv("HUST_VSPEC_DEVICE_COUNTS_HOST_WAIT", "0") == "1"
-    )
-    validate_device_counts = (
-        os.getenv("HUST_VSPEC_DEVICE_COUNTS_VALIDATE", "0") == "1"
-    )
-    synchronize_device_remap = (
-        os.getenv("HUST_VSPEC_DEVICE_COUNTS_REMAP_SYNC", "0") == "1"
-    )
-    publish_cpu_counts = (
-        os.getenv("HUST_VSPEC_DEVICE_COUNTS_PUBLISH_CPU", "0") == "1"
-    )
+    diagnostic_host_wait = os.getenv("HUST_VSPEC_DEVICE_COUNTS_HOST_WAIT", "0") == "1"
+    validate_device_counts = os.getenv("HUST_VSPEC_DEVICE_COUNTS_VALIDATE", "0") == "1"
+    synchronize_device_remap = os.getenv("HUST_VSPEC_DEVICE_COUNTS_REMAP_SYNC", "0") == "1"
+    publish_cpu_counts = os.getenv("HUST_VSPEC_DEVICE_COUNTS_PUBLISH_CPU", "0") == "1"
     trace_device_counts = os.getenv("HUST_VSPEC_DEVICE_COUNTS_TRACE", "0") == "1"
-    fused_precopy_device_bias = (
-        os.getenv("HUST_VSPEC_DEVICE_COUNTS_FUSED_PRECOPY", "0") == "1"
-    )
+    fused_precopy_device_bias = os.getenv("HUST_VSPEC_DEVICE_COUNTS_FUSED_PRECOPY", "0") == "1"
 
     if fused_precopy_device_bias:
         precopy_owner = mamba_utils.MambaSpecDecodeGPUContext
@@ -567,8 +541,7 @@ def _patch_async_mtp_device_counts(
                 runner = getattr(self, "_vspec_mtp_device_count_runner", None)
                 if (
                     runner is not None
-                    and getattr(runner, "_vspec_mtp_device_count_phase", "idle")
-                    == "mapped"
+                    and getattr(runner, "_vspec_mtp_device_count_phase", "idle") == "mapped"
                 ):
                     torch.sub(
                         runner.num_accepted_tokens.gpu[:num_reqs],
@@ -640,17 +613,13 @@ def _patch_async_mtp_device_counts(
 
         install_buffer_hook(self)
         if not hasattr(self, "_vspec_mtp_safe_prev_positions"):
-            self._vspec_mtp_safe_prev_positions = torch.empty_like(
-                self.prev_positions.gpu
-            )
+            self._vspec_mtp_safe_prev_positions = torch.empty_like(self.prev_positions.gpu)
             self._vspec_mtp_new_request_mask = torch.empty_like(
                 self.prev_positions.gpu,
                 dtype=torch.bool,
             )
             if validate_device_counts:
-                self._vspec_mtp_validated_counts = torch.empty_like(
-                    self.num_accepted_tokens.gpu
-                )
+                self._vspec_mtp_validated_counts = torch.empty_like(self.num_accepted_tokens.gpu)
                 self._vspec_mtp_validation_steps = 0
 
         self._vspec_mtp_device_count_phase = "remap"
@@ -739,9 +708,7 @@ def _patch_async_mtp_device_counts(
         if copy_bufs is None and len(args) >= 9:
             copy_bufs = args[8]
         runner = getattr(copy_bufs, "_vspec_mtp_runner", None)
-        if runner is None or getattr(
-            runner, "_vspec_mtp_device_count_phase", "idle"
-        ) != "mapped":
+        if runner is None or getattr(runner, "_vspec_mtp_device_count_phase", "idle") != "mapped":
             return original_preprocess_mamba(*args, **kwargs)
 
         scheduler_output = args[0]
@@ -777,9 +744,9 @@ def _patch_async_mtp_device_counts(
             num_reqs = len(input_batch.req_ids)
             runner.num_accepted_tokens.copy_to_cpu(num_reqs)
             torch.npu.current_stream().synchronize()
-            input_batch.num_accepted_tokens_cpu[:num_reqs] = (
-                runner.num_accepted_tokens.np[:num_reqs]
-            )
+            input_batch.num_accepted_tokens_cpu[:num_reqs] = runner.num_accepted_tokens.np[
+                :num_reqs
+            ]
             runner._vspec_mtp_device_count_phase = "fallback"
             return original_preprocess_mamba(*args, **kwargs)
 

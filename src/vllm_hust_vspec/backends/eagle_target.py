@@ -48,9 +48,7 @@ def _load_eagle3_draft_vocab_ids(
     draft_model = getattr(drafter, "model", None)
     draft_to_target = getattr(draft_model, "draft_id_to_target_id", None)
     if not isinstance(draft_to_target, torch.Tensor) or draft_to_target.ndim != 1:
-        raise RuntimeError(
-            "EAGLE3 automatic active vocabulary requires a loaded 1-D d2t mapping"
-        )
+        raise RuntimeError("EAGLE3 automatic active vocabulary requires a loaded 1-D d2t mapping")
     draft_to_target = draft_to_target.to(device=device, dtype=torch.long)
     active_ids = torch.arange(
         draft_to_target.numel(),

@@ -124,12 +124,7 @@ def _should_hold_growing_initial_cohort(
     committing a stateful speculative width from only the first HTTP request.
     """
     state_attr = "_vspec_adaptive_arrival_gate"
-    if (
-        num_running != 0
-        or num_waiting <= 0
-        or quiet_seconds <= 0
-        or max_wait_seconds <= 0
-    ):
+    if num_running != 0 or num_waiting <= 0 or quiet_seconds <= 0 or max_wait_seconds <= 0:
         if hasattr(scheduler, state_attr):
             delattr(scheduler, state_attr)
         return False
@@ -1404,9 +1399,7 @@ def _configure_eagle3_runtime_anchor(
         )
     runner._vspec_adaptive_configured_target_gamma = configured_target_gamma
     runner._vspec_adaptive_anchor_gamma = anchor_gamma
-    runner._vspec_adaptive_anchor_uses_configured_width = (
-        anchor_gamma == configured_target_gamma
-    )
+    runner._vspec_adaptive_anchor_uses_configured_width = anchor_gamma == configured_target_gamma
     if runner._vspec_adaptive_anchor_uses_configured_width:
         runner._vspec_adaptive_pinned_query_width = query_width
     runner.num_spec_tokens = anchor_gamma
@@ -1438,9 +1431,7 @@ def _configure_eagle3_runtime_anchor(
         drafter._vspec_adaptive_configured_gamma = configured_draft_gamma
         drafter._vspec_adaptive_graph_min_gamma = min_gamma
         drafter._vspec_adaptive_graph_max_gamma = max_gamma
-        drafter._vspec_adaptive_candidate_gammas = tuple(
-            range(min_gamma, max_gamma + 1)
-        )
+        drafter._vspec_adaptive_candidate_gammas = tuple(range(min_gamma, max_gamma + 1))
         drafter._vspec_adaptive_graph_native_gamma = anchor_gamma
         drafter.num_speculative_tokens = anchor_gamma
         if hasattr(drafter, "num_draft_steps"):
@@ -1484,9 +1475,7 @@ def _configure_mtp_runtime_anchor(
     query_width = anchor_gamma + 1
     runner._vspec_adaptive_configured_target_gamma = configured_target_gamma
     runner._vspec_adaptive_anchor_gamma = anchor_gamma
-    runner._vspec_adaptive_anchor_uses_configured_width = (
-        anchor_gamma == configured_target_gamma
-    )
+    runner._vspec_adaptive_anchor_uses_configured_width = anchor_gamma == configured_target_gamma
     runner.num_spec_tokens = anchor_gamma
     runner.prev_num_spec_tokens = anchor_gamma
     runner.uniform_decode_query_len = query_width
