@@ -1,0 +1,44 @@
+[serve]
+target_model = "/workspace/models/Qwen3.5-35B-A3B"
+method = "mtp"
+served_model_name = "qwen3.5-35b-a3b-frontier-mtp2-g4-b16"
+gamma = 4
+max_num_seqs = 16
+max_num_batched_tokens = 8192
+max_model_len = 262144
+dtype = "bfloat16"
+kv_cache_dtype = "auto"
+block_size = 128
+tensor_parallel_size = 2
+gpu_memory_utilization = 0.90
+host = "127.0.0.1"
+port = 18185
+device = "0,1"
+graph_mode = "full-and-piecewise"
+generation_config = "vllm"
+async_scheduling = true
+prefix_caching = true
+chunked_prefill = true
+language_model_only = true
+capture_policy = "exact"
+disable_log_stats = false
+adaptive_speculation = false
+mtp_strict_graph = true
+mtp_local_argmax_reduction = false
+extra_args = [
+  "--enable-expert-parallel",
+  "--additional-config",
+  '{"enable_cpu_binding":true}',
+]
+
+[env]
+HCCL_BUFFSIZE = "1024"
+HCCL_OP_EXPANSION_MODE = "AIV"
+VLLM_NO_USAGE_STATS = "1"
+PYTHONDONTWRITEBYTECODE = "1"
+PYTORCH_NPU_ALLOC_CONF = "expandable_segments:True"
+HUST_VSPEC_MTP_COHORT_REFILL = "1"
+HUST_VSPEC_REFILL_EXPLORATION = "0.15"
+HUST_VSPEC_REFILL_FUTURE_DISCOUNT = "1.0"
+HUST_VSPEC_REFILL_HYSTERESIS = "0.03"
+HUST_VSPEC_REFILL_MAX_HOLDS = "8"

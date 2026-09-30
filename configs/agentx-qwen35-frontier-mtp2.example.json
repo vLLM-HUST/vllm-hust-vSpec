@@ -1,0 +1,31 @@
+{
+  "url": "http://127.0.0.1:18185",
+  "model": "qwen3.5-35b-a3b-frontier-mtp2",
+  "model_revision": "REPLACE_WITH_IMMUTABLE_WEIGHTS_REVISION",
+  "tokenizer": "/workspace/models/Qwen3.5-35B-A3B",
+  "tokenizer_revision": "REPLACE_WITH_IMMUTABLE_TOKENIZER_REVISION",
+  "engine": {
+    "name": "vLLM-HUST + vLLM-Ascend-HUST + vSpec",
+    "revision": "REPLACE_WITH_VLLM_HUST_ASCEND_AND_VSPEC_COMMITS",
+    "launch_command_without_secrets": "See docs/agentx_256k_benchmark.md#mtp2"
+  },
+  "hardware": {
+    "accelerator": "Ascend 910B2",
+    "device_count": 2,
+    "allocated_host_dram_gib": 0
+  },
+  "max_model_len": 262144,
+  "host_kv_budget_gib": 0,
+  "speculative_decoding": {
+    "enabled": true,
+    "forced_acceptance_length": "REPLACE_WITH_SPEED_BENCH_MEAN_ACCEPTANCE_LENGTH",
+    "speed_bench_evidence": "REPLACE_WITH_IMMUTABLE_EVIDENCE_PATH_OR_URL",
+    "server_configuration": {
+      "method": "mtp",
+      "num_speculative_tokens": 2,
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": "REPLACE_WITH_SPEED_BENCH_MEAN_ACCEPTANCE_LENGTH",
+      "thinking_mode": "REPLACE_WITH_MATCHED_THINKING_MODE"
+    }
+  }
+}

@@ -9,9 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 PATCH_MARKER = "_vllm_hust_vspec_draft_parallel_graph_update_patched"
-DEFER_WAIT_PATCH_MARKER = (
-    "_vllm_hust_vspec_deferred_graph_update_wait_patched"
-)
+DEFER_WAIT_PATCH_MARKER = "_vllm_hust_vspec_deferred_graph_update_wait_patched"
 _UPDATE_THREAD_STATE = threading.local()
 
 
@@ -43,20 +41,16 @@ class _ParallelUpdateState:
         with self.lock:
             if self.streams is None:
                 self.device = device
-                self.streams = [
-                    torch.npu.Stream(device=device)
-                    for _ in range(self.workers)
-                ]
+                self.streams = [torch.npu.Stream(device=device) for _ in range(self.workers)]
             elif self.device != device:
-                raise RuntimeError(
-                    "vSpec Draft FIA updater cannot move between NPU devices"
-                )
+                raise RuntimeError("vSpec Draft FIA updater cannot move between NPU devices")
             return device, self.streams
 
     def wait_pending(self) -> None:
         pending, self.pending = self.pending, []
         for future in pending:
             future.result()
+
 
 class _DenseFIAParam(NamedTuple):
     query: Any
@@ -148,9 +142,7 @@ def _chunk_descriptors(
     descriptors: list[_UpdateDescriptor],
     workers: int,
 ) -> tuple[tuple[_UpdateDescriptor, ...], ...]:
-    return tuple(
-        tuple(descriptors[offset::workers]) for offset in range(workers)
-    )
+    return tuple(tuple(descriptors[offset::workers]) for offset in range(workers))
 
 
 def _pipeline_descriptors(
@@ -167,8 +159,7 @@ def _pipeline_descriptors(
     tail = descriptors[prefix_size:]
     chunk_size = max(1, (len(tail) + workers - 1) // workers)
     chunks = tuple(
-        tuple(tail[offset : offset + chunk_size])
-        for offset in range(0, len(tail), chunk_size)
+        tuple(tail[offset : offset + chunk_size]) for offset in range(0, len(tail), chunk_size)
     )
     if len(chunks) < workers:
         chunks += ((),) * (workers - len(chunks))
@@ -230,9 +221,7 @@ def apply_draft_parallel_graph_update_patch(
                 metadata = (
                     attn_metadata[descriptor.metadata_key]
                     if descriptor.metadata_step < 0
-                    else attn_metadata[descriptor.metadata_step][
-                        descriptor.metadata_key
-                    ]
+                    else attn_metadata[descriptor.metadata_step][descriptor.metadata_key]
                 )
                 torch.npu.graph_task_update_begin(
                     stream,
@@ -410,15 +399,8 @@ def apply_draft_parallel_graph_update_patch(
                     **kwargs,
                 )
 
-            pipeline_target = (
-                os.environ.get(
-                    "VSPEC_DRAFT_PIPELINED_TARGET_GRAPH_UPDATES"
-                )
-                == "1"
-            )
-            prefix_size = int(
-                os.environ.get("VSPEC_DRAFT_TARGET_UPDATE_PREFIX", "4")
-            )
+            pipeline_target = os.environ.get("VSPEC_DRAFT_PIPELINED_TARGET_GRAPH_UPDATES") == "1"
+            prefix_size = int(os.environ.get("VSPEC_DRAFT_TARGET_UPDATE_PREFIX", "4"))
             plan_name = _graph_plan_scope(
                 "target",
                 graph_params,
@@ -427,15 +409,9 @@ def apply_draft_parallel_graph_update_patch(
             plan_key = (plan_name, num_tokens)
             pipeline_key = (plan_name, num_tokens, prefix_size)
             pipeline_plan = (
-                target_state.pipeline_plans.get(pipeline_key)
-                if pipeline_target
-                else None
+                target_state.pipeline_plans.get(pipeline_key) if pipeline_target else None
             )
-            chunks = (
-                target_state.plans.get(plan_key)
-                if not pipeline_target
-                else None
-            )
+            chunks = target_state.plans.get(plan_key) if not pipeline_target else None
             if chunks is None and pipeline_plan is None:
                 metadata_keys = sorted(
                     (
@@ -467,8 +443,7 @@ def apply_draft_parallel_graph_update_patch(
                     layer_name = normalized.layer_name
                     metadata_key = (
                         layer_name
-                        if layer_name is not None
-                        and layer_name in attn_metadata
+                        if layer_name is not None and layer_name in attn_metadata
                         else metadata_keys[index]
                     )
                     metadata = attn_metadata[metadata_key]
@@ -535,12 +510,7 @@ def apply_draft_parallel_graph_update_patch(
                     chunks,
                     attn_metadata,
                     workspace,
-                    defer=(
-                        os.environ.get(
-                            "VSPEC_DRAFT_DEFER_TARGET_GRAPH_UPDATES"
-                        )
-                        == "1"
-                    ),
+                    defer=(os.environ.get("VSPEC_DRAFT_DEFER_TARGET_GRAPH_UPDATES") == "1"),
                 )
             return None
 
@@ -570,11 +540,7 @@ def apply_draft_parallel_graph_update_patch(
         captured = graph_params.attn_params.get(num_tokens, ())
         handles = graph_params.handles.get(num_tokens, ())
         events = graph_params.events.get(num_tokens, ())
-        if (
-            len(captured) < workers
-            or len(captured) != len(handles)
-            or len(captured) != len(events)
-        ):
+        if len(captured) < workers or len(captured) != len(handles) or len(captured) != len(events):
             return original_update(
                 update_stream,
                 forward_context,
@@ -586,22 +552,13 @@ def apply_draft_parallel_graph_update_patch(
             )
 
         plan_name = (
-            f"{_graph_plan_scope('draft', graph_params, captured)}:"
-            f"{len(draft_attn_metadatas)}"
+            f"{_graph_plan_scope('draft', graph_params, captured)}:{len(draft_attn_metadatas)}"
         )
         plan_key = (plan_name, num_tokens)
-        pipeline_draft = (
-            os.environ.get("VSPEC_DRAFT_PIPELINED_GRAPH_UPDATES") == "1"
-        )
-        prefix_size = int(
-            os.environ.get("VSPEC_DRAFT_GRAPH_UPDATE_PREFIX", "2")
-        )
+        pipeline_draft = os.environ.get("VSPEC_DRAFT_PIPELINED_GRAPH_UPDATES") == "1"
+        prefix_size = int(os.environ.get("VSPEC_DRAFT_GRAPH_UPDATE_PREFIX", "2"))
         pipeline_key = (plan_name, num_tokens, prefix_size)
-        pipeline_plan = (
-            state.pipeline_plans.get(pipeline_key)
-            if pipeline_draft
-            else None
-        )
+        pipeline_plan = state.pipeline_plans.get(pipeline_key) if pipeline_draft else None
         chunks = state.plans.get(plan_key) if not pipeline_draft else None
         if chunks is None and pipeline_plan is None:
             draft_steps = [
@@ -620,9 +577,7 @@ def apply_draft_parallel_graph_update_patch(
                     **kwargs,
                 )
             if len(captured) > len(draft_steps):
-                repeats = (len(captured) + len(draft_steps) - 1) // len(
-                    draft_steps
-                )
+                repeats = (len(captured) + len(draft_steps) - 1) // len(draft_steps)
                 draft_steps = (draft_steps * repeats)[: len(captured)]
             else:
                 draft_steps = draft_steps[: len(captured)]
@@ -647,9 +602,7 @@ def apply_draft_parallel_graph_update_patch(
                     or not hasattr(metadata, "seq_lens_list")
                 ):
                     break
-                sparse_mode = (
-                    normalized.sparse_mode if metadata.causal else 0
-                )
+                sparse_mode = normalized.sparse_mode if metadata.causal else 0
                 descriptors.append(
                     _UpdateDescriptor(
                         normalized,
@@ -702,10 +655,7 @@ def apply_draft_parallel_graph_update_patch(
                 chunks,
                 draft_attn_metadatas,
                 workspace,
-                defer=(
-                    os.environ.get("VSPEC_DRAFT_DEFER_GRAPH_UPDATES")
-                    == "1"
-                ),
+                defer=(os.environ.get("VSPEC_DRAFT_DEFER_GRAPH_UPDATES") == "1"),
             )
 
     impl.update_graph_params = staticmethod(update_graph_params)
@@ -722,18 +672,11 @@ def apply_draft_parallel_graph_update_patch(
 
         def graph_call(self: Any, *args: Any, **kwargs: Any) -> Any:
             if _EXTRA_CTX.is_draft_model:
-                if (
-                    state is not None
-                    and os.environ.get("VSPEC_DRAFT_DEFER_GRAPH_UPDATES")
-                    == "1"
-                ):
+                if state is not None and os.environ.get("VSPEC_DRAFT_DEFER_GRAPH_UPDATES") == "1":
                     state.wait_pending()
             elif (
                 target_state is not None
-                and os.environ.get(
-                    "VSPEC_DRAFT_DEFER_TARGET_GRAPH_UPDATES"
-                )
-                == "1"
+                and os.environ.get("VSPEC_DRAFT_DEFER_TARGET_GRAPH_UPDATES") == "1"
             ):
                 target_state.wait_pending()
             return original_graph_call(self, *args, **kwargs)

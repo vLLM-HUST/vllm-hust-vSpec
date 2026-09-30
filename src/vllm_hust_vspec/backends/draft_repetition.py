@@ -1470,9 +1470,7 @@ class _PackedRepetitionState:
                 self.update_positions_cpu[:update_count],
                 non_blocking=True,
             )
-            _append_seen_tokens_and_history_kernel[
-                (triton.cdiv(update_count, block_size),)
-            ](
+            _append_seen_tokens_and_history_kernel[(triton.cdiv(update_count, block_size),)](
                 self.seen_mask,
                 self.seen_tokens,
                 slots,
@@ -1791,15 +1789,9 @@ def apply_sparse_draft_repetition_penalty(
     num_rows, vocab_size = logits_tensor.shape
     if num_rows == 0:
         return None
-    max_batch_size = int(
-        getattr(sampling_metadata, "_vspec_max_num_reqs", num_rows)
-    )
+    max_batch_size = int(getattr(sampling_metadata, "_vspec_max_num_reqs", num_rows))
     state = getattr(owner, "_vspec_draft_sparse_repetition_state", None)
-    if (
-        state is None
-        or state.vocab_size != vocab_size
-        or state.max_batch_size < max_batch_size
-    ):
+    if state is None or state.vocab_size != vocab_size or state.max_batch_size < max_batch_size:
         state = _DraftSparseProposalState(
             max_batch_size=max_batch_size,
             vocab_size=vocab_size,
@@ -1817,10 +1809,7 @@ def apply_sparse_draft_repetition_penalty(
         return None
 
     history_width = max(
-        (
-            len(request["seen"])
-            for request in state.packed.requests.values()
-        ),
+        (len(request["seen"]) for request in state.packed.requests.values()),
         default=0,
     )
     if history_width:
@@ -2071,11 +2060,7 @@ def fused_repetition_greedy(
             return None
     max_batch_size = int(getattr(sampling_metadata, "_vspec_max_num_reqs", num_requests))
     state = getattr(owner, "_vspec_packed_repetition_state", None)
-    if (
-        state is None
-        or state.vocab_size != token_id_limit
-        or state.max_batch_size < max_batch_size
-    ):
+    if state is None or state.vocab_size != token_id_limit or state.max_batch_size < max_batch_size:
         state = _PackedRepetitionState(
             max_batch_size=max_batch_size,
             vocab_size=token_id_limit,
@@ -2089,23 +2074,15 @@ def fused_repetition_greedy(
     row_indices = torch.cat((metadata.target_logits_indices, metadata.bonus_logits_indices))
     repeat_indices_tensor, local_positions_tensor = state.row_layout(metadata.num_draft_tokens)
     num_rows = int(row_indices.numel())
-    vocab_block_size = int(
-        os.environ.get("VSPEC_DRAFT_TARGET_REPETITION_BLOCK_SIZE", "2048")
-    )
+    vocab_block_size = int(os.environ.get("VSPEC_DRAFT_TARGET_REPETITION_BLOCK_SIZE", "2048"))
     if vocab_block_size not in {1024, 2048, 4096}:
         raise ValueError(
-            "VSPEC_DRAFT_TARGET_REPETITION_BLOCK_SIZE must be one of "
-            "1024, 2048, or 4096"
+            "VSPEC_DRAFT_TARGET_REPETITION_BLOCK_SIZE must be one of 1024, 2048, or 4096"
         )
     num_vocab_blocks = triton.cdiv(compact_vocab_size, vocab_block_size)
-    partial_limit = int(
-        os.environ.get("VSPEC_DRAFT_TARGET_REPETITION_PARTIALS", "16")
-    )
+    partial_limit = int(os.environ.get("VSPEC_DRAFT_TARGET_REPETITION_PARTIALS", "16"))
     if partial_limit not in {8, 16, 32, 64}:
-        raise ValueError(
-            "VSPEC_DRAFT_TARGET_REPETITION_PARTIALS must be one of "
-            "8, 16, 32, or 64"
-        )
+        raise ValueError("VSPEC_DRAFT_TARGET_REPETITION_PARTIALS must be one of 8, 16, 32, or 64")
     num_partials = min(partial_limit, num_vocab_blocks)
     scratch_key = str(logits.device)
     scratch = _FUSED_GREEDY_SCRATCH.get(scratch_key)

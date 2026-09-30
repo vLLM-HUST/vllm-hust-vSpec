@@ -46,7 +46,7 @@ def _patch_metadata_cache(model_runner_cls: Any) -> bool:
         cache_enabled = (
             self.use_async_scheduling
             and self.speculative_config is not None
-            and self.speculative_config.method == "eagle"
+            and self.speculative_config.method in {"eagle", "eagle3"}
             and getattr(self, "pcp_size", 1) * getattr(self, "dcp_size", 1) == 1
             and len(num_draft_tokens) == self.max_num_reqs
             and np.all(num_draft_tokens == self.num_spec_tokens)

@@ -87,10 +87,16 @@ def apply_eagle_patches(settings: PluginSettings) -> bool:
         from .eagle_parallel_update import apply_parallel_graph_update_patch
 
         applied = apply_parallel_graph_update_patch(parallel_update_workers) or applied
-    if os.environ.get("VSPEC_EAGLE_DRAFT_BODY_W8A16") == "1":
+    draft_body_w8a16 = os.environ.get("VSPEC_EAGLE_DRAFT_BODY_W8A16") == "1"
+    draft_body_w8a8 = os.environ.get("VSPEC_EAGLE_DRAFT_BODY_W8A8") == "1"
+    if draft_body_w8a16 and draft_body_w8a8:
+        raise RuntimeError("EAGLE draft body W8A16 and W8A8 are mutually exclusive")
+    if draft_body_w8a16 or draft_body_w8a8:
         from .eagle_body_quant import apply_eagle_body_quantization_patch
 
-        applied = apply_eagle_body_quantization_patch() or applied
+        applied = apply_eagle_body_quantization_patch(
+            "w8a8" if draft_body_w8a8 else "w8a16"
+        ) or applied
     target_w8a16 = os.environ.get("VSPEC_TARGET_BODY_W8A16") == "1"
     target_w8a8 = os.environ.get("VSPEC_TARGET_BODY_W8A8") == "1"
     if target_w8a16 and target_w8a8:
@@ -128,7 +134,10 @@ def apply_eagle_patches(settings: PluginSettings) -> bool:
     if settings.eagle_target_active_vocab:
         from .eagle_target import apply_target_active_vocab_patch
 
-        applied = apply_target_active_vocab_patch() or applied
+        applied = apply_target_active_vocab_patch(
+            required_method=settings.method,
+            feature_name=f"{settings.method.upper()} Target",
+        ) or applied
     if settings.eagle_draft_active_vocab:
         from .eagle_draft import apply_draft_active_vocab_patch
 
@@ -147,6 +156,37 @@ def apply_eagle_patches(settings: PluginSettings) -> bool:
 
         applied = apply_eagle_runtime_patch() or applied
     if settings.method == "eagle3":
+        from .eagle3_gdn_metadata import apply_eagle3_gdn_metadata_sharing_patch
+        from .eagle3_hybrid import (
+            apply_eagle3_cohort_refill_patch,
+            apply_eagle3_compact_group_patch,
+            apply_eagle3_draft_block_size_patch,
+            apply_eagle3_fused_mamba_precopy_patch,
+            apply_eagle3_hybrid_cache_patch,
+            apply_eagle3_hybrid_group_annotation_patch,
+            apply_eagle3_nonuniform_zeroer_patch,
+        )
+        from .eagle3_replicated_sample import apply_eagle3_replicated_sample_patch
+        from .mamba_compat import apply_mamba_runtime_compatibility_patch
+        from .mtp import _patch_async_mtp_device_counts
+
+        applied = apply_mamba_runtime_compatibility_patch() or applied
+        if os.environ.get("HUST_VSPEC_EAGLE3_REPLICATED_DRAFT_ARGMAX", "0") == "1":
+            applied = apply_eagle3_replicated_sample_patch() or applied
+        applied = apply_eagle3_fused_mamba_precopy_patch() or applied
+        if os.environ.get("HUST_VSPEC_EAGLE3_DEVICE_COUNTS", "0") == "1":
+            applied = _patch_async_mtp_device_counts(
+                methods=frozenset({"eagle3"}),
+                enabled=True,
+            ) or applied
+        applied = apply_eagle3_cohort_refill_patch() or applied
+        applied = apply_eagle3_compact_group_patch() or applied
+        if os.environ.get("HUST_VSPEC_EAGLE3_GDN_METADATA_SHARE", "0") == "1":
+            applied = apply_eagle3_gdn_metadata_sharing_patch() or applied
+        applied = apply_eagle3_hybrid_group_annotation_patch() or applied
+        applied = apply_eagle3_draft_block_size_patch() or applied
+        applied = apply_eagle3_hybrid_cache_patch() or applied
+        applied = apply_eagle3_nonuniform_zeroer_patch() or applied
         return applied
 
     try:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from vllm_hust_vspec.backends.eagle_metadata import _patch_metadata_cache
 
@@ -15,7 +16,8 @@ class _Metadata:
     draft_token_ids: np.ndarray
 
 
-def test_metadata_cache_supports_current_two_argument_signature() -> None:
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+def test_metadata_cache_supports_current_two_argument_signature(method: str) -> None:
     class ModelRunner:
         calls = 0
 
@@ -34,7 +36,7 @@ def test_metadata_cache_supports_current_two_argument_signature() -> None:
     assert _patch_metadata_cache(ModelRunner)
     runner = ModelRunner()
     runner.use_async_scheduling = True
-    runner.speculative_config = SimpleNamespace(method="eagle")
+    runner.speculative_config = SimpleNamespace(method=method)
     runner.dcp_size = 1
     runner.max_num_reqs = 2
     runner.num_spec_tokens = 2

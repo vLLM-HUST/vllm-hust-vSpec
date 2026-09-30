@@ -1,0 +1,22 @@
+{
+  "url": "http://127.0.0.1:18185",
+  "model": "qwen3.5-35b-a3b-frontier-baseline",
+  "model_revision": "REPLACE_WITH_IMMUTABLE_WEIGHTS_REVISION",
+  "tokenizer": "/workspace/models/Qwen3.5-35B-A3B",
+  "tokenizer_revision": "REPLACE_WITH_IMMUTABLE_TOKENIZER_REVISION",
+  "engine": {
+    "name": "vLLM-HUST + vLLM-Ascend-HUST",
+    "revision": "REPLACE_WITH_VLLM_HUST_AND_ASCEND_COMMITS",
+    "launch_command_without_secrets": "See docs/agentx_256k_benchmark.md#target-only"
+  },
+  "hardware": {
+    "accelerator": "Ascend 910B2",
+    "device_count": 2,
+    "allocated_host_dram_gib": 0
+  },
+  "max_model_len": 262144,
+  "host_kv_budget_gib": 0,
+  "speculative_decoding": {
+    "enabled": false
+  }
+}

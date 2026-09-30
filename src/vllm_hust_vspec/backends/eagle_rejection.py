@@ -23,9 +23,7 @@ PATCH_MARKER = "_vllm_hust_vspec_linear_rejection_patched"
 SAMPLING_METADATA_PATCH_MARKER = "_vllm_hust_vspec_repetition_metadata_patched"
 EXACT_REPETITION_TOPK_ENV = "HUST_VSPEC_DRAFT_EXACT_REPETITION_TOPK"
 LEGACY_EXACT_REPETITION_TOPK_ENV = "VSPEC_DRAFT_EXACT_REPETITION_TOPK"
-EXACT_REPETITION_SYNC_PROOF_ENV = (
-    "HUST_VSPEC_DRAFT_EXACT_REPETITION_SYNC_PROOF"
-)
+EXACT_REPETITION_SYNC_PROOF_ENV = "HUST_VSPEC_DRAFT_EXACT_REPETITION_SYNC_PROOF"
 SPARSE_REPETITION_TOPK_ENV = "VSPEC_DRAFT_SPARSE_REPETITION_TOPK"
 FUSED_REPETITION_ENV = "VSPEC_DRAFT_FUSED_REPETITION"
 NATIVE_REPETITION_ENV = "VSPEC_DRAFT_NATIVE_REPETITION"
@@ -90,8 +88,7 @@ def _filter_confidence_accept_mask(
             raise ValueError("output token IDs are required for confidence prefix protection")
         lengths = tuple(int(length) for length in metadata.num_draft_tokens)
         request_enabled = tuple(
-            index < len(output_token_ids)
-            and len(output_token_ids[index]) >= min_generated_tokens
+            index < len(output_token_ids) and len(output_token_ids[index]) >= min_generated_tokens
             for index in range(len(lengths))
         )
         key = (str(relaxed_mask.device), lengths, request_enabled)
@@ -489,9 +486,7 @@ def _exact_topk_repetition_greedy(
         logits,
         sampling_metadata,
         candidate_count,
-        synchronize_proof=(
-            os.environ.get(EXACT_REPETITION_SYNC_PROOF_ENV, "1") == "1"
-        ),
+        synchronize_proof=(os.environ.get(EXACT_REPETITION_SYNC_PROOF_ENV, "1") == "1"),
     )
 
 
@@ -652,9 +647,7 @@ def _sparse_repetition_greedy(
         target_rows,
     )
     repeat_indices = torch.cat((target_repeat_indices, request_indices))
-    row_indices = torch.cat(
-        (metadata.target_logits_indices, metadata.bonus_logits_indices)
-    )
+    row_indices = torch.cat((metadata.target_logits_indices, metadata.bonus_logits_indices))
     candidate_count = min(candidate_count, logits.shape[-1])
     candidate_values, candidate_ids = logits[row_indices].topk(
         candidate_count,
@@ -663,9 +656,7 @@ def _sparse_repetition_greedy(
     candidate_values = candidate_values.to(torch.float32)
 
     prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]
-    prompt_seen = (
-        candidate_ids.unsqueeze(-1) == prompt_token_ids.unsqueeze(1)
-    ).any(dim=-1)
+    prompt_seen = (candidate_ids.unsqueeze(-1) == prompt_token_ids.unsqueeze(1)).any(dim=-1)
     histories = [*target_histories, *bonus_histories]
     output_token_ids = make_tensor_with_pad(
         histories,
@@ -674,9 +665,7 @@ def _sparse_repetition_greedy(
         dtype=torch.int64,
         pin_memory=is_pin_memory_available(),
     ).to(logits.device, non_blocking=True)
-    output_seen = (
-        candidate_ids.unsqueeze(-1) == output_token_ids.unsqueeze(1)
-    ).any(dim=-1)
+    output_seen = (candidate_ids.unsqueeze(-1) == output_token_ids.unsqueeze(1)).any(dim=-1)
     seen = prompt_seen | output_seen
     penalties = sampling_metadata.repetition_penalties[repeat_indices].unsqueeze(-1)
     penalized_values = torch.where(
@@ -824,9 +813,7 @@ def _trace_exact_topk_eligibility(owner: Any, sampling_metadata: Any) -> None:
     owner._vspec_topk_repetition_eligibility_traced = True
     logits_processors = getattr(sampling_metadata, "logitsprocs", None)
     non_argmax_count = (
-        -1
-        if logits_processors is None
-        else len(logits_processors.non_argmax_invariant)
+        -1 if logits_processors is None else len(logits_processors.non_argmax_invariant)
     )
     print(
         "vSpec exact repetition eligibility: "

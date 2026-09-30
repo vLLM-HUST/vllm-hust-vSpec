@@ -1,0 +1,40 @@
+[serve]
+target_model = "/workspace/models/Qwen3.5-35B-A3B"
+method = "mtp"
+served_model_name = "qwen3.5-35b-a3b-mtp2"
+gamma = 2
+max_num_seqs = 16
+max_num_batched_tokens = 8192
+max_model_len = 4096
+dtype = "bfloat16"
+block_size = 128
+tensor_parallel_size = 2
+gpu_memory_utilization = 0.90
+host = "127.0.0.1"
+port = 18185
+device = "0,1"
+graph_mode = "full-decode-only"
+generation_config = "vllm"
+async_scheduling = false
+prefix_caching = false
+chunked_prefill = true
+language_model_only = true
+capture_policy = "exact"
+disable_log_stats = false
+adaptive_speculation = false
+mtp_strict_graph = true
+mtp_local_argmax_reduction = false
+vllm_source = "/root/data/vllm-hust-latest"
+ascend_source = "/root/data/vllm-ascend-hust-latest"
+extra_args = [
+  "--enable-expert-parallel",
+  "--additional-config",
+  '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}',
+]
+
+[env]
+HCCL_BUFFSIZE = "1024"
+HCCL_OP_EXPANSION_MODE = "AIV"
+VLLM_NO_USAGE_STATS = "1"
+PYTHONDONTWRITEBYTECODE = "1"
+PYTORCH_NPU_ALLOC_CONF = "expandable_segments:True"

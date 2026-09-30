@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 import inspect
+from functools import cache
 from typing import Any
+
+
+@cache
+def _keyword_support(callable_object: Any) -> tuple[bool, frozenset[str]]:
+    parameters = inspect.signature(callable_object).parameters.values()
+    accepts_variadic = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters
+    )
+    return accepts_variadic, frozenset(parameter.name for parameter in parameters)
 
 
 def call_with_supported_kwargs(
@@ -12,10 +22,9 @@ def call_with_supported_kwargs(
     *args: Any,
     **kwargs: Any,
 ) -> Any:
-    parameters = inspect.signature(callable_object).parameters.values()
-    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+    accepts_variadic, supported_names = _keyword_support(callable_object)
+    if accepts_variadic:
         return callable_object(*args, **kwargs)
-    supported_names = {parameter.name for parameter in parameters}
     return callable_object(
         *args,
         **{name: value for name, value in kwargs.items() if name in supported_names},

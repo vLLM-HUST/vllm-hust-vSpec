@@ -6,8 +6,12 @@ from importlib import resources
 from importlib.metadata import entry_points, version
 from pathlib import Path
 
+import pytest
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 from vllm_hust_ext.discovery import discover_bundles
 from vllm_hust_ext.manifest import load_manifest
+from vllm_hust_ext.providers.base import assess_compatibility
 
 import vllm_hust_vspec
 from vllm_hust_vspec import manifests
@@ -45,6 +49,40 @@ def test_manifest_matches_registration_boundary() -> None:
         item.name == "vspec" and item.value == "vllm_hust_vspec:register"
         for item in plugin_registrations
     )
+
+
+@pytest.mark.parametrize(
+    "host_version",
+    (
+        "0.17.2rc1.dev5871+g762f85b31.empty",
+        "0.25.1rc1",
+        "0.25.1",
+    ),
+)
+def test_manifest_admits_validated_host_lines(host_version: str) -> None:
+    manifest = load_manifest(manifest_path())
+
+    assert Version(host_version) in SpecifierSet(manifest.host.version_range)
+    compatible, evidence = assess_compatibility(
+        manifest,
+        {"host_version": host_version},
+    )
+
+    assert compatible is True
+    assert any("satisfies the declared range" in item for item in evidence)
+
+
+@pytest.mark.parametrize("host_version", ("0.17.1", "0.26.0rc1", "0.26.0"))
+def test_manifest_rejects_hosts_outside_admission_envelope(host_version: str) -> None:
+    manifest = load_manifest(manifest_path())
+
+    compatible, evidence = assess_compatibility(
+        manifest,
+        {"host_version": host_version},
+    )
+
+    assert compatible is False
+    assert "outside" in evidence[0]
 
 
 def test_extension_manager_discovers_static_bundle() -> None:

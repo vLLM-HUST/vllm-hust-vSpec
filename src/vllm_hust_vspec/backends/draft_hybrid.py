@@ -51,9 +51,7 @@ def _hybrid_second_token_kernel(
             suffix_position = tl.where(suffix_position >= 0, suffix_position, 0)
             suffix = tl.load(history_ptr + row_offset + suffix_position)
             matches &= values == suffix
-        valid = (total_len >= ngram_len) & (
-            offsets < total_len - ngram_len
-        )
+        valid = (total_len >= ngram_len) & (offsets < total_len - ngram_len)
         best_lengths = tl.where(
             matches & valid,
             ngram_len,
@@ -87,8 +85,7 @@ def _hybrid_second_token_kernel(
     )
     pair_key = base_token.to(tl.int64) * vocab_size + first_token.to(tl.int64)
     pair_hash = (
-        base_token.to(tl.int64) * 1315423911
-        + first_token.to(tl.int64) * 2654435761
+        base_token.to(tl.int64) * 1315423911 + first_token.to(tl.int64) * 2654435761
     ) & pair_table_mask
     pair_candidate = -1
     for probe in tl.static_range(0, PAIR_PROBES):

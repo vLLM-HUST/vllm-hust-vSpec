@@ -1,7 +1,9 @@
 # vllm-hust-vSpec
 
 `vllm-hust-vSpec` 是面向 vLLM-HUST + vLLM-Ascend-HUST 的独立
-`vllm.general_plugins` 投机解码插件。插件支持动态 gamma，并提供已验证的 Draft 和 EAGLE 投机解码方案、模型配置、Eager/Graph 启动参数以及 Ascend方法专属优化。
+`vllm.general_plugins` 投机解码插件。插件支持动态 gamma，并提供已验证的 Draft 和
+EAGLE 投机解码方案，以及 Qwen3.5 原生 MTP、模型配置、Eager/Graph 启动参数和
+Ascend 方法专属优化。
 
 Extension Manager ID：`org.vllm-hust.vspec`。插件遵循 Manifest
 `0.2-experimental` 的 `in_process_plugin` 边界，同时注册
@@ -17,9 +19,45 @@ Extension Manager ID：`org.vllm-hust.vspec`。插件遵循 Manifest
 | `draft` | `draft_model` | Qwen2.5-14B-Instruct | Qwen2.5-0.5B-Instruct |
 | `eagle` | `eagle` | Qwen2.5-14B-Instruct | Eagle-Qwen2.5-14B-Instruct |
 | `eagle-relaxed` | `eagle` | Qwen2.5-14B-Instruct | Eagle-Qwen2.5-14B-Instruct |
+| `qwen35-frontier-mtp2` | `mtp` | Qwen3.5-35B-A3B | checkpoint 内置 MTP head |
 
 `eagle-relaxed` 是显式性能/质量折中预设，会使用 top-K relaxed acceptance，
 输出不保证与严格 greedy EAGLE 一致。普通 `eagle` 始终默认 top-1 严格验收。
+
+Qwen3.5 MTP 使用宿主 vLLM-HUST/vLLM-Ascend-HUST 的原生实现。`--method mtp`
+不需要 `--draft-model`，未显式设置 `--gamma` 时默认使用 MTP2；文本数据可配合
+`--language-model-only` 跳过视觉编码器。MTP 当前采用固定预算，不启用 vSpec Adaptive。
+默认的 `--mtp-strict-graph` 会在任一 MTP decode 批次未命中完整图时终止服务，避免
+静默 eager 回退污染性能结果。
+
+Qwen3.5 的 Ascend 自定义算子必须使用与 `vllm-ascend` 二进制构建时一致的 CANN
+运行时。本仓库的验证环境为 CANN 9.1；若误加载 CANN 9.0，会出现
+`npu_gemma_rms_norm`、`moe_gating_top_k` 或 `npu_causal_conv1d_custom` 缺失，
+这不是模型权重问题。Frontier 固定协议、图模式证据、并发边界和 GSM8K 结果见
+[`docs/qwen35_frontier_mtp2.md`](docs/qwen35_frontier_mtp2.md)。可直接交付给测试人员的
+模型准备、数据集物化、服务启动和 MTP2 GSM8K 压测命令见
+[`docs/qwen35_frontier_mtp2_gsm8k_commands.md`](docs/qwen35_frontier_mtp2_gsm8k_commands.md)。
+
+```bash
+# Qwen3.5-35B-A3B Frontier：TP2 + APC + async +
+# FULL_AND_PIECEWISE + 256K + fixed MTP2
+vllm-hust-vspec \
+  --protocol qwen35-frontier-mtp2 \
+  --target-model /workspace/models/Qwen3.5-35B-A3B \
+  --device 0,1
+
+# 同配置 GSM8K target-only / MTP2 配对回归；默认门槛 1.10x
+scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh pair
+```
+
+当前固定协议在 GSM8K N200、输出长度 256、客户端并发 4 下从
+`171.47 tok/s` 提升到 `235.44 tok/s`，即 `1.373x`。并发 16 时 target 已接近饱和，
+MTP2 不再有收益；完整结果不能外推到未测试的负载。该协议会拒绝覆盖 method、
+gamma、TP、256K、APC、async 或 graph mode，避免启动参数静默偏离验证条件。
+
+Agent 长上下文负载可使用 AgentX 256K 官方闭环回放。插件提供 target-only/MTP2
+配置模板和 SPEED-Bench 强制验收长度入口；指标解释、公平对照要求与当前证据缺口见
+[`docs/agentx_256k_benchmark.md`](docs/agentx_256k_benchmark.md)。
 
 插件还提供 **vSpec Adaptive** 闭环控制。串行 Draft 和 EAGLE 启动时
 默认启用无需离线标定的 `online` 策略；可用 `--no-adaptive-speculation` 显式关闭。
@@ -54,6 +92,8 @@ vllm-hust-vSpec/
 │   ├── qwen25-14b-eagle.toml
 │   ├── qwen25-14b-eagle-arc-easy.toml
 │   ├── qwen25-14b-eagle-relaxed.toml
+│   ├── qwen35-35b-a3b-mtp2.toml
+│   └── qwen35-35b-a3b-frontier-mtp2.toml
 ├── profiles/
 │   ├── qwen25_draft_gsm8k_graph_b128_g4.json
 │   └── qwen25_eagle_gsm8k_graph_b128.json
@@ -62,6 +102,7 @@ vllm-hust-vSpec/
 │   ├── backends/
 │   │   ├── draft.py
 │   │   ├── eagle.py
+│   │   ├── mtp.py
 │   │   ├── eagle_draft.py
 │   │   ├── eagle_graph.py
 │   │   ├── eagle_host.py
@@ -85,7 +126,10 @@ vllm-hust-vSpec/
 │   ├── config.py
 │   ├── model_store.py
 │   └── patches.py
-├── scripts/verify_release.py
+├── scripts/
+│   ├── benchmark_qwen35_frontier_mtp2_gsm8k.sh
+│   ├── benchmark_qwen35_mtp2_gsm8k.sh
+│   └── verify_release.py
 ├── tests/
 │   ├── test_extension_lifecycle.py
 │   ├── test_launcher.py
@@ -115,16 +159,17 @@ cd /root/data/vllm-hust-vSpec
 `vllm_hust.extension_bundles` entry point。默认安装不会自动启用；`--enable` 会在
 Manager 完成静态发现和兼容性检查后显式启用。
 
-`manage.sh install` 和 `install.sh` 还会自动准备两个默认 Drafter：
+`manage.sh install` 和 `install.sh` 会询问是否准备两个默认 Drafter，默认回答为不下载：
 
 | 方法 | 默认仓库 | 默认目录名 |
 |---|---|---|
 | Draft | `Qwen/Qwen2.5-0.5B-Instruct` | `Qwen2.5-0.5B-Instruct` |
 | EAGLE | `Zjcxy-SmartAI/Eagle-Qwen2.5-14B-Instruct` | `Eagle-Qwen2.5-14B-Instruct` |
 
-安装器先检查环境变量、已有登记和 `/data/shared-models` 下的模型，并校验
+选择下载后，安装器先检查环境变量、已有登记和 `/data/shared-models` 下的模型，并校验
 `config.json`、architecture、非空权重及 Draft tokenizer；只在没有可用副本时通过
-`huggingface_hub` 下载已验证 revision。结果写入
+`huggingface_hub` 下载已验证 revision。选择不下载时，安装仍会成功，并只登记已经存在
+且校验通过的模型。结果写入
 `${XDG_CONFIG_HOME:-$HOME/.config}/vllm-hust-vspec/models.json`。下载根目录优先使用
 可写的 `/data/shared-models`，否则使用
 `${XDG_DATA_HOME:-$HOME/.local/share}/vllm-hust-vspec/models`。
@@ -132,10 +177,14 @@ Manager 完成静态发现和兼容性检查后显式启用。
 ```bash
 # 自定义下载目录和登记文件
 ./manage.sh install --editable \
+  --model-download \
   --model-dir /models/vspec \
   --model-registry /etc/vllm-hust-vspec/models.json
 
-# 离线环境只检测，不下载；缺少任一模型时安装失败
+# 非交互环境显式下载
+./manage.sh install --editable --model-download
+
+# 只登记已有模型，不下载；缺少的模型不会阻止插件安装
 ./manage.sh install --editable --no-model-download
 
 # 单独补做模型准备
@@ -152,7 +201,8 @@ post-install hook；使用这种安装方式后需另行执行 `vllm-hust-vspec-
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.13.3-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.14.2-py3-none-any.whl
+# 可选：需要默认 Draft/EAGLE 模型时再执行
 vllm-hust-vspec-models
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
@@ -166,6 +216,7 @@ vllm-hust-ext extension inspect org.vllm-hust.vspec
 vllm-hust-vspec-doctor --method draft
 vllm-hust-vspec-doctor --method eagle --json
 vllm-hust-vspec-doctor --method eagle --adaptive
+vllm-hust-vspec-doctor --method mtp --json
 ```
 
 检查结果包含 vLLM/vLLM-Ascend 版本、Git revision、dirty 状态和所需 API。
@@ -173,10 +224,13 @@ vllm-hust-vspec-doctor --method eagle --adaptive
 
 ## Extension Manager 生命周期
 
-当前 Manifest 的兼容范围精确限定为已经验证的 vLLM-HUST distribution
-`0.17.2rc1.dev5871+g762f85b31.empty`。vLLM-Ascend 的投机解码接口没有独立
-语义版本，因此在 Manifest 中明确标为未版本化，并由
-`vllm-hust-vspec-doctor` 在运行前按真实 ABI 检查。已验证源码基线为：
+当前 Manifest 的 ECPA host 准入范围为
+`>=0.17.2rc1.dev5871,<0.26`：既保留旧版
+`0.17.2rc1.dev5871+g762f85b31.empty`，也允许 ABI 检查已通过的 Frontier
+`0.25.1` host。该连续区间只是 ECPA 的静态准入边界，不表示其中每个中间版本都已
+完成端到端性能验证。vLLM-Ascend 的投机解码接口没有独立语义版本，因此在 Manifest
+中明确标为未版本化，并由 `vllm-hust-vspec-doctor` 在运行前按真实 ABI fail closed。
+已验证源码基线为：
 
 - vLLM-HUST：`762f85b311fbab0bcf8921dd216f5093cd58b9b8`
 - vLLM-Ascend-HUST：`4e57439e58ed3d78e675f9fd7b4614fb183c5394`
@@ -253,10 +307,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.13.3 --enable
+./manage.sh upgrade --version 0.14.2 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.13.3-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.14.2-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -280,12 +334,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.13.3` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由 `v0.14.2` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.13.3
+export VSPEC_RELEASE_CONFIRM=0.14.2
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```

@@ -69,6 +69,7 @@ def apply_graph_event_ordering_patch() -> bool:
         _call_host_graph_init(original_init, self, *args, **kwargs)
         self.event_ordered_replay = self.runtime_mode == CUDAGraphMode.FULL
         self._pending_update_dependency_event = None
+        self._last_replay_done_event = None
 
     def wait_for_prior_replay_before_update(
         self: Any,
@@ -94,11 +95,11 @@ def apply_graph_event_ordering_patch() -> bool:
         if entry is None or entry.aclgraph is None:
             return original_call(self, *args, **kwargs)
 
-        self._pending_update_dependency_event = getattr(
-            entry,
-            "last_replay_done_event",
-            None,
-        )
+        # Updates are issued on a separate stream after replay is enqueued.
+        # The dependency must follow the wrapper's actual previous replay,
+        # not the previous replay of the descriptor selected for this call.
+        # Those differ whenever adaptive gamma changes the query width.
+        self._pending_update_dependency_event = self._last_replay_done_event
         original_enable_enpu = self.enable_enpu
         self.enable_enpu = True
         try:
@@ -116,6 +117,7 @@ def apply_graph_event_ordering_patch() -> bool:
         replay_done_event = events[event_index]
         replay_done_event.record()
         entry.last_replay_done_event = replay_done_event
+        self._last_replay_done_event = replay_done_event
         return output
 
     def target_update(self: Any, *args: Any, **kwargs: Any) -> Any:

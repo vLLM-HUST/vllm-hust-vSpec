@@ -157,6 +157,31 @@ def test_bootstrap_offline_rejects_missing_model(tmp_path: Path) -> None:
             )
 
 
+def test_bootstrap_offline_can_register_only_existing_models(tmp_path: Path) -> None:
+    model_dir = tmp_path / "models"
+    registry = tmp_path / "models.json"
+    draft = create_model(model_dir, "draft")
+
+    with mock.patch(
+        "vllm_hust_vspec.model_store.SHARED_MODEL_DIR",
+        tmp_path / "missing-shared-models",
+    ), mock.patch(
+        "vllm_hust_vspec.model_store.CONTAINER_MODEL_DIR",
+        tmp_path / "missing-container-models",
+    ):
+        resolved = bootstrap_default_models(
+            model_dir=model_dir,
+            registry_path=registry,
+            download=False,
+            allow_missing=True,
+            environment={},
+        )
+
+    assert resolved == {"draft": draft.resolve()}
+    document = json.loads(registry.read_text(encoding="utf-8"))
+    assert set(document["models"]) == {"draft"}
+
+
 def test_validation_rejects_wrong_architecture(tmp_path: Path) -> None:
     spec = next(item for item in DEFAULT_MODEL_SPECS if item.key == "eagle")
     path = tmp_path / "eagle"

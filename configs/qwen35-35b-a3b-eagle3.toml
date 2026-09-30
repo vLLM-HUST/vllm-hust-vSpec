@@ -1,0 +1,51 @@
+[serve]
+target_model = "/workspace/models/Qwen3.5-35B-A3B"
+draft_model = "/workspace/models/Qwen3.5-35B-A3B-Eagle3-Specforge"
+method = "eagle3"
+served_model_name = "qwen3.5-35b-a3b-eagle3"
+gamma = 5
+max_num_seqs = 16
+max_num_batched_tokens = 8192
+max_model_len = 262144
+dtype = "bfloat16"
+kv_cache_dtype = "auto"
+block_size = 128
+tensor_parallel_size = 2
+draft_tensor_parallel_size = 1
+gpu_memory_utilization = 0.90
+host = "127.0.0.1"
+port = 18185
+device = "0,1"
+graph_mode = "full-and-piecewise"
+generation_config = "vllm"
+async_scheduling = true
+prefix_caching = true
+chunked_prefill = true
+language_model_only = true
+capture_policy = "exact"
+disable_log_stats = false
+adaptive_speculation = false
+graph_event_ordering = true
+eagle_spec_metadata_cache = true
+extra_args = [
+  "--enable-expert-parallel",
+  "--additional-config",
+  '{"enable_cpu_binding":true,"enable_reduce_sample":true}',
+]
+
+[env]
+VLLM_NO_USAGE_STATS = "1"
+VLLM_USE_AOT_COMPILE = "0"
+PYTHONDONTWRITEBYTECODE = "1"
+VSPEC_EAGLE3_DRAFT_BLOCK_SIZE = "128"
+VSPEC_EAGLE3_KV_GROUP_SIZE = "4"
+HUST_VSPEC_EAGLE3_GROUP_TRACE = "1"
+HUST_VSPEC_EAGLE3_GDN_METADATA_SHARE = "1"
+HUST_VSPEC_EAGLE3_COHORT_REFILL = "1"
+HUST_VSPEC_REFILL_EXPLORATION = "0.15"
+HUST_VSPEC_REFILL_FUTURE_DISCOUNT = "1.0"
+HUST_VSPEC_REFILL_HYSTERESIS = "0.03"
+HUST_VSPEC_REFILL_MAX_HOLDS = "8"
+VSPEC_EAGLE_PARALLEL_GRAPH_UPDATES = "4"
+VSPEC_EAGLE_DRAFT_BODY_W8A16 = "1"
+HUST_VSPEC_EAGLE3_REPLICATED_DRAFT_ARGMAX = "0"

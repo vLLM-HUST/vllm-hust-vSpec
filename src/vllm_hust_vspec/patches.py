@@ -31,4 +31,8 @@ def apply_patches(settings: PluginSettings) -> bool:
         # DFlash is provided by vLLM-Ascend; vSpec contributes the adaptive
         # control and graph-width hooks installed above.
         return applied
+    if settings.method == "mtp":
+        from .backends.mtp import apply_mtp_patches
+
+        return apply_mtp_patches(settings) or applied
     raise ValueError(f"unsupported vSpec method: {settings.method}")

@@ -18,7 +18,7 @@ def test_release_source_metadata_is_consistent() -> None:
         text=True,
     )
 
-    assert "source_version=0.13.2" in result.stdout
+    assert "source_version=0.14.2" in result.stdout
 
 
 def test_release_build_removes_uv_dist_gitignore(tmp_path: Path) -> None:
@@ -45,8 +45,8 @@ def test_release_build_removes_uv_dist_gitignore(tmp_path: Path) -> None:
         "set -euo pipefail\n"
         f"mkdir -p {dist_dir}\n"
         f"printf '*' > {dist_dir / '.gitignore'}\n"
-        f"touch {dist_dir / 'vllm_hust_vspec-0.13.2-py3-none-any.whl'}\n"
-        f"touch {dist_dir / 'vllm_hust_vspec-0.13.2.tar.gz'}\n",
+        f"touch {dist_dir / 'vllm_hust_vspec-0.14.2-py3-none-any.whl'}\n"
+        f"touch {dist_dir / 'vllm_hust_vspec-0.14.2.tar.gz'}\n",
         encoding="utf-8",
     )
     fake_uv.chmod(0o755)

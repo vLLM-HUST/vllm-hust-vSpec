@@ -31,6 +31,7 @@ def test_manage_install_editable_and_enable() -> None:
 
     assert "pip install --no-deps --editable" in result.stdout
     assert "-m vllm_hust_vspec.model_store" in result.stdout
+    assert "--no-download --allow-missing" in result.stdout
     assert "extension inspect org.vllm-hust.vspec" in result.stdout
     assert "extension validate org.vllm-hust.vspec" in result.stdout
     assert "extension check org.vllm-hust.vspec" in result.stdout
@@ -52,6 +53,18 @@ def test_manage_install_model_setup_controls() -> None:
     assert "--model-dir /models" in result.stdout
     assert "--registry /config/models.json" in result.stdout
     assert "--no-download" in result.stdout
+    assert "--allow-missing" in result.stdout
+
+    downloading = run_script(
+        "manage.sh", "install", "--editable", "--model-download"
+    )
+    model_command = next(
+        line
+        for line in downloading.stdout.splitlines()
+        if "vllm_hust_vspec.model_store" in line
+    )
+    assert "--no-download" not in model_command
+    assert "--allow-missing" not in model_command
 
     skipped = run_script("manage.sh", "install", "--editable", "--skip-model-setup")
     assert "vllm_hust_vspec.model_store" not in skipped.stdout

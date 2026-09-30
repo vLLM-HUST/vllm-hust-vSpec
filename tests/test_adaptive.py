@@ -27,13 +27,20 @@ from vllm_hust_vspec.adaptive.profiling import (
     measurement_to_samples,
 )
 from vllm_hust_vspec.adaptive.runtime import (
+    _active_dispatch_query_width,
+    _adaptive_candidate_batch_limits,
     _adaptive_capture_query_lens,
     _adaptive_draft_capture_gammas,
+    _adaptive_graph_batch_limit,
     _adaptive_scheduled_batch_size,
     _adaptive_target_query_lens,
     _add_adaptive_decode_graph_keys,
     _batch_descriptor_query_width,
+    _can_use_eagle3_native_scheduler_hold,
     _can_use_stable_configured_draft_path,
+    _configure_eagle3_runtime_anchor,
+    _configure_mtp_runtime_anchor,
+    _configure_serial_draft_runtime_anchor,
     _copy_dynamic_draft_tokens,
     _current_eagle_confidence_accept_enabled,
     _current_target_is_target_only,
@@ -44,10 +51,21 @@ from vllm_hust_vspec.adaptive.runtime import (
     _draft_capture_runnable,
     _draft_entropy_matrix,
     _draft_full_graph_batch_matches_capture,
+    _eagle3_cohort_refill_enabled,
+    _eagle3_native_anchor_query_width,
+    _force_eagle3_non_decode_target_eager,
+    _force_non_native_serial_draft_target_eager,
     _full_graph_batch_matches_capture,
     _initialize_adaptive_decode_only_graph_keys,
+    _initialize_adaptive_graph_keys,
     _install_draft_entropy_probe,
+    _is_eagle3_anchor_runtime,
+    _native_full_graph_gamma,
     _nonuniform_batch_descriptor,
+    _normalize_spec_decoding_stats_width,
+    _online_initial_gamma,
+    _online_probe_shared_cost_units,
+    _pin_runner_query_width,
     _prepare_target_graph_params,
     _proposal_execution_gamma,
     _proposal_input_query_width,
@@ -57,8 +75,15 @@ from vllm_hust_vspec.adaptive.runtime import (
     _runtime_dynamic_eagle_state_kernel,
     _runtime_eager_dispatch,
     _runtime_eager_proposer,
+    _runtime_proposal_query_width,
     _runtime_runner_query_width,
+    _runtime_target_metadata_query_width,
     _runtime_target_query_width,
+    _scheduler_runtime_gamma,
+    _should_hold_eagle3_async_cohort,
+    _should_hold_growing_initial_cohort,
+    _should_hold_initial_cohort,
+    _synchronize_eagle3_width_transition,
     _TargetOnlyLatch,
     _trim_placeholder_suffixes,
     _uniform_decode_fits_capture_bucket,
@@ -107,6 +132,378 @@ def profile_document(default_acceptance_rate: float = 0.9) -> dict[str, object]:
 
 
 class AdaptiveControllerTest(unittest.TestCase):
+    def test_runtime_proposal_width_uses_next_frame_gamma(self) -> None:
+        scheduler_output = SimpleNamespace(num_spec_tokens_to_schedule=5)
+        self.assertEqual(_runtime_proposal_query_width(scheduler_output), 6)
+
+    def test_eagle3_async_upshift_is_held_for_active_cohort(self) -> None:
+        self.assertTrue(
+            _should_hold_eagle3_async_cohort("eagle3", True, 16),
+        )
+
+    def test_eagle3_async_downshift_is_held_for_active_cohort(self) -> None:
+        self.assertTrue(
+            _should_hold_eagle3_async_cohort("eagle3", True, 16),
+        )
+
+    def test_eagle3_async_gamma_change_is_allowed_at_cohort_boundary(self) -> None:
+        self.assertFalse(
+            _should_hold_eagle3_async_cohort("eagle3", True, 0),
+        )
+
+    def test_eagle3_async_gamma_change_is_allowed_with_width_switching(self) -> None:
+        self.assertFalse(
+            _should_hold_eagle3_async_cohort(
+                "eagle3",
+                True,
+                16,
+                runtime_width_switching=True,
+            ),
+        )
+
+    def test_mtp_async_gamma_change_is_held_for_active_cohort(self) -> None:
+        self.assertTrue(
+            _should_hold_eagle3_async_cohort("mtp", True, 16),
+        )
+
+    def test_eagle3_native_scheduler_hold_requires_configured_gamma(self) -> None:
+        self.assertTrue(
+            _can_use_eagle3_native_scheduler_hold(
+                "eagle3",
+                True,
+                False,
+                16,
+                5,
+                5,
+            )
+        )
+        self.assertFalse(
+            _can_use_eagle3_native_scheduler_hold(
+                "eagle3",
+                True,
+                False,
+                16,
+                4,
+                5,
+            )
+        )
+
+    def test_eagle3_cohort_refill_detects_deferred_patch_from_environment(self) -> None:
+        schedule = SimpleNamespace()
+        self.assertTrue(
+            _eagle3_cohort_refill_enabled(
+                "eagle3",
+                schedule,
+                {"HUST_VSPEC_EAGLE3_COHORT_REFILL": "1"},
+            )
+        )
+        self.assertFalse(
+            _eagle3_cohort_refill_enabled(
+                "eagle",
+                schedule,
+                {"HUST_VSPEC_EAGLE3_COHORT_REFILL": "1"},
+            )
+        )
+
+        self.assertTrue(
+            _eagle3_cohort_refill_enabled(
+                "mtp",
+                schedule,
+                {"HUST_VSPEC_MTP_COHORT_REFILL": "1"},
+            )
+        )
+
+    def test_eagle3_native_anchor_width_skips_request_scan(self) -> None:
+        dispatcher = SimpleNamespace(uniform_decode_query_len=6)
+        runner = SimpleNamespace(
+            _vspec_adaptive_anchor_gamma=5,
+            _vspec_adaptive_pinned_query_width=6,
+            num_spec_tokens=5,
+            uniform_decode_query_len=6,
+            cudagraph_dispatcher=dispatcher,
+        )
+        scheduler_output = SimpleNamespace(
+            num_spec_tokens_to_schedule=5,
+            scheduled_new_reqs=[],
+        )
+        self.assertEqual(
+            _eagle3_native_anchor_query_width(
+                runner,
+                "eagle3",
+                scheduler_output,
+                cohort_locked=True,
+            ),
+            6,
+        )
+        scheduler_output.scheduled_new_reqs = [object()]
+        self.assertIsNone(
+            _eagle3_native_anchor_query_width(
+                runner,
+                "eagle3",
+                scheduler_output,
+                cohort_locked=True,
+            )
+        )
+
+    def test_async_cohort_hold_is_eagle3_specific(self) -> None:
+        self.assertFalse(
+            _should_hold_eagle3_async_cohort("eagle", True, 16),
+        )
+
+    def test_scheduler_runtime_gamma_preserves_configured_capacity(self) -> None:
+        scheduler = SimpleNamespace(num_spec_tokens=4)
+
+        with _scheduler_runtime_gamma(scheduler, 2):
+            self.assertEqual(scheduler.num_spec_tokens, 2)
+
+        self.assertEqual(scheduler.num_spec_tokens, 4)
+
+    def test_scheduler_runtime_gamma_rejects_capacity_overflow(self) -> None:
+        scheduler = SimpleNamespace(num_spec_tokens=4)
+
+        with self.assertRaisesRegex(RuntimeError, "outside configured capacity"):
+            with _scheduler_runtime_gamma(scheduler, 5):
+                pass
+
+    def test_scheduler_runtime_gamma_uses_separate_native_anchor_and_capacity(self) -> None:
+        scheduler = SimpleNamespace(
+            num_spec_tokens=4,
+            _vspec_adaptive_configured_gamma=6,
+        )
+
+        with _scheduler_runtime_gamma(scheduler, 6):
+            self.assertEqual(scheduler.num_spec_tokens, 6)
+
+        self.assertEqual(scheduler.num_spec_tokens, 4)
+
+    def test_adaptive_stats_are_padded_to_configured_capacity(self) -> None:
+        stats = SimpleNamespace(
+            num_spec_tokens=5,
+            num_accepted_tokens_per_pos=[3, 2, 1, 1, 0],
+            num_draft_tokens_per_pos=[3, 3, 2, 1, 1],
+        )
+
+        result = _normalize_spec_decoding_stats_width(stats, 6)
+
+        self.assertIs(result, stats)
+        self.assertEqual(stats.num_spec_tokens, 6)
+        self.assertEqual(stats.num_accepted_tokens_per_pos, [3, 2, 1, 1, 0, 0])
+        self.assertEqual(stats.num_draft_tokens_per_pos, [3, 3, 2, 1, 1, 0])
+
+    def test_adaptive_stats_reject_width_above_configured_capacity(self) -> None:
+        stats = SimpleNamespace(
+            num_spec_tokens=7,
+            num_accepted_tokens_per_pos=[0] * 7,
+            num_draft_tokens_per_pos=[0] * 7,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "exceed configured"):
+            _normalize_spec_decoding_stats_width(stats, 6)
+
+    def test_serial_draft_runtime_anchor_preserves_gamma4_capacity(self) -> None:
+        dispatcher = SimpleNamespace(uniform_decode_query_len=5)
+        drafter = SimpleNamespace(
+            num_speculative_tokens=4,
+            num_draft_steps=4,
+            decode_threshold=5,
+        )
+        runner = SimpleNamespace(
+            num_spec_tokens=4,
+            prev_num_spec_tokens=4,
+            uniform_decode_query_len=5,
+            decode_token_per_req=5,
+            decode_threshold=5,
+            cudagraph_dispatcher=dispatcher,
+            drafter=drafter,
+        )
+
+        anchor = _configure_serial_draft_runtime_anchor(
+            runner,
+            "draft_model",
+            1,
+            4,
+        )
+
+        self.assertEqual(anchor, 2)
+        self.assertEqual(runner._vspec_adaptive_configured_target_gamma, 4)
+        self.assertEqual(drafter._vspec_adaptive_configured_gamma, 4)
+        self.assertEqual(runner.num_spec_tokens, 2)
+        self.assertEqual(runner.prev_num_spec_tokens, 2)
+        self.assertEqual(runner.uniform_decode_query_len, 3)
+        self.assertEqual(runner.decode_token_per_req, 3)
+        self.assertEqual(runner.decode_threshold, 3)
+        self.assertEqual(dispatcher.uniform_decode_query_len, 3)
+        self.assertEqual(drafter.num_speculative_tokens, 2)
+        self.assertEqual(drafter.num_draft_steps, 2)
+        self.assertEqual(drafter.decode_threshold, 3)
+
+    def test_eagle3_runtime_anchor_preserves_gamma6_capacity(self) -> None:
+        dispatcher = SimpleNamespace(uniform_decode_query_len=7)
+        drafter = SimpleNamespace(
+            method="eagle3",
+            num_speculative_tokens=6,
+            num_draft_steps=6,
+            decode_threshold=7,
+            parallel_drafting=True,
+            pass_hidden_states_to_model=True,
+            extra_slots_per_request=6,
+            net_num_new_slots_per_request=5,
+            needs_extra_input_slots=True,
+        )
+        runner = SimpleNamespace(
+            num_spec_tokens=6,
+            prev_num_spec_tokens=6,
+            uniform_decode_query_len=7,
+            decode_token_per_req=7,
+            decode_threshold=7,
+            reorder_batch_threshold=7,
+            cudagraph_dispatcher=dispatcher,
+            drafter=drafter,
+        )
+
+        anchor = _configure_eagle3_runtime_anchor(
+            runner,
+            "eagle3",
+            4,
+            6,
+        )
+
+        self.assertEqual(anchor, 5)
+        self.assertEqual(runner._vspec_adaptive_configured_target_gamma, 6)
+        self.assertEqual(runner._vspec_adaptive_anchor_gamma, 5)
+        self.assertFalse(runner._vspec_adaptive_anchor_uses_configured_width)
+        self.assertEqual(drafter._vspec_adaptive_configured_gamma, 6)
+        self.assertEqual(drafter._vspec_adaptive_graph_native_gamma, 5)
+        self.assertEqual(drafter._vspec_adaptive_graph_min_gamma, 4)
+        self.assertEqual(drafter._vspec_adaptive_graph_max_gamma, 6)
+        self.assertEqual(drafter._vspec_adaptive_candidate_gammas, (4, 5, 6))
+        self.assertEqual(runner.num_spec_tokens, 5)
+        self.assertEqual(runner.prev_num_spec_tokens, 5)
+        self.assertEqual(runner.uniform_decode_query_len, 6)
+        self.assertEqual(runner.decode_token_per_req, 6)
+        self.assertEqual(runner.decode_threshold, 6)
+        self.assertEqual(runner.reorder_batch_threshold, 6)
+        self.assertEqual(dispatcher.uniform_decode_query_len, 6)
+        self.assertEqual(drafter.num_speculative_tokens, 5)
+        self.assertEqual(drafter.num_draft_steps, 5)
+        self.assertEqual(drafter.decode_threshold, 6)
+        self.assertEqual(drafter.extra_slots_per_request, 5)
+        self.assertEqual(drafter.net_num_new_slots_per_request, 4)
+        self.assertTrue(drafter.needs_extra_input_slots)
+
+    def test_eagle3_configured_max_is_already_pinned_anchor(self) -> None:
+        dispatcher = SimpleNamespace(uniform_decode_query_len=6)
+        drafter = SimpleNamespace(
+            method="eagle3",
+            num_speculative_tokens=5,
+            num_draft_steps=5,
+            decode_threshold=6,
+            parallel_drafting=True,
+            pass_hidden_states_to_model=True,
+            extra_slots_per_request=5,
+            net_num_new_slots_per_request=4,
+            needs_extra_input_slots=True,
+        )
+        runner = SimpleNamespace(
+            num_spec_tokens=5,
+            prev_num_spec_tokens=5,
+            uniform_decode_query_len=6,
+            decode_token_per_req=6,
+            decode_threshold=6,
+            reorder_batch_threshold=6,
+            cudagraph_dispatcher=dispatcher,
+            drafter=drafter,
+        )
+
+        anchor = _configure_eagle3_runtime_anchor(runner, "eagle3", 4, 5)
+
+        self.assertEqual(anchor, 5)
+        self.assertTrue(runner._vspec_adaptive_anchor_uses_configured_width)
+        self.assertEqual(runner._vspec_adaptive_pinned_query_width, 6)
+
+    def test_eagle3_width_transition_fences_once_and_resets_shared_state(self) -> None:
+        calls: list[str] = []
+        shared_state = SimpleNamespace(metadata=object(), gather_indices=object())
+        builder = SimpleNamespace(_vspec_gdn_shared_state=shared_state)
+        drafter = SimpleNamespace(_vspec_adaptive_previous_proposal_gamma=5)
+        runner = SimpleNamespace(
+            _vspec_adaptive_anchor_gamma=5,
+            _vspec_adaptive_metadata_builders=(builder,),
+            drafter=drafter,
+        )
+
+        self.assertTrue(
+            _synchronize_eagle3_width_transition(
+                runner,
+                "eagle3",
+                6,
+                enabled=True,
+                synchronize=lambda: calls.append("sync"),
+            )
+        )
+        self.assertEqual(calls, ["sync"])
+        self.assertEqual(runner._vspec_eagle3_synchronized_gamma, 6)
+        self.assertEqual(drafter._vspec_adaptive_previous_proposal_gamma, 6)
+        self.assertIsNone(shared_state.metadata)
+        self.assertIsNone(shared_state.gather_indices)
+
+        self.assertFalse(
+            _synchronize_eagle3_width_transition(
+                runner,
+                "eagle3",
+                6,
+                enabled=True,
+                synchronize=lambda: calls.append("unexpected"),
+            )
+        )
+        self.assertEqual(calls, ["sync"])
+
+    def test_eagle3_width_transition_fence_is_backend_scoped(self) -> None:
+        calls: list[str] = []
+        runner = SimpleNamespace(_vspec_adaptive_anchor_gamma=5)
+
+        self.assertFalse(
+            _synchronize_eagle3_width_transition(
+                runner,
+                "mtp",
+                6,
+                enabled=True,
+                synchronize=lambda: calls.append("unexpected"),
+            )
+        )
+        self.assertEqual(calls, [])
+
+    def test_mtp_runtime_anchor_preserves_gamma6_capacity(self) -> None:
+        dispatcher = SimpleNamespace(uniform_decode_query_len=7)
+        drafter = SimpleNamespace(
+            method="mtp",
+            num_speculative_tokens=6,
+            num_draft_steps=6,
+            decode_threshold=7,
+        )
+        runner = SimpleNamespace(
+            num_spec_tokens=6,
+            prev_num_spec_tokens=6,
+            uniform_decode_query_len=7,
+            decode_token_per_req=7,
+            decode_threshold=7,
+            reorder_batch_threshold=7,
+            cudagraph_dispatcher=dispatcher,
+            drafter=drafter,
+        )
+
+        anchor = _configure_mtp_runtime_anchor(runner, "mtp", 2, 6)
+
+        self.assertEqual(anchor, 4)
+        self.assertEqual(runner._vspec_adaptive_configured_target_gamma, 6)
+        self.assertEqual(runner._vspec_adaptive_anchor_gamma, 4)
+        self.assertEqual(runner.num_spec_tokens, 4)
+        self.assertEqual(runner.uniform_decode_query_len, 5)
+        self.assertEqual(dispatcher.uniform_decode_query_len, 5)
+        self.assertEqual(drafter._vspec_adaptive_candidate_gammas, (2, 4, 6))
+        self.assertEqual(drafter._vspec_adaptive_graph_native_gamma, 4)
+        self.assertEqual(drafter.num_speculative_tokens, 4)
+
     def test_adaptive_batch_size_falls_back_to_scheduled_requests(self) -> None:
         scheduler = SimpleNamespace()
         self.assertEqual(_adaptive_scheduled_batch_size(scheduler, 17), 17)
@@ -116,6 +513,55 @@ class AdaptiveControllerTest(unittest.TestCase):
             _get_dynamic_sd_batch_size=lambda num_requests: num_requests + 3,
         )
         self.assertEqual(_adaptive_scheduled_batch_size(scheduler, 17), 20)
+
+    def test_initial_cohort_hold_is_bounded_and_empty_engine_only(self) -> None:
+        self.assertTrue(_should_hold_initial_cohort(0, 1, 16, 10.0, 10.01, 0.05))
+        self.assertFalse(_should_hold_initial_cohort(0, 16, 16, 10.0, 10.01, 0.05))
+        self.assertFalse(_should_hold_initial_cohort(1, 15, 16, 10.0, 10.01, 0.05))
+        self.assertFalse(_should_hold_initial_cohort(0, 1, 16, 10.0, 10.05, 0.05))
+
+    def test_arrival_gate_releases_after_burst_quiets(self) -> None:
+        scheduler = SimpleNamespace()
+        self.assertTrue(
+            _should_hold_growing_initial_cohort(
+                scheduler, 0, 1, 10.0, 0.001, 0.006
+            )
+        )
+        self.assertTrue(
+            _should_hold_growing_initial_cohort(
+                scheduler, 0, 8, 10.0005, 0.001, 0.006
+            )
+        )
+        self.assertFalse(
+            _should_hold_growing_initial_cohort(
+                scheduler, 0, 8, 10.0016, 0.001, 0.006
+            )
+        )
+        self.assertFalse(hasattr(scheduler, "_vspec_adaptive_arrival_gate"))
+
+    def test_arrival_gate_has_a_hard_latency_bound(self) -> None:
+        scheduler = SimpleNamespace()
+        self.assertTrue(
+            _should_hold_growing_initial_cohort(
+                scheduler, 0, 1, 10.0, 0.003, 0.006
+            )
+        )
+        self.assertFalse(
+            _should_hold_growing_initial_cohort(
+                scheduler, 0, 16, 10.006, 0.003, 0.006
+            )
+        )
+
+    def test_eagle3_graph_budget_preserves_hot_high_concurrency_arms(self) -> None:
+        self.assertEqual(
+            _adaptive_candidate_batch_limits("eagle3", 1, 6, 16),
+            {1: 2, 2: 4, 3: 8, 4: 16, 5: 16, 6: 16},
+        )
+        self.assertEqual(_adaptive_graph_batch_limit("mtp", 2, 6, 16), 16)
+
+    def test_eagle3_unmeasured_width_uses_conservative_graph_cost(self) -> None:
+        self.assertEqual(_online_probe_shared_cost_units("eagle3"), 8.0)
+        self.assertEqual(_online_probe_shared_cost_units("mtp"), 2.0)
 
     def test_adaptive_decode_graph_keys_cover_runtime_widths(self) -> None:
         from vllm.config import CUDAGraphMode
@@ -740,6 +1186,330 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(visited, [4, 3, 2, 1])
         self.assertTrue(all(bucket.arms[gamma].observations == 1 for gamma in visited))
 
+    def test_online_explicit_initial_gamma_is_a_prior_not_a_cap(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            window_size=1,
+            exploration=0,
+            hysteresis=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+
+        visited = []
+        for _ in range(24):
+            decision = controller.choose(8, 128)
+            visited.append(decision.gamma)
+            controller.complete_step(
+                gamma=decision.gamma,
+                batch_size=8,
+                context_tokens=128,
+                latency_ms={2: 10, 3: 8, 4: 7}.get(decision.gamma, 20),
+            )
+            if 4 in controller._bucket(8).launched_arms:
+                break
+
+        self.assertEqual(visited[0], 2)
+        self.assertEqual(controller.initial_gamma, 2)
+        self.assertEqual(controller.anchor_gamma, 2)
+        self.assertTrue({2, 3, 4}.issubset(controller._bucket(8).launched_arms))
+        self.assertIn(4, visited)
+
+    def test_online_initial_gamma_waits_for_delayed_anchor_feedback(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            window_size=1,
+            control_interval=1,
+            exploration=0,
+            hysteresis=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+
+        decisions = [controller.choose(16, 128) for _ in range(6)]
+        self.assertTrue(all(decision.gamma == 2 for decision in decisions))
+        self.assertEqual(
+            decisions[-1].reason,
+            "online_ucb_anchor_feedback_wait",
+        )
+        self.assertEqual(controller._bucket(16).launched_arms, {2})
+
+        controller.complete_step(
+            gamma=2,
+            batch_size=16,
+            context_tokens=128,
+            latency_ms=10,
+        )
+        decision = controller.choose(16, 128)
+        self.assertEqual((decision.gamma, decision.reason), (3, "online_ucb_warmup"))
+        self.assertNotIn(4, controller._bucket(16).launched_arms)
+
+    def test_online_waits_for_probe_feedback_before_opening_next_arm(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            window_size=1,
+            control_interval=1,
+            exploration=0,
+            hysteresis=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+
+        self.assertEqual(controller.choose(16, 128).gamma, 2)
+        controller.complete_step(
+            gamma=2,
+            batch_size=16,
+            context_tokens=128,
+            latency_ms=10,
+        )
+        self.assertEqual(controller.choose(16, 128).gamma, 3)
+
+        decision = controller.choose(16, 128)
+        self.assertEqual(
+            (decision.gamma, decision.reason),
+            (2, "online_ucb_probe_feedback_wait"),
+        )
+        self.assertEqual(controller._bucket(16).launched_arms, {2, 3})
+        self.assertNotIn(4, controller._bucket(16).launched_arms)
+
+        controller.complete_step(
+            gamma=3,
+            batch_size=16,
+            context_tokens=128,
+            latency_ms=20,
+        )
+        decision = controller.choose(16, 128)
+        self.assertEqual((decision.gamma, decision.reason), (2, "online_ucb_model_hold"))
+        self.assertNotIn(4, controller._bucket(16).launched_arms)
+
+    def test_online_warmup_does_not_dwell_on_transit_arms(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            window_size=1,
+            control_interval=4,
+            exploration=0,
+            hysteresis=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+
+        decisions = []
+        for _ in range(3):
+            decision = controller.choose(16, 128)
+            decisions.append((decision.gamma, decision.reason))
+            controller.complete_step(
+                gamma=decision.gamma,
+                batch_size=16,
+                context_tokens=128,
+                latency_ms=10 if decision.gamma == 2 else 20,
+            )
+
+        self.assertEqual(
+            decisions,
+            [
+                (2, "online_ucb_warmup_window"),
+                (3, "online_ucb_warmup"),
+                (2, "online_ucb_frontier_return"),
+            ],
+        )
+        self.assertEqual(controller._bucket(16).launched_arms, {2, 3})
+        self.assertNotIn(4, controller._bucket(16).launched_arms)
+        self.assertIsNone(controller._bucket(16).warmup_target_gamma)
+
+    def test_online_model_frontier_holds_best_without_lowering_max_gamma(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            window_size=1,
+            control_interval=1,
+            exploration=0,
+            hysteresis=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+
+        visited = []
+        for _ in range(12):
+            decision = controller.choose(16, 128)
+            visited.append(decision.gamma)
+            controller.complete_step(
+                gamma=decision.gamma,
+                batch_size=16,
+                context_tokens=128,
+                latency_ms=10 if decision.gamma == 2 else 20,
+            )
+        bucket = controller._bucket(16)
+        self.assertEqual(controller.max_gamma, 4)
+        self.assertEqual(visited[:3], [2, 3, 2])
+        self.assertTrue(all(gamma == 2 for gamma in visited[2:]))
+        self.assertEqual(bucket.launched_arms, {2, 3})
+        self.assertNotIn(4, bucket.launched_arms)
+
+    def test_online_probe_returns_to_refresh_a_stale_anchor_window(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=6,
+            min_gamma=4,
+            initial_gamma=5,
+            window_size=2,
+            control_interval=1,
+            exploration=0,
+            hysteresis=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+        bucket = controller._bucket(16)
+        bucket.arms[4].record(80, 100)
+        bucket.arms[5].record(50, 100)
+        bucket.launched_arms.update({4, 5})
+        bucket.selected_gamma = 4
+        bucket.scheduled_since_selection = 1
+        controller.current_gamma = 4
+
+        returned = controller.choose(16, 128)
+
+        self.assertEqual(
+            (returned.gamma, returned.reason),
+            (5, "online_ucb_anchor_revalidation_return"),
+        )
+        self.assertEqual(bucket.anchor_revalidation_at_observations, 1)
+        self.assertFalse(bucket.warmup_return_completed)
+
+        decisions = []
+        for _ in range(2):
+            controller.complete_step(
+                gamma=5,
+                batch_size=16,
+                context_tokens=128,
+                latency_ms=10,
+            )
+            decisions.append(controller.choose(16, 128))
+
+        self.assertEqual(
+            (decisions[0].gamma, decisions[0].reason),
+            (5, "online_ucb_anchor_revalidation_window"),
+        )
+        self.assertIsNone(bucket.anchor_revalidation_at_observations)
+
+    def test_online_model_ignores_sparse_optimistic_frontier_samples(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            window_size=32,
+            exploration=0.15,
+            hysteresis=0.03,
+            warmup_samples=4,
+            burn_in_steps=0,
+        )
+        bucket = controller._bucket(16)
+        for _ in range(32):
+            bucket.arms[2].record(71, 100)
+        bucket.launched_arms.add(2)
+
+        controller.position_acceptance_rates[:] = [0.995, 0.945, 1.0, 1.0]
+        controller.position_observations[:] = [4000, 3000, 10, 2]
+        controller._second_token_transition[1][:] = [841, 1845]
+
+        modeled = {gamma: controller._modeled_reward(bucket, 2, gamma) for gamma in range(1, 5)}
+
+        self.assertEqual(max(modeled, key=modeled.get), 2)
+        self.assertLess(modeled[3], modeled[2])
+        self.assertLess(modeled[4], modeled[3])
+
+    def test_online_probe_cost_can_model_target_dominated_eagle3(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=6,
+            min_gamma=4,
+            initial_gamma=5,
+            window_size=1,
+            exploration=0,
+            hysteresis=0.03,
+            warmup_samples=1,
+            burn_in_steps=0,
+            probe_shared_cost_units=50,
+        )
+        bucket = controller._bucket(16)
+        bucket.arms[5].record(361, 100)
+        bucket.launched_arms.add(5)
+        controller.position_acceptance_rates[:] = [
+            0.863,
+            0.638,
+            0.475,
+            0.352,
+            0.281,
+            0.22,
+        ]
+        controller.position_observations[:] = [100] * 6
+
+        controller.choose(16, 128)
+        decision = controller.choose(16, 128)
+
+        self.assertEqual((decision.gamma, decision.reason), (5, "online_ucb_model_hold"))
+        self.assertEqual(bucket.launched_arms, {5})
+        self.assertNotIn(4, bucket.launched_arms)
+        self.assertNotIn(6, bucket.launched_arms)
+
+    def test_online_probe_shared_cost_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "probe_shared_cost_units"):
+            OnlineGammaController(max_gamma=4, probe_shared_cost_units=0)
+
+    def test_online_initial_gamma_must_be_inside_candidate_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "initial_gamma"):
+            OnlineGammaController(max_gamma=4, min_gamma=1, initial_gamma=0)
+
+    def test_online_controller_supports_strided_candidate_set(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=6,
+            min_gamma=2,
+            initial_gamma=4,
+            candidate_stride=2,
+            max_gamma_step=2,
+            burn_in_steps=0,
+        )
+
+        self.assertEqual(controller.candidate_gammas, (2, 4, 6))
+        self.assertEqual(set(controller._bucket(16).arms), {2, 4, 6})
+        self.assertFalse(controller.candidate_is_feasible(3, 16))
+        with self.assertRaisesRegex(ValueError, "candidate set"):
+            controller.force(3, 16, 0, reason="invalid")
+
+    def test_online_controller_respects_graph_batch_limits(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=6,
+            min_gamma=1,
+            initial_gamma=5,
+            candidate_batch_limits={1: 2, 2: 4, 3: 8, 4: 16, 5: 16, 6: 16},
+            burn_in_steps=0,
+        )
+
+        self.assertTrue(controller.candidate_is_feasible(3, 8))
+        self.assertFalse(controller.candidate_is_feasible(3, 9))
+        self.assertEqual(controller.choose(16, 0).gamma, 5)
+
+        with self.assertRaisesRegex(ValueError, "non-candidate gamma"):
+            OnlineGammaController(
+                max_gamma=4,
+                candidate_batch_limits={5: 1},
+            )
+
+    def test_online_strided_candidates_require_reachable_step(self) -> None:
+        with self.assertRaisesRegex(ValueError, "next candidate gamma"):
+            OnlineGammaController(
+                max_gamma=6,
+                min_gamma=2,
+                candidate_stride=2,
+                max_gamma_step=1,
+            )
+
     def test_online_ucb_prefers_higher_gamma_inside_deadband(self) -> None:
         controller = OnlineGammaController(
             max_gamma=3,
@@ -934,6 +1704,7 @@ class AdaptiveControllerTest(unittest.TestCase):
         )
         summary = controller.summary()
         self.assertEqual(summary["selection_counts"], {"2": 1})
+        self.assertEqual(summary["reason_counts"], {"online_ucb_warmup_window": 1})
         bucket = summary["batch_buckets"]["8"]
         self.assertEqual(bucket["arms"]["2"]["observations"], 1)
 
@@ -987,20 +1758,21 @@ class AdaptiveControllerTest(unittest.TestCase):
             (4, "online_ucb_bucket_transfer"),
         )
         self.assertEqual(controller._bucket(64).selected_gamma, 4)
-        self.assertTrue(controller._bucket(64).launched_arms)
+        self.assertEqual(controller._bucket(64).launched_arms, set())
+        self.assertEqual(controller._bucket(64).seeded_from_bucket, 128)
         self.assertEqual(controller._bucket(64).arms[4].observations, 0)
 
     def test_online_bucket_transfer_uses_near_best_neighbor_arm(self) -> None:
         controller = OnlineGammaController(
             max_gamma=4,
-            min_gamma=0,
+            min_gamma=1,
             exploration=0,
             hysteresis=0.2,
             warmup_samples=1,
             burn_in_steps=0,
         )
         source = controller._bucket(128)
-        for gamma, reward in enumerate((1.3, 3.1, 3.0, 2.7, 2.3)):
+        for gamma, reward in enumerate((3.1, 3.0, 2.7, 2.3), start=1):
             source.arms[gamma].record(int(reward * 100), 100)
             source.launched_arms.add(gamma)
         source.warmup_return_completed = True
@@ -1017,6 +1789,106 @@ class AdaptiveControllerTest(unittest.TestCase):
             (second.gamma, second.reason),
             (2, "online_ucb_bucket_transfer"),
         )
+        seeded = controller._bucket(64)
+        self.assertEqual(seeded.launched_arms, {1, 2, 3, 4})
+        self.assertTrue(seeded.warmup_return_completed)
+
+    def test_online_distant_probe_does_not_seed_production_bucket(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            exploration=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+        probe = controller._bucket(1)
+        probe.arms[1].record(1, 100)
+        probe.launched_arms.update(probe.arms)
+        probe.warmup_return_completed = True
+        controller.current_gamma = 1
+
+        decision = controller.choose(16, 128)
+        production = controller._bucket(16)
+
+        self.assertEqual(decision.gamma, 1)
+        self.assertEqual(decision.reason, "online_ucb_warmup_window")
+        self.assertIsNone(production.seeded_from_bucket)
+        self.assertFalse(production.launched_arms)
+        self.assertTrue(all(arm.prior_weight == 0 for arm in production.arms.values()))
+
+    def test_online_early_bucket_retries_adjacent_seed_later(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            exploration=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+        early = controller._bucket(1)
+        early.arms[2].record(1, 100)
+        self.assertFalse(early.seed_initialized)
+
+        source = controller._bucket(2)
+        for gamma in source.arms:
+            source.arms[gamma].record(gamma, 10)
+            source.launched_arms.add(gamma)
+        source.warmup_return_completed = True
+
+        reseeded = controller._bucket(1)
+        self.assertTrue(reseeded.seed_initialized)
+        self.assertEqual(reseeded.seeded_from_bucket, 2)
+        self.assertEqual(reseeded.launched_arms, {1, 2, 3, 4})
+        self.assertTrue(reseeded.warmup_return_completed)
+
+    def test_online_tail_bucket_inherits_a_model_pruned_sweep(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=6,
+            min_gamma=4,
+            initial_gamma=5,
+            exploration=0,
+            warmup_samples=2,
+            burn_in_steps=0,
+        )
+        source = controller._bucket(16)
+        source.arms[4].record(60, 100)
+        source.arms[5].record(70, 100)
+        source.launched_arms.update({4, 5})
+        source.frontier_deferred_at_observations = 8
+        source.warmup_return_completed = True
+
+        tail = controller._bucket(8)
+
+        self.assertEqual(tail.seeded_from_bucket, 16)
+        self.assertEqual(tail.bootstrap_target_gamma, 5)
+        self.assertEqual(tail.launched_arms, {4, 5, 6})
+        self.assertTrue(tail.warmup_return_completed)
+
+    def test_online_chained_bucket_seed_ignores_unlaunched_priors(self) -> None:
+        controller = OnlineGammaController(
+            max_gamma=4,
+            min_gamma=1,
+            initial_gamma=2,
+            exploration=0,
+            warmup_samples=1,
+            burn_in_steps=0,
+        )
+        full = controller._bucket(16)
+        full.arms[2].record(10, 10)
+        full.launched_arms.add(2)
+
+        middle = controller._bucket(8)
+        self.assertEqual(middle.bootstrap_target_gamma, 2)
+        middle.arms[2].record(4, 10)
+        middle.launched_arms.add(2)
+        # The copied priors for 1/3/4 are deliberately better than the local
+        # gamma-2 sample; they still must not become measured arms downstream.
+        for gamma in (1, 3, 4):
+            middle.arms[gamma].prior_reward = 10
+
+        tail = controller._bucket(4)
+
+        self.assertEqual(tail.seeded_from_bucket, 8)
+        self.assertEqual(tail.bootstrap_target_gamma, 2)
 
     def test_online_warmup_uses_midpoint_for_near_tied_rewards(self) -> None:
         controller = OnlineGammaController(
@@ -1171,6 +2043,22 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(controller.total_observations, 2)
         self.assertEqual(controller.latency_observations, [0, 0, 0])
 
+    def test_online_acceptance_first_observation_does_not_keep_optimistic_prior(
+        self,
+    ) -> None:
+        controller = OnlineGammaController(
+            max_gamma=2,
+            ewma_weight=0.1,
+            burn_in_steps=0,
+        )
+        controller.observe(2, 0)
+
+        controller.choose(8, 0)
+
+        self.assertEqual(controller.acceptance_rate, 0.0)
+        self.assertEqual(controller.position_acceptance_rates, [0.0, 1.0])
+        self.assertEqual(controller.position_observations, [1, 0])
+
     def test_online_controller_excludes_initial_stable_steps(self) -> None:
         controller = OnlineGammaController(
             max_gamma=2,
@@ -1288,17 +2176,42 @@ class AdaptiveControllerTest(unittest.TestCase):
     def test_eagle_downshift_executes_at_previous_width(self) -> None:
         self.assertEqual(_proposal_execution_gamma("eagle", 3, 4), 4)
         self.assertEqual(_proposal_execution_gamma("eagle", 2, 3), 3)
+        self.assertEqual(_proposal_execution_gamma("eagle3", 4, 5), 5)
         self.assertEqual(_proposal_execution_gamma("eagle", 4, 3), 4)
         self.assertEqual(_proposal_execution_gamma("draft", 3, 4), 3)
         self.assertEqual(_proposal_execution_gamma("eagle", 0, 1), 0)
 
-    def test_stable_configured_draft_path_requires_unchanged_max_gamma(self) -> None:
+    def test_stateful_online_starts_from_graph_backed_prior(self) -> None:
+        self.assertEqual(_online_initial_gamma("eagle3", 4, 6), 5)
+        self.assertEqual(_online_initial_gamma("eagle3", 1, 4), 4)
+        self.assertEqual(_online_initial_gamma("mtp", 2, 6), 4)
+        self.assertEqual(_online_initial_gamma("draft_model", 1, 4), 2)
+        self.assertIsNone(_online_initial_gamma("eagle", 1, 4))
+
+    def test_eagle3_non_decode_target_frames_force_eager(self) -> None:
+        self.assertTrue(_force_eagle3_non_decode_target_eager("eagle3", True, None))
+        self.assertTrue(_force_eagle3_non_decode_target_eager("eagle3", True, 1))
+        self.assertFalse(_force_eagle3_non_decode_target_eager("eagle3", True, 6))
+        self.assertFalse(_force_eagle3_non_decode_target_eager("eagle3", False, None))
+        self.assertFalse(_force_eagle3_non_decode_target_eager("eagle", True, None))
+
+    def test_stable_draft_path_uses_native_gamma2_inside_wider_range(self) -> None:
         self.assertTrue(
             _can_use_stable_configured_draft_path(
                 "draft_model",
                 2,
                 2,
                 2,
+                adaptive_full_graph=True,
+                entropy_stop=False,
+            )
+        )
+        self.assertTrue(
+            _can_use_stable_configured_draft_path(
+                "draft_model",
+                2,
+                2,
+                4,
                 adaptive_full_graph=True,
                 entropy_stop=False,
             )
@@ -1314,7 +2227,7 @@ class AdaptiveControllerTest(unittest.TestCase):
                     entropy_stop=False,
                 )
             )
-        self.assertFalse(
+        self.assertTrue(
             _can_use_stable_configured_draft_path(
                 "eagle",
                 2,
@@ -1322,6 +2235,17 @@ class AdaptiveControllerTest(unittest.TestCase):
                 2,
                 adaptive_full_graph=True,
                 entropy_stop=False,
+            )
+        )
+        self.assertTrue(
+            _can_use_stable_configured_draft_path(
+                "eagle3",
+                5,
+                5,
+                6,
+                adaptive_full_graph=True,
+                entropy_stop=False,
+                native_gamma=5,
             )
         )
         self.assertFalse(
@@ -1334,6 +2258,59 @@ class AdaptiveControllerTest(unittest.TestCase):
                 entropy_stop=True,
             )
         )
+        self.assertFalse(
+            _can_use_stable_configured_draft_path(
+                "draft_model",
+                4,
+                4,
+                4,
+                adaptive_full_graph=True,
+                entropy_stop=False,
+            )
+        )
+
+    def test_serial_draft_native_full_graph_is_gamma2(self) -> None:
+        draft = SimpleNamespace(method="draft_model")
+        eagle = SimpleNamespace(method="eagle")
+        eagle3 = SimpleNamespace(method="eagle3")
+        mtp = SimpleNamespace(method="mtp")
+
+        self.assertEqual(_native_full_graph_gamma(draft, 4, 1), 2)
+        self.assertEqual(_native_full_graph_gamma(draft, 4, 3), 4)
+        self.assertEqual(_native_full_graph_gamma(eagle, 4, 1), 4)
+        self.assertEqual(_native_full_graph_gamma(eagle3, 6, 4), 5)
+        self.assertEqual(_native_full_graph_gamma(mtp, 6, 2), 4)
+
+    def test_serial_draft_target_graph_only_uses_native_gamma2_width(self) -> None:
+        self.assertFalse(_force_non_native_serial_draft_target_eager("draft_model", True, 3))
+        for query_width in (1, 2, 4, 5):
+            self.assertTrue(
+                _force_non_native_serial_draft_target_eager(
+                    "draft_model",
+                    True,
+                    query_width,
+                )
+            )
+        self.assertFalse(_force_non_native_serial_draft_target_eager("eagle", True, 5))
+        self.assertFalse(
+            _force_non_native_serial_draft_target_eager(
+                "draft_model",
+                False,
+                5,
+            )
+        )
+
+    def test_dispatch_prefers_active_draft_width(self) -> None:
+        dispatcher = SimpleNamespace(
+            uniform_decode_query_len=3,
+            _vspec_active_uniform_query_len=4,
+            _vspec_runtime_draft_query_len=4,
+        )
+
+        self.assertEqual(_active_dispatch_query_width(dispatcher), 4)
+        self.assertEqual(_active_dispatch_query_width(dispatcher, 5), 5)
+        dispatcher._vspec_capture_uniform_query_len = 6
+        self.assertEqual(_active_dispatch_query_width(dispatcher), 6)
 
     def test_dynamic_eagle_disables_fixed_width_state_kernel(self) -> None:
         environment = {"VLLM_ASCEND_EAGLE_UNIFORM_STATE_KERNEL": "1"}
@@ -1502,6 +2479,161 @@ class AdaptiveControllerTest(unittest.TestCase):
             _adaptive_capture_query_lens((1,), 4, "eagle"),
             (1, 2, 3, 4, 5),
         )
+        self.assertEqual(
+            _adaptive_capture_query_lens(
+                (5,),
+                4,
+                "draft_model",
+                min_gamma=1,
+            ),
+            (3, 4),
+        )
+        self.assertEqual(
+            _adaptive_capture_query_lens((7,), 6, "eagle3", min_gamma=4),
+            (5, 6, 7),
+        )
+        self.assertEqual(
+            _adaptive_capture_query_lens((7,), 6, "mtp", min_gamma=2),
+            (3, 5, 7),
+        )
+
+    def test_adaptive_full_and_piecewise_initializes_width_specific_keys(self) -> None:
+        from vllm.config import CUDAGraphMode
+        from vllm.forward_context import BatchDescriptor
+
+        class Dispatcher:
+            uniform_decode_query_len = 7
+            cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            compilation_config = SimpleNamespace(
+                cudagraph_capture_sizes=[5, 6, 7, 10, 12, 14],
+                max_cudagraph_capture_size=14,
+            )
+            vllm_config = SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_num_seqs=2),
+            )
+
+            def __init__(self) -> None:
+                self.keys = set()
+                self.keys_initialized = False
+
+            def _compute_bs_to_padded_graph_size(self) -> None:
+                sizes = self.compilation_config.cudagraph_capture_sizes
+                maximum = self.compilation_config.max_cudagraph_capture_size
+                self._bs_to_padded_graph_size = [
+                    next((size for size in sizes if size >= value), maximum)
+                    for value in range(maximum + 1)
+                ]
+
+            def _get_lora_cases(self):
+                return [0]
+
+            def _create_padded_batch_descriptor(
+                self,
+                size,
+                uniform,
+                has_lora,
+                num_active_loras,
+            ):
+                padded = self._bs_to_padded_graph_size[size]
+                if uniform:
+                    assert padded % self.uniform_decode_query_len == 0
+                    num_reqs = padded // self.uniform_decode_query_len
+                else:
+                    num_reqs = padded
+                return BatchDescriptor(
+                    padded,
+                    num_reqs,
+                    uniform,
+                    has_lora,
+                    num_active_loras,
+                )
+
+            def add_cudagraph_key(self, mode, descriptor):
+                self.keys.add((mode, descriptor))
+
+        dispatcher = Dispatcher()
+        _initialize_adaptive_graph_keys(
+            dispatcher,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            (5, 6, 7),
+            (7, 14),
+        )
+
+        self.assertTrue(dispatcher.keys_initialized)
+        self.assertIn(
+            (
+                CUDAGraphMode.PIECEWISE,
+                BatchDescriptor(7, None, False, False, 0),
+            ),
+            dispatcher.keys,
+        )
+        self.assertIn(
+            (CUDAGraphMode.FULL, BatchDescriptor(10, 2, True, False, 0)),
+            dispatcher.keys,
+        )
+        self.assertIn(
+            (CUDAGraphMode.FULL, BatchDescriptor(12, 2, True, False, 0)),
+            dispatcher.keys,
+        )
+
+    def test_eagle3_low_gamma_graph_keys_use_batch_budget(self) -> None:
+        from vllm.config import CUDAGraphMode
+        from vllm.forward_context import BatchDescriptor
+
+        class Dispatcher:
+            uniform_decode_query_len = 7
+            cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            compilation_config = SimpleNamespace(
+                cudagraph_capture_sizes=list(range(1, 113)),
+                max_cudagraph_capture_size=112,
+            )
+            vllm_config = SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_num_seqs=16),
+                speculative_config=SimpleNamespace(method="eagle3"),
+            )
+
+            def __init__(self) -> None:
+                self.keys = set()
+
+            def _get_lora_cases(self):
+                return [0]
+
+            def _create_padded_batch_descriptor(
+                self,
+                size,
+                uniform,
+                has_lora,
+                num_active_loras,
+            ):
+                return BatchDescriptor(
+                    size,
+                    size // self.uniform_decode_query_len,
+                    uniform,
+                    has_lora,
+                    num_active_loras,
+                )
+
+            def add_cudagraph_key(self, mode, descriptor):
+                self.keys.add((mode, descriptor))
+
+        dispatcher = Dispatcher()
+        _add_adaptive_decode_graph_keys(dispatcher, (2, 3, 4, 5, 6, 7))
+        request_counts_by_width = {
+            width: {
+                descriptor.num_reqs
+                for mode, descriptor in dispatcher.keys
+                if mode == CUDAGraphMode.FULL
+                and descriptor.num_tokens // descriptor.num_reqs == width
+            }
+            for width in range(2, 8)
+        }
+
+        self.assertEqual(max(request_counts_by_width[2]), 2)
+        self.assertEqual(max(request_counts_by_width[3]), 4)
+        self.assertEqual(max(request_counts_by_width[4]), 8)
+        self.assertEqual(max(request_counts_by_width[5]), 16)
+        self.assertEqual(max(request_counts_by_width[6]), 16)
+        self.assertEqual(max(request_counts_by_width[7]), 16)
 
     def test_draft_capture_query_width_marks_and_restores_dispatcher(self) -> None:
         dispatcher = SimpleNamespace(
@@ -1569,8 +2701,25 @@ class AdaptiveControllerTest(unittest.TestCase):
             _adaptive_draft_capture_gammas(4, 1, 2),
             (2,),
         )
+        self.assertEqual(
+            _adaptive_draft_capture_gammas(
+                4,
+                1,
+                None,
+                native_gamma=2,
+            ),
+            (2,),
+        )
         with self.assertRaisesRegex(RuntimeError, "outside the configured range"):
             _adaptive_draft_capture_gammas(4, 1, 5)
+
+    def test_explicit_native_graph_gamma_overrides_backend_method(self) -> None:
+        proposer = SimpleNamespace(
+            method="eagle",
+            _vspec_adaptive_graph_native_gamma=5,
+        )
+
+        self.assertEqual(_native_full_graph_gamma(proposer, 6, 4), 5)
 
     def test_runtime_target_query_width_uses_current_draft_frame(self) -> None:
         output = SimpleNamespace(
@@ -1581,8 +2730,13 @@ class AdaptiveControllerTest(unittest.TestCase):
             },
         )
         self.assertEqual(_runtime_target_query_width(output), 4)
+        self.assertEqual(_runtime_target_metadata_query_width(output), 4)
         output.scheduled_spec_decode_tokens["b"] = []
         self.assertIsNone(_runtime_target_query_width(output))
+        self.assertEqual(_runtime_target_metadata_query_width(output), 4)
+
+        output.num_scheduled_tokens = {}
+        self.assertIsNone(_runtime_target_metadata_query_width(output))
 
     def test_async_target_only_dispatch_uses_current_verification_width(self) -> None:
         self.assertFalse(_current_target_is_target_only(2, proposal_gamma=0))
@@ -1655,7 +2809,7 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(runner.uniform_decode_query_len, 5)
         self.assertEqual(dispatcher.uniform_decode_query_len, 5)
 
-    def test_runtime_draft_continuation_width_is_scoped_to_gamma(self) -> None:
+    def test_runtime_draft_continuation_width_uses_validated_gamma2_path(self) -> None:
         dispatcher = SimpleNamespace(
             _vspec_draft_merged_query_lens=(3, 4, 5, 6),
             _vspec_active_uniform_query_len=5,
@@ -1664,34 +2818,112 @@ class AdaptiveControllerTest(unittest.TestCase):
             runner=SimpleNamespace(cudagraph_dispatcher=dispatcher),
         )
 
-        with _runtime_draft_continuation_query_width(proposer, gamma=4):
+        with _runtime_draft_continuation_query_width(proposer, gamma=2):
             self.assertEqual(
                 dispatcher._vspec_active_uniform_query_len,
-                6,
+                4,
             )
             self.assertEqual(
                 dispatcher._vspec_runtime_draft_query_len,
-                6,
+                4,
             )
 
         self.assertEqual(dispatcher._vspec_active_uniform_query_len, 5)
-        self.assertFalse(
-            hasattr(dispatcher, "_vspec_runtime_draft_query_len")
-        )
+        self.assertFalse(hasattr(dispatcher, "_vspec_runtime_draft_query_len"))
+
+        with _runtime_draft_continuation_query_width(proposer, gamma=4):
+            self.assertEqual(dispatcher._vspec_active_uniform_query_len, 5)
+            self.assertFalse(hasattr(dispatcher, "_vspec_runtime_draft_query_len"))
 
     def test_runner_query_width_is_scoped_for_graph_capture(self) -> None:
         dispatcher = SimpleNamespace(uniform_decode_query_len=5)
+        metadata_builder = SimpleNamespace(
+            decode_threshold=5,
+            reorder_batch_threshold=5,
+            num_spec=4,
+            spec_state_indices_tensor=torch.empty((16, 5)),
+        )
+        attention_group = SimpleNamespace(
+            get_metadata_builder=lambda: metadata_builder,
+        )
         runner = SimpleNamespace(
             uniform_decode_query_len=5,
+            decode_token_per_req=5,
+            num_spec_tokens=4,
+            decode_threshold=5,
+            reorder_batch_threshold=5,
             cudagraph_dispatcher=dispatcher,
+            _attn_group_iterator=lambda: iter((attention_group,)),
         )
+        original_state_indices = metadata_builder.spec_state_indices_tensor
 
         with _runner_query_width(runner, 4):
             self.assertEqual(runner.uniform_decode_query_len, 4)
             self.assertEqual(dispatcher.uniform_decode_query_len, 4)
+            self.assertEqual(runner.decode_token_per_req, 4)
+            self.assertEqual(runner.num_spec_tokens, 3)
+            self.assertEqual(runner.decode_threshold, 4)
+            self.assertEqual(runner.reorder_batch_threshold, 4)
+            self.assertEqual(metadata_builder.decode_threshold, 4)
+            self.assertEqual(metadata_builder.reorder_batch_threshold, 4)
+            self.assertEqual(metadata_builder.num_spec, 3)
+            self.assertEqual(metadata_builder.spec_state_indices_tensor.shape, (16, 4))
+            self.assertTrue(metadata_builder.spec_state_indices_tensor.is_contiguous())
 
         self.assertEqual(runner.uniform_decode_query_len, 5)
         self.assertEqual(dispatcher.uniform_decode_query_len, 5)
+        self.assertEqual(runner.decode_token_per_req, 5)
+        self.assertEqual(runner.num_spec_tokens, 4)
+        self.assertEqual(runner.decode_threshold, 5)
+        self.assertEqual(runner.reorder_batch_threshold, 5)
+        self.assertEqual(metadata_builder.decode_threshold, 5)
+        self.assertEqual(metadata_builder.reorder_batch_threshold, 5)
+        self.assertEqual(metadata_builder.num_spec, 4)
+        self.assertIs(metadata_builder.spec_state_indices_tensor, original_state_indices)
+
+    def test_eagle3_anchor_width_is_pinned_for_native_fast_path(self) -> None:
+        dispatcher = SimpleNamespace(uniform_decode_query_len=7)
+        metadata_builder = SimpleNamespace(
+            decode_threshold=7,
+            reorder_batch_threshold=7,
+            num_spec=6,
+            spec_state_indices_tensor=torch.empty((16, 7)),
+        )
+        attention_group = SimpleNamespace(
+            get_metadata_builder=lambda: metadata_builder,
+        )
+        runner = SimpleNamespace(
+            _vspec_adaptive_anchor_gamma=5,
+            uniform_decode_query_len=6,
+            decode_token_per_req=6,
+            num_spec_tokens=5,
+            decode_threshold=6,
+            reorder_batch_threshold=6,
+            cudagraph_dispatcher=dispatcher,
+            _attn_group_iterator=lambda: iter((attention_group,)),
+        )
+
+        self.assertFalse(
+            _is_eagle3_anchor_runtime(runner, "eagle3", 5, 6),
+        )
+        _pin_runner_query_width(runner, 6)
+
+        self.assertTrue(
+            _is_eagle3_anchor_runtime(runner, "eagle3", 5, 6),
+        )
+        self.assertEqual(dispatcher.uniform_decode_query_len, 6)
+        self.assertEqual(metadata_builder.num_spec, 5)
+        self.assertEqual(metadata_builder.spec_state_indices_tensor.shape, (16, 6))
+
+        with _runner_query_width(runner, 5):
+            self.assertEqual(metadata_builder.num_spec, 4)
+            self.assertEqual(metadata_builder.spec_state_indices_tensor.shape, (16, 5))
+
+        self.assertTrue(
+            _is_eagle3_anchor_runtime(runner, "eagle3", 5, 6),
+        )
+        self.assertEqual(metadata_builder.num_spec, 5)
+        self.assertEqual(metadata_builder.spec_state_indices_tensor.shape, (16, 6))
 
     def test_eager_dispatch_forces_graph_mode_none_temporarily(self) -> None:
         calls: list[bool] = []
@@ -1740,14 +2972,15 @@ class AdaptiveControllerTest(unittest.TestCase):
             conv1d_events: dict
 
         base = GraphParams(*({8: [], 16: []} for _ in range(7)))
-        runner = SimpleNamespace()
+        runner = SimpleNamespace(uniform_decode_query_len=3)
         tables = _prepare_target_graph_params(
             runner,
             base,
             (1, 2, 3, 4, 5),
         )
         assert tables is not None
-        self.assertIs(tables[5], base)
+        self.assertIs(tables[3], base)
+        self.assertIsNot(tables[5], base)
         self.assertIsNot(tables[1], base)
         self.assertEqual(tuple(tables[1].events), (8, 16))
         self.assertIsNone(tables[1].workspaces[8])
@@ -1760,11 +2993,14 @@ class AdaptiveControllerTest(unittest.TestCase):
             tables,
         )
 
-    def test_only_full_decode_uses_width_isolated_target_graph_params(
+    def test_adaptive_full_modes_use_width_isolated_target_graph_params(
         self,
     ) -> None:
         self.assertTrue(
             _uses_width_isolated_target_graph_params(SimpleNamespace(name="FULL_DECODE_ONLY"))
+        )
+        self.assertTrue(
+            _uses_width_isolated_target_graph_params(SimpleNamespace(name="FULL_AND_PIECEWISE"))
         )
         self.assertFalse(_uses_width_isolated_target_graph_params(SimpleNamespace(name="FULL")))
 
@@ -1866,6 +3102,7 @@ class AdaptiveControllerTest(unittest.TestCase):
         )
         scheduler = SimpleNamespace(
             scheduler_config=SimpleNamespace(async_scheduling=True),
+            num_spec_tokens=4,
             requests={
                 "active": active_request,
                 "prefill": prefill_request,
@@ -1881,6 +3118,46 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(scheduler._spec_token_placeholders, [-1, -1])
         self.assertEqual(active_request.spec_token_ids, [-1, -1])
         self.assertEqual(prefill_request.spec_token_ids, [-1] * 4)
+
+    def test_async_next_frame_keeps_native_max_gamma_state(self) -> None:
+        placeholders = [-1] * 4
+        request_tokens = [-1] * 4
+        active_request = SimpleNamespace(
+            is_prefill_chunk=False,
+            spec_token_ids=request_tokens,
+        )
+        scheduler = SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=True),
+            num_spec_tokens=4,
+            requests={"active": active_request},
+            _spec_token_placeholders=placeholders,
+        )
+        scheduler_output = SimpleNamespace(num_scheduled_tokens={"active": 5})
+
+        _update_async_next_frame_gamma(scheduler, scheduler_output, gamma=4)
+
+        self.assertIs(scheduler._spec_token_placeholders, placeholders)
+        self.assertIs(active_request.spec_token_ids, request_tokens)
+
+    def test_async_next_frame_reuses_stable_non_native_gamma_state(self) -> None:
+        placeholders = [-1] * 3
+        request_tokens = [-1] * 3
+        active_request = SimpleNamespace(
+            is_prefill_chunk=False,
+            spec_token_ids=request_tokens,
+        )
+        scheduler = SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=True),
+            num_spec_tokens=4,
+            requests={"active": active_request},
+            _spec_token_placeholders=placeholders,
+        )
+        scheduler_output = SimpleNamespace(num_scheduled_tokens={"active": 4})
+
+        _update_async_next_frame_gamma(scheduler, scheduler_output, gamma=3)
+
+        self.assertIs(scheduler._spec_token_placeholders, placeholders)
+        self.assertIs(active_request.spec_token_ids, request_tokens)
 
     def test_adaptive_launcher_uses_piecewise_and_sync_scheduler(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,4 +1,4 @@
-"""Online weight-only quantization for the Qwen2 EAGLE draft body."""
+"""Online quantization for serial EAGLE draft bodies."""
 
 from __future__ import annotations
 
@@ -36,6 +36,29 @@ class _WeightOnlyLinearMethod:
         )
 
 
+class _DynamicInt8LinearMethod:
+    def apply(
+        self,
+        layer: Any,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        import torch_npu
+
+        quant_x, pertoken_scale = torch_npu.npu_dynamic_quant(
+            x,
+            dst_type=torch.int8,
+        )
+        return torch_npu.npu_quant_matmul(
+            quant_x,
+            layer._vspec_w8a16_weight,
+            layer._vspec_w8a16_scale,
+            pertoken_scale=pertoken_scale,
+            bias=(layer._vspec_w8a16_bias if bias is not None else None),
+            output_dtype=x.dtype,
+        )
+
+
 def _quantize_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     output_size, input_size = weight.shape
     quant_weight = torch.empty(
@@ -50,7 +73,7 @@ def _quantize_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     )
     for start in range(0, output_size, 4096):
         end = min(start + 4096, output_size)
-        chunk = weight[start:end].float()
+        chunk = weight[start:end].detach().float()
         scale = chunk.abs().amax(dim=1).clamp_min_(1e-8).div_(127.0)
         quant_scale[start:end].copy_(scale.to(weight.dtype))
         quant_weight[:, start:end].copy_(
@@ -60,7 +83,10 @@ def _quantize_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _selected_layers() -> set[str] | None:
-    raw = os.environ.get("VSPEC_EAGLE_DRAFT_BODY_W8A16_LAYERS", "")
+    raw = os.environ.get(
+        "VSPEC_EAGLE_DRAFT_BODY_QUANT_LAYERS",
+        os.environ.get("VSPEC_EAGLE_DRAFT_BODY_W8A16_LAYERS", ""),
+    )
     selected = {name.strip() for name in raw.split(",") if name.strip()}
     return selected or None
 
@@ -129,22 +155,23 @@ def _install_compiler_compatibility() -> None:
     setattr(_ExperimentalConfig, COMPILER_COMPAT_MARKER, True)
 
 
-def _configure_body_quantization(proposer: Any) -> None:
+def _configure_body_quantization(proposer: Any, mode: str) -> None:
     if getattr(proposer, CONFIGURED_MARKER, False):
         return
     setattr(proposer, CONFIGURED_MARKER, True)
-    if proposer.method != "eagle":
-        raise RuntimeError("EAGLE body W8A16 requires method=eagle")
-    if proposer.vllm_config.parallel_config.tensor_parallel_size != 1:
-        raise RuntimeError("EAGLE body W8A16 currently requires TP=1")
+    if proposer.method not in {"eagle", "eagle3"}:
+        raise RuntimeError("EAGLE body quantization requires method=eagle or eagle3")
+    draft_tp_size = proposer.speculative_config.draft_tensor_parallel_size
+    if draft_tp_size != 1:
+        raise RuntimeError("EAGLE body quantization currently requires draft TP=1")
     if proposer.vllm_config.quant_config is not None:
-        raise RuntimeError("EAGLE body W8A16 does not support a quantized target model")
+        raise RuntimeError("EAGLE body quantization does not support a quantized target model")
 
     from vllm.model_executor.layers.linear import LinearBase
 
     draft_body = getattr(proposer.model, "model", None)
     if draft_body is None:
-        raise RuntimeError("EAGLE body W8A16 cannot locate the draft body")
+        raise RuntimeError("EAGLE body quantization cannot locate the draft body")
     selected = _selected_layers()
     configured: list[str] = []
     available: list[str] = []
@@ -156,41 +183,50 @@ def _configure_body_quantization(proposer: Any) -> None:
             continue
         weight = getattr(layer, "weight", None)
         if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
-            raise RuntimeError(f"EAGLE body W8A16 requires a 2-D weight for {name}")
+            raise RuntimeError(f"EAGLE body quantization requires a 2-D weight for {name}")
         if weight.shape[0] % 64 or weight.shape[1] % 64:
             raise RuntimeError(
-                f"EAGLE body W8A16 requires dimensions divisible by 64: "
+                f"EAGLE body quantization requires dimensions divisible by 64: "
                 f"{name}={tuple(weight.shape)}"
             )
         quant_weight, quant_scale = _quantize_weight(weight)
         layer.register_buffer("_vspec_w8a16_weight", quant_weight)
         layer.register_buffer("_vspec_w8a16_scale", quant_scale)
         bias = getattr(layer, "bias", None)
-        quant_bias = (
-            bias.to(dtype=weight.dtype).contiguous() if isinstance(bias, torch.Tensor) else None
-        )
+        quant_bias = None
+        if isinstance(bias, torch.Tensor):
+            bias_dtype = torch.float32 if mode == "w8a8" else weight.dtype
+            quant_bias = bias.to(dtype=bias_dtype).contiguous()
         layer.register_buffer("_vspec_w8a16_bias", quant_bias)
-        layer.quant_method = _WeightOnlyLinearMethod()
+        layer.quant_method = (
+            _DynamicInt8LinearMethod() if mode == "w8a8" else _WeightOnlyLinearMethod()
+        )
         configured.append(name)
 
     if selected is not None:
         missing = selected.difference(available)
         if missing:
-            raise RuntimeError("Unknown EAGLE body W8A16 layer(s): " + ", ".join(sorted(missing)))
+            raise RuntimeError(
+                "Unknown EAGLE body quantization layer(s): "
+                + ", ".join(sorted(missing))
+            )
     if not configured:
-        raise RuntimeError("EAGLE body W8A16 found no eligible linear layers")
+        raise RuntimeError("EAGLE body quantization found no eligible linear layers")
     logger.info(
-        "Enabled online EAGLE body W8A16 for %d layers: %s",
+        "Enabled online EAGLE body %s for %d layers: %s",
+        mode.upper(),
         len(configured),
         ", ".join(configured),
     )
 
 
-def apply_eagle_body_quantization_patch() -> bool:
+def apply_eagle_body_quantization_patch(mode: str = "w8a16") -> bool:
     from vllm_ascend.spec_decode.llm_base_proposer import (
         AscendSpecDecodeBaseProposer,
     )
 
+    if mode not in {"w8a16", "w8a8"}:
+        raise ValueError(f"unsupported EAGLE body quantization mode: {mode}")
     if getattr(AscendSpecDecodeBaseProposer, PATCH_MARKER, False):
         return False
     _install_compiler_compatibility()
@@ -198,7 +234,7 @@ def apply_eagle_body_quantization_patch() -> bool:
 
     def load_model(self: Any, *args: Any, **kwargs: Any) -> Any:
         result = original_load_model(self, *args, **kwargs)
-        _configure_body_quantization(self)
+        _configure_body_quantization(self, mode)
         return result
 
     AscendSpecDecodeBaseProposer.load_model = load_model

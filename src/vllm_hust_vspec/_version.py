@@ -1,3 +1,3 @@
 """vSpec package version."""
 
-__version__ = "0.13.3"
+__version__ = "0.14.2"

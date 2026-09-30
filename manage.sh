@@ -19,7 +19,8 @@ usage() {
   cat <<'EOF'
 Usage:
   ./manage.sh [--python PATH] [--dry-run] install [--editable] [--wheel PATH] [--enable]
-      [--model-dir PATH] [--model-registry PATH] [--no-model-download|--skip-model-setup]
+      [--model-dir PATH] [--model-registry PATH]
+      [--model-download|--no-model-download|--skip-model-setup]
   ./manage.sh [--python PATH] [--dry-run] upgrade --version VERSION [--enable]
   ./manage.sh [--python PATH] [--dry-run] upgrade --wheel PATH [--enable]
   ./manage.sh [--python PATH] [--dry-run] rollback --version VERSION [--enable]
@@ -34,7 +35,7 @@ Usage:
 
 Commands:
   install     Install the current release wheel, or source with --editable.
-              Detect and download the default Draft/EAGLE models unless skipped.
+              Ask before downloading default Draft/EAGLE models.
   upgrade     Upgrade to an exact package version or local wheel.
   rollback    Force-reinstall an exact package version or local wheel.
   uninstall   Disable and forget Manager intent, then uninstall only vSpec.
@@ -152,6 +153,7 @@ setup_models() {
   local model_dir=$1
   local registry=$2
   local download=$3
+  local allow_missing=$4
   local -a arguments=()
   if [[ -n "$model_dir" ]]; then
     arguments+=(--model-dir "$model_dir")
@@ -162,7 +164,32 @@ setup_models() {
   if [[ "$download" != 1 ]]; then
     arguments+=(--no-download)
   fi
+  if [[ "$allow_missing" == 1 ]]; then
+    arguments+=(--allow-missing)
+  fi
   run "$PYTHON_BIN" -m vllm_hust_vspec.model_store "${arguments[@]}"
+}
+
+confirm_model_download() {
+  local answer
+  if [[ "$DRY_RUN" == 1 ]]; then
+    printf '%s\n' \
+      'vSpec manager: dry-run defaults to no model download; use --model-download to preview it'
+    return 1
+  fi
+  if [[ ! -t 0 ]]; then
+    printf '%s\n' \
+      'vSpec manager: non-interactive install will not download models.' \
+      'Re-run with --model-download or use vllm-hust-vspec-models later.' >&2
+    return 1
+  fi
+  printf '%s' \
+    'Download missing default Draft and EAGLE models now? [y/N] ' >&2
+  IFS= read -r answer || answer=
+  case "$answer" in
+    y|Y|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 install_release() {
@@ -226,7 +253,7 @@ case "$COMMAND" in
     WHEEL_PATH=
     MODEL_DIR=
     MODEL_REGISTRY=
-    MODEL_DOWNLOAD=1
+    MODEL_DOWNLOAD=ask
     MODEL_SETUP=1
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -257,6 +284,10 @@ case "$COMMAND" in
           MODEL_DOWNLOAD=0
           shift
           ;;
+        --model-download)
+          MODEL_DOWNLOAD=1
+          shift
+          ;;
         --skip-model-setup)
           MODEL_SETUP=0
           shift
@@ -283,7 +314,18 @@ case "$COMMAND" in
       run "$PYTHON_BIN" -m pip install --force-reinstall --no-deps "$WHEEL_PATH"
     fi
     if [[ "$MODEL_SETUP" == 1 ]]; then
-      setup_models "$MODEL_DIR" "$MODEL_REGISTRY" "$MODEL_DOWNLOAD"
+      if [[ "$MODEL_DOWNLOAD" == ask ]]; then
+        if confirm_model_download; then
+          MODEL_DOWNLOAD=1
+        else
+          MODEL_DOWNLOAD=0
+        fi
+      fi
+      if [[ "$MODEL_DOWNLOAD" == 1 ]]; then
+        setup_models "$MODEL_DIR" "$MODEL_REGISTRY" 1 0
+      else
+        setup_models "$MODEL_DIR" "$MODEL_REGISTRY" 0 1
+      fi
     fi
     inspect_if_available
     if [[ "$ENABLE" == 1 ]]; then
@@ -380,7 +422,7 @@ case "$COMMAND" in
           ;;
       esac
     done
-    setup_models "$MODEL_DIR" "$MODEL_REGISTRY" "$MODEL_DOWNLOAD"
+    setup_models "$MODEL_DIR" "$MODEL_REGISTRY" "$MODEL_DOWNLOAD" 0
     ;;
   validate|inspect|check|status|plan|render|enable|disable|forget)
     [[ $# -eq 0 ]] || die "$COMMAND does not accept additional arguments"

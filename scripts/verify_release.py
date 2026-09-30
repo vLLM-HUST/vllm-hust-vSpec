@@ -23,6 +23,7 @@ MANIFEST = MANIFEST_DIR / MANIFEST_NAME
 EXTENSION_ID = "org.vllm-hust.vspec"
 PROJECT_NAME = "vllm-hust-vspec"
 WHEEL_NAME = "vllm_hust_vspec"
+HOST_VERSION_RANGE = ">=0.17.2rc1.dev5871,<0.26"
 
 
 def require(condition: bool, message: str) -> None:
@@ -65,6 +66,12 @@ def verify_source() -> str:
     require(manifest["extension_id"] == EXTENSION_ID, "wrong extension ID")
     require(manifest["extension_version"] == version, "manifest version mismatch")
     require(manifest["kind"] == "in_process_plugin", "wrong extension kind")
+    require(manifest["host"]["provider"] == "vllm", "wrong host provider")
+    require(manifest["host"]["name"] == "vllm", "wrong host distribution")
+    require(
+        manifest["host"]["version_range"] == HOST_VERSION_RANGE,
+        "wrong host admission range",
+    )
     return version
 
 
@@ -81,6 +88,8 @@ def verify_wheel(path: Path, version: str) -> None:
     required = {
         "vllm_hust_vspec/__init__.py",
         "vllm_hust_vspec/_version.py",
+        "vllm_hust_vspec/backends/mtp.py",
+        "vllm_hust_vspec/cli.py",
         "vllm_hust_vspec/online_benchmark.py",
         "vllm_hust_vspec/manifests/__init__.py",
         f"vllm_hust_vspec/manifests/{MANIFEST_NAME}",
@@ -117,9 +126,15 @@ def verify_sdist(path: Path, version: str) -> None:
     required = {
         f"{prefix}/release.sh",
         f"{prefix}/manage.sh",
+        f"{prefix}/configs/agentx-qwen35-frontier-mtp2.example.json",
+        f"{prefix}/configs/agentx-qwen35-frontier-target-only.example.json",
         f"{prefix}/configs/qwen25-14b-05b-arc-easy.toml",
         f"{prefix}/configs/qwen25-14b-eagle-arc-easy.toml",
+        f"{prefix}/configs/qwen35-35b-a3b-frontier-mtp2.toml",
         f"{prefix}/docs/arc_easy_regression.md",
+        f"{prefix}/docs/agentx_256k_benchmark.md",
+        f"{prefix}/docs/qwen35_frontier_mtp2.md",
+        f"{prefix}/scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh",
         f"{prefix}/scripts/verify_release.py",
         f"{prefix}/src/vllm_hust_vspec/_version.py",
         f"{prefix}/src/vllm_hust_vspec/manifests/__init__.py",

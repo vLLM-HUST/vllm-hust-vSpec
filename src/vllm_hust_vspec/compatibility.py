@@ -101,6 +101,19 @@ DFLASH_REQUIREMENTS = (
     ),
 )
 
+MTP_REQUIREMENTS = (
+    (
+        "vllm.v1.cudagraph_dispatcher",
+        "CudagraphDispatcher",
+        ("dispatch",),
+    ),
+    (
+        "vllm.model_executor.models.qwen3_5_mtp",
+        None,
+        ("Qwen3_5MTP", "Qwen3_5MoeMTP"),
+    ),
+)
+
 ADAPTIVE_REQUIREMENTS = (
     (
         "vllm.v1.core.sched.scheduler",
@@ -264,6 +277,7 @@ def inspect_host_compatibility(
         "eagle",
         "eagle3",
         "dflash",
+        "mtp",
     }:
         raise ValueError(f"unsupported vSpec method: {method}")
 
@@ -273,10 +287,12 @@ def inspect_host_compatibility(
     requirements = list(COMMON_REQUIREMENTS)
     if normalized_method == "draft_model":
         requirements.extend(DRAFT_REQUIREMENTS)
-    elif normalized_method in {"eagle", "eagle3"}:
+    elif normalized_method in {"eagle", "eagle3", "mtp"}:
         requirements.extend(EAGLE_REQUIREMENTS)
         if normalized_method == "eagle":
             requirements.extend(QWEN2_EAGLE_REQUIREMENTS)
+        elif normalized_method == "mtp":
+            requirements.extend(MTP_REQUIREMENTS)
     else:
         requirements.extend(DFLASH_REQUIREMENTS)
     if adaptive:
@@ -321,7 +337,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--method",
-        choices=("draft", "draft_model", "eagle", "eagle3", "dflash"),
+        choices=("draft", "draft_model", "eagle", "eagle3", "dflash", "mtp"),
         default="draft",
     )
     parser.add_argument("--json", action="store_true")

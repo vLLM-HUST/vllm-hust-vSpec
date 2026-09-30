@@ -63,6 +63,14 @@ from vllm_hust_vspec.backends.eagle_target import (
     _configure_target_active_vocab,
     _configure_target_active_vocab_for_method,
 )
+from vllm_hust_vspec.backends.mtp import (
+    _annotate_qwen35_mtp_kv_groups,
+    _get_current_mamba_groups,
+    _is_uniform_decode_fallback,
+    _missing_ascend_mtp_ops,
+    _normalize_mamba_state_copy_funcs,
+    _sample_mtp_local_argmax,
+)
 from vllm_hust_vspec.cli import (
     build_environment,
     build_vllm_command,
@@ -93,6 +101,7 @@ from vllm_hust_vspec.config import (
     ENV_ENABLED,
     ENV_MAX_NUM_SEQS,
     ENV_METHOD,
+    ENV_MTP_STRICT_GRAPH,
     PluginSettings,
 )
 
@@ -372,9 +381,7 @@ class LauncherTest(unittest.TestCase):
             _uniform_descriptor_request_count(descriptor, 4, 4),
             1,
         )
-        self.assertIsNone(
-            _uniform_descriptor_request_count(descriptor, 8, 4)
-        )
+        self.assertIsNone(_uniform_descriptor_request_count(descriptor, 8, 4))
 
     def test_merged_draft_reuses_host_graph_without_replay_barrier(self) -> None:
         from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
@@ -786,7 +793,7 @@ class LauncherTest(unittest.TestCase):
         self.assertTrue(torch.allclose(reconstructed, weight.float(), atol=0.02))
 
     def test_current_host_abi_is_compatible(self) -> None:
-        for method in ("draft", "eagle", "eagle3", "dflash"):
+        for method in ("draft", "eagle", "eagle3", "dflash", "mtp"):
             with self.subTest(method=method):
                 report = inspect_host_compatibility(method)
                 self.assertTrue(report.compatible)
@@ -859,6 +866,49 @@ class LauncherTest(unittest.TestCase):
         self.assertIsInstance(compact_logits, ActiveVocabLogits)
         self.assertEqual(compact_logits.shape, (2, 1024))
         self.assertEqual(compact_logits.argmax(dim=-1).tolist(), [1100, 1100])
+
+    def test_eagle3_draft_lm_head_w8a16_preserves_trained_vocab_mapping(self) -> None:
+        class TinyLMHead(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.randn(64, 64))
+                self.register_parameter("bias", None)
+                self.quant_method = object()
+
+        model = SimpleNamespace(
+            lm_head=TinyLMHead(),
+            draft_id_to_target_id=torch.arange(64),
+        )
+        proposer = SimpleNamespace(
+            method="eagle3",
+            speculative_config=SimpleNamespace(draft_tensor_parallel_size=1),
+            vllm_config=SimpleNamespace(quant_config=None),
+            model=model,
+        )
+        environment = {"VLLM_ASCEND_EAGLE_DRAFT_LM_HEAD_W8A16": "1"}
+        with mock.patch.dict(os.environ, environment, clear=False):
+            _configure_draft_active_vocab(proposer)
+
+        self.assertIsInstance(model.lm_head.quant_method, _WeightOnlyLinearMethod)
+        self.assertEqual(model.lm_head._vspec_w8a16_weight.shape, (64, 64))
+        self.assertEqual(model.lm_head._vspec_w8a16_scale.shape, (64,))
+        self.assertTrue(torch.equal(model.draft_id_to_target_id, torch.arange(64)))
+
+    def test_eagle3_draft_lm_head_w8a16_environment(self) -> None:
+        options, configured_environment = parse_args(
+            [
+                "--target-model",
+                "/models/target",
+                "--draft-model",
+                "/models/eagle3",
+                "--method",
+                "eagle3",
+                "--eagle-draft-lm-head-quantization",
+                "w8a16",
+            ]
+        )
+        environment = build_environment(options, configured_environment, {})
+        self.assertEqual(environment["VLLM_ASCEND_EAGLE_DRAFT_LM_HEAD_W8A16"], "1")
 
     def test_target_active_vocab_projection(self) -> None:
         class TinyModel(torch.nn.Module):
@@ -939,6 +989,56 @@ class LauncherTest(unittest.TestCase):
         logits = runner.model.compute_logits(torch.ones(2, 4))
         self.assertEqual(logits.shape, (2, 1024))
         self.assertEqual(runner._eagle_target_active_vocab_ids.numel(), 1024)
+
+    def test_eagle3_auto_target_active_vocab_partitions_tp_shard(self) -> None:
+        class TinyShardedHead(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(600, 4))
+                self.bias = None
+                self.org_vocab_size = 1200
+                self.shard_indices = SimpleNamespace(
+                    org_vocab_start_index=0,
+                    org_vocab_end_index=600,
+                )
+
+        class TinyModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.language_model = SimpleNamespace(lm_head=TinyShardedHead())
+
+            def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+                return torch.nn.functional.linear(
+                    hidden_states,
+                    self.language_model.lm_head.weight,
+                )
+
+        runner = SimpleNamespace(
+            speculative_config=SimpleNamespace(method="eagle3"),
+            parallel_config=SimpleNamespace(tensor_parallel_size=2),
+            vllm_config=SimpleNamespace(quant_config=None),
+            model=TinyModel(),
+            drafter=SimpleNamespace(
+                model=SimpleNamespace(
+                    draft_id_to_target_id=torch.zeros(1024, dtype=torch.long),
+                ),
+            ),
+            max_num_tokens=16,
+        )
+        environment_name = "VLLM_ASCEND_EAGLE_TARGET_ACTIVE_VOCAB_IDS_PATH"
+        with mock.patch.dict(os.environ, {environment_name: "auto"}, clear=False):
+            _configure_target_active_vocab_for_method(
+                runner,
+                active_ids_environment=environment_name,
+                required_method="eagle3",
+                feature_name="EAGLE3 Target",
+            )
+
+        logits = runner.model.compute_logits(torch.ones(2, 4))
+        self.assertEqual(logits.shape, (2, 600))
+        self.assertEqual(runner._eagle_target_active_vocab_ids.numel(), 1024)
+        self.assertEqual(runner._eagle_target_local_active_vocab_ids.numel(), 600)
+        self.assertEqual(runner._eagle_target_active_vocab_tp_size, 2)
 
     def test_relaxed_eagle_token_id_verifier(self) -> None:
         from vllm_ascend.sample import rejection_sampler as ascend_rejection
@@ -1146,6 +1246,59 @@ class LauncherTest(unittest.TestCase):
             [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 72, 96],
         )
 
+    def test_eagle3_exact_capture_sizes_are_dense_at_b16(self) -> None:
+        sizes = generate_capture_sizes(16, 5, "eagle3", "exact")
+        self.assertEqual(
+            sizes,
+            [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                18,
+                24,
+                30,
+                36,
+                42,
+                48,
+                54,
+                60,
+                66,
+                72,
+                78,
+                84,
+                90,
+                96,
+            ],
+        )
+
+    def test_adaptive_mtp2_capture_sizes_cover_every_b16_tail(self) -> None:
+        sizes = generate_capture_sizes(
+            16,
+            6,
+            "mtp",
+            "exact",
+            dynamic_widths=True,
+        )
+
+        for query_width in (3, 5, 7):
+            for batch_size in range(1, 17):
+                self.assertIn(batch_size * query_width, sizes)
+        self.assertIn(45, sizes)
+        self.assertIn(60, sizes)
+
     def test_adaptive_draft_auto_uses_exact_dynamic_capture_sizes(self) -> None:
         sizes = generate_capture_sizes(
             128,
@@ -1175,6 +1328,8 @@ class LauncherTest(unittest.TestCase):
             "qwen25-14b-eagle-arc-easy.toml": "eagle",
             "qwen25-14b-eagle-relaxed.toml": "eagle",
             "qwen3-8b-eagle3.toml": "eagle3",
+            "qwen35-35b-a3b-mtp2.toml": "mtp",
+            "qwen35-35b-a3b-frontier-mtp2.toml": "mtp",
         }
         for filename, method in expected_methods.items():
             with self.subTest(filename=filename):
@@ -1196,6 +1351,239 @@ class LauncherTest(unittest.TestCase):
                 generation_config = command[command.index("--generation-config") + 1]
                 expected_generation_config = "auto" if "arc-easy" in filename else "vllm"
                 self.assertEqual(generation_config, expected_generation_config)
+                if filename == "qwen35-35b-a3b-mtp2.toml":
+                    self.assertIn("--enable-expert-parallel", command)
+                    self.assertIn("multistream_overlap_shared_expert", command[-1])
+                if filename == "qwen35-35b-a3b-frontier-mtp2.toml":
+                    self.assertIn("--enable-expert-parallel", command)
+                    self.assertNotIn("multistream_overlap_shared_expert", command[-1])
+                    self.assertIn("--enable-prefix-caching", command)
+                    self.assertIn("--async-scheduling", command)
+                    self.assertIn("--language-model-only", command)
+
+    def test_qwen35_frontier_protocol_is_fixed_mtp2_contract(self) -> None:
+        options, _ = parse_args(
+            [
+                "--protocol",
+                "qwen35-frontier-mtp2",
+                "--target-model",
+                "/models/Qwen3.5-35B-A3B",
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+
+        self.assertEqual(options.method, "mtp")
+        self.assertEqual(options.gamma, 2)
+        self.assertEqual(options.tensor_parallel_size, 2)
+        self.assertEqual(options.max_model_len, 262144)
+        self.assertEqual(options.graph_mode, "full-and-piecewise")
+        self.assertTrue(options.prefix_caching)
+        self.assertTrue(options.async_scheduling)
+        self.assertTrue(options.chunked_prefill)
+        self.assertTrue(options.language_model_only)
+        self.assertTrue(options.mtp_strict_graph)
+        self.assertFalse(options.mtp_local_argmax_reduction)
+        self.assertFalse(options.adaptive_speculation)
+
+        command = build_vllm_command(options)
+        speculative = command[command.index("--speculative-config") + 1]
+        self.assertEqual(
+            speculative,
+            '{"method":"mtp","num_speculative_tokens":2,'
+            '"enforce_eager":false,"use_local_argmax_reduction":false}',
+        )
+        self.assertEqual(command[command.index("--tensor-parallel-size") + 1], "2")
+        self.assertEqual(command[command.index("--max-model-len") + 1], "262144")
+        self.assertIn("--enable-prefix-caching", command)
+        self.assertIn("--async-scheduling", command)
+        self.assertIn("--language-model-only", command)
+        self.assertIn("--enable-expert-parallel", command)
+        compilation = command[command.index("--compilation-config") + 1]
+        self.assertEqual(
+            compilation,
+            '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}',
+        )
+        capture_start = command.index("--cudagraph-capture-sizes") + 1
+        capture_end = command.index("--enable-expert-parallel")
+        self.assertEqual(
+            [int(value) for value in command[capture_start:capture_end]],
+            [3, 6, 9, 12, 18, 24, 48],
+        )
+
+    def test_qwen35_frontier_b16_performance_preset(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        options, environment = parse_args(
+            [
+                "--config",
+                str(root / "configs/qwen35-35b-a3b-frontier-mtp2-b16.toml"),
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+
+        self.assertEqual(options.method, "mtp")
+        self.assertEqual(options.gamma, 4)
+        self.assertEqual(options.max_num_seqs, 16)
+        self.assertEqual(environment["HUST_VSPEC_MTP_COHORT_REFILL"], "1")
+        self.assertEqual(environment["HUST_VSPEC_REFILL_MAX_HOLDS"], "8")
+
+        command = build_vllm_command(options)
+        capture_start = command.index("--cudagraph-capture-sizes") + 1
+        capture_end = command.index("--enable-expert-parallel")
+        self.assertEqual(
+            [int(value) for value in command[capture_start:capture_end]],
+            [5, 10, 20, 40, 80],
+        )
+        additional_config = command[command.index("--additional-config") + 1]
+        self.assertEqual(additional_config, '{"enable_cpu_binding":true}')
+
+    def test_qwen35_frontier_mtp2_adaptive_uses_even_gamma_candidates(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        options, environment = parse_args(
+            [
+                "--config",
+                str(root / "configs/qwen35-35b-a3b-frontier-mtp2-adaptive.toml"),
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+
+        self.assertEqual(options.method, "mtp")
+        self.assertEqual(options.gamma, 6)
+        self.assertEqual(options.adaptive_min_gamma, 2)
+        self.assertEqual(options.adaptive_max_gamma_step, 2)
+        self.assertTrue(options.adaptive_speculation)
+        self.assertEqual(environment["HUST_VSPEC_MTP_ASYNC_RUNTIME_SWITCH"], "0")
+
+        command = build_vllm_command(options)
+        speculative = command[command.index("--speculative-config") + 1]
+        self.assertIn('"num_speculative_tokens":6', speculative)
+        capture_start = command.index("--cudagraph-capture-sizes") + 1
+        capture_end = command.index("--enable-expert-parallel")
+        capture_sizes = [int(value) for value in command[capture_start:capture_end]]
+        self.assertIn(48, capture_sizes)
+        self.assertIn(80, capture_sizes)
+        self.assertIn(112, capture_sizes)
+
+    def test_qwen35_eagle3_adaptive_captures_every_verification_width(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        options, _ = parse_args(
+            [
+                "--config",
+                str(root / "configs/qwen35-35b-a3b-eagle3-adaptive.toml"),
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+
+        self.assertEqual(options.method, "eagle3")
+        self.assertEqual(options.gamma, 6)
+        self.assertEqual(options.adaptive_min_gamma, 1)
+        self.assertTrue(options.adaptive_speculation)
+
+        command = build_vllm_command(options)
+        capture_start = command.index("--cudagraph-capture-sizes") + 1
+        capture_end = command.index("--enable-expert-parallel")
+        capture_sizes = [int(value) for value in command[capture_start:capture_end]]
+        for query_width in range(2, 8):
+            for batch_size in range(1, 17):
+                self.assertIn(batch_size * query_width, capture_sizes)
+        self.assertIn(112, capture_sizes)
+
+    def test_adaptive_mtp_rejects_non_even_candidate_range(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(
+                    [
+                        "--target-model",
+                        "/models/Qwen3.5-35B-A3B",
+                        "--method",
+                        "mtp",
+                        "--gamma",
+                        "5",
+                        "--adaptive-min-gamma",
+                        "2",
+                        "--adaptive-max-gamma-step",
+                        "2",
+                        "--adaptive-speculation",
+                    ]
+                )
+
+    def test_qwen35_frontier_protocol_rejects_contract_overrides(self) -> None:
+        overrides = (
+            ["--method", "draft"],
+            ["--gamma", "3"],
+            ["--tensor-parallel-size", "1"],
+            ["--max-model-len", "4096"],
+            ["--no-prefix-caching"],
+            ["--no-async-scheduling"],
+            ["--graph-mode", "full"],
+        )
+        for override in overrides:
+            with self.subTest(override=override):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parse_args(
+                            [
+                                "--protocol",
+                                "qwen35-frontier-mtp2",
+                                "--target-model",
+                                "/models/Qwen3.5-35B-A3B",
+                                *override,
+                            ]
+                        )
+
+    def test_qwen35_frontier_supports_agentx_forced_acceptance(self) -> None:
+        options, _ = parse_args(
+            [
+                "--protocol",
+                "qwen35-frontier-mtp2",
+                "--target-model",
+                "/models/Qwen3.5-35B-A3B",
+                "--synthetic-acceptance-length",
+                "2.4",
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+
+        command = build_vllm_command(options)
+        speculative = command[command.index("--speculative-config") + 1]
+        self.assertEqual(
+            speculative,
+            '{"method":"mtp","num_speculative_tokens":2,'
+            '"enforce_eager":false,"rejection_sample_method":"synthetic",'
+            '"synthetic_acceptance_length":2.4,'
+            '"use_local_argmax_reduction":false}',
+        )
+
+    def test_synthetic_acceptance_requires_valid_fixed_gamma(self) -> None:
+        invalid_cases = (
+            [
+                "--method",
+                "mtp",
+                "--target-model",
+                "/models/Qwen3.5-35B-A3B",
+                "--gamma",
+                "2",
+                "--synthetic-acceptance-length",
+                "3.1",
+            ],
+            [
+                "--target-model",
+                "/models/target",
+                "--draft-model",
+                "/models/draft",
+                "--synthetic-acceptance-length",
+                "2.0",
+            ],
+        )
+        for arguments in invalid_cases:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parse_args(arguments)
 
     def test_arc_easy_protocol_matches_baseline_serving_contract(self) -> None:
         with mock.patch(
@@ -1401,6 +1789,310 @@ class LauncherTest(unittest.TestCase):
                         "/models/dflash",
                         "--method",
                         "dflash",
+                        "--adaptive-speculation",
+                    ]
+                )
+
+    def test_mtp_uses_target_checkpoint_and_defaults_to_mtp2_graph(self) -> None:
+        with mock.patch("vllm_hust_vspec.cli.resolve_default_model") as resolver:
+            options, _ = parse_args(
+                [
+                    "--target-model",
+                    "/models/Qwen3.5-35B-A3B",
+                    "--method",
+                    "qwen3_next_mtp",
+                    "--language-model-only",
+                    "--max-num-seqs",
+                    "16",
+                    "--vllm-executable",
+                    "/usr/bin/vllm",
+                ]
+            )
+
+        resolver.assert_not_called()
+        self.assertEqual(options.method, "mtp")
+        self.assertEqual(options.gamma, 2)
+        self.assertIsNone(options.draft_model)
+        self.assertFalse(options.adaptive_speculation)
+
+        command = build_vllm_command(options)
+        speculative = command[command.index("--speculative-config") + 1]
+        self.assertEqual(
+            speculative,
+            '{"method":"mtp","num_speculative_tokens":2,"enforce_eager":false,'
+            '"use_local_argmax_reduction":false}',
+        )
+        self.assertIn("--language-model-only", command)
+        self.assertIn("--no-enforce-eager", command)
+        compilation = command[command.index("--compilation-config") + 1]
+        self.assertEqual(compilation, '{"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY"}')
+        capture_index = command.index("--cudagraph-capture-sizes") + 1
+        self.assertEqual(
+            [int(value) for value in command[capture_index:]],
+            [3, 6, 9, 12, 18, 24, 48],
+        )
+        environment = build_environment(options, {}, {})
+        self.assertEqual(environment[ENV_MTP_STRICT_GRAPH], "1")
+
+    def test_mtp_local_argmax_can_be_enabled(self) -> None:
+        options, _ = parse_args(
+            [
+                "--target-model",
+                "/models/Qwen3.5-35B-A3B",
+                "--method",
+                "mtp",
+                "--mtp-local-argmax-reduction",
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+        command = build_vllm_command(options)
+        speculative = command[command.index("--speculative-config") + 1]
+        self.assertIn('"use_local_argmax_reduction":true', speculative)
+
+    def test_mtp_local_argmax_uses_model_reduction(self) -> None:
+        expected = torch.tensor([3, 7], dtype=torch.int64)
+        model = SimpleNamespace(get_top_tokens=mock.Mock(return_value=expected))
+        proposer = SimpleNamespace(model=model)
+        hidden_states = torch.randn(2, 4)
+
+        token_ids, probabilities = _sample_mtp_local_argmax(
+            proposer,
+            hidden_states,
+        )
+
+        self.assertIs(token_ids, expected)
+        self.assertIsNone(probabilities)
+        model.get_top_tokens.assert_called_once_with(hidden_states)
+
+    def test_mtp_local_argmax_requires_model_support(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "get_top_tokens"):
+            _sample_mtp_local_argmax(
+                SimpleNamespace(model=SimpleNamespace()),
+                torch.randn(1, 4),
+            )
+
+    def test_qwen35_mtp_marks_only_group_containing_draft_attention(self) -> None:
+        config = SimpleNamespace(
+            speculative_config=SimpleNamespace(method="mtp"),
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="qwen3_5_moe"),
+                hf_text_config=SimpleNamespace(model_type="qwen3_5_moe_text"),
+            ),
+        )
+        groups = [
+            SimpleNamespace(
+                layer_names=["model.layers.0.linear_attn"],
+                is_eagle_group=False,
+            ),
+            SimpleNamespace(
+                layer_names=[
+                    "model.layers.3.self_attn.attn",
+                    "mtp.layers.0.self_attn.attn",
+                ],
+                is_eagle_group=False,
+            ),
+        ]
+
+        annotated = _annotate_qwen35_mtp_kv_groups(
+            config,
+            {
+                "model.layers.0.linear_attn": object(),
+                "model.layers.3.self_attn.attn": object(),
+                "mtp.layers.0.self_attn.attn": object(),
+            },
+            groups,
+        )
+
+        self.assertEqual(annotated, (1,))
+        self.assertFalse(groups[0].is_eagle_group)
+        self.assertTrue(groups[1].is_eagle_group)
+
+    def test_qwen35_mtp_rejects_missing_draft_kv_layer(self) -> None:
+        config = SimpleNamespace(
+            speculative_config=SimpleNamespace(method="mtp"),
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="qwen3_5_moe"),
+                hf_text_config=SimpleNamespace(model_type="qwen3_5_moe_text"),
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "could not identify"):
+            _annotate_qwen35_mtp_kv_groups(
+                config,
+                {"model.layers.3.self_attn.attn": object()},
+                [],
+            )
+
+    def test_qwen35_mtp_normalizes_current_mamba_group_api(self) -> None:
+        from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+
+        first_spec = MambaSpec(
+            block_size=128,
+            shapes=((4, 8),),
+            dtypes=(torch.float32,),
+        )
+        second_spec = MambaSpec(
+            block_size=128,
+            shapes=((8, 8),),
+            dtypes=(torch.float32,),
+        )
+        groups = _get_current_mamba_groups(
+            SimpleNamespace(
+                kv_cache_groups=[
+                    SimpleNamespace(
+                        layer_names=["model.layers.0.linear_attn"],
+                        kv_cache_spec=first_spec,
+                    ),
+                    SimpleNamespace(
+                        layer_names=[
+                            "model.layers.1.linear_attn",
+                            "model.layers.2.linear_attn",
+                        ],
+                        kv_cache_spec=UniformTypeKVCacheSpecs(
+                            block_size=128,
+                            kv_cache_specs={
+                                "model.layers.1.linear_attn": first_spec,
+                                "model.layers.2.linear_attn": second_spec,
+                            },
+                        ),
+                    ),
+                ]
+            )
+        )
+
+        self.assertEqual(groups[first_spec], [0, 1])
+        self.assertEqual(groups[second_spec], [1])
+
+        legacy_copy_funcs = (object(), object())
+        normalized = _normalize_mamba_state_copy_funcs(
+            SimpleNamespace(
+                kv_cache_groups=[
+                    SimpleNamespace(
+                        layer_names=["model.layers.0.linear_attn"],
+                        kv_cache_spec=first_spec,
+                    )
+                ]
+            ),
+            legacy_copy_funcs,
+        )
+        self.assertEqual(normalized, {first_spec.mamba_type: legacy_copy_funcs})
+        self.assertIs(
+            _normalize_mamba_state_copy_funcs(
+                SimpleNamespace(kv_cache_groups=[]),
+                normalized,
+            ),
+            normalized,
+        )
+
+    def test_mtp_forwards_configured_kv_cache_dtype(self) -> None:
+        options, _ = parse_args(
+            [
+                "--target-model",
+                "/models/Qwen3.5-35B-A3B",
+                "--method",
+                "mtp",
+                "--kv-cache-dtype",
+                "fp8",
+                "--vllm-executable",
+                "/usr/bin/vllm",
+            ]
+        )
+        command = build_vllm_command(options)
+        self.assertEqual(command[command.index("--kv-cache-dtype") + 1], "fp8")
+
+    def test_mtp_method_aliases_normalize_to_native_method(self) -> None:
+        for method in ("mtp", "qwen3_5_mtp", "qwen3_next_mtp"):
+            with self.subTest(method=method):
+                options, _ = parse_args(
+                    [
+                        "--target-model",
+                        "/models/Qwen3.5-35B-A3B",
+                        "--method",
+                        method,
+                    ]
+                )
+                self.assertEqual(options.method, "mtp")
+                self.assertEqual(options.gamma, 2)
+
+    def test_mtp_strict_graph_detects_only_uniform_decode_fallbacks(self) -> None:
+        dispatcher = SimpleNamespace(
+            keys_initialized=True,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        self.assertTrue(
+            _is_uniform_decode_fallback(
+                dispatcher,
+                True,
+                CUDAGraphMode.NONE,
+            )
+        )
+        self.assertFalse(
+            _is_uniform_decode_fallback(
+                dispatcher,
+                False,
+                CUDAGraphMode.NONE,
+            )
+        )
+        self.assertFalse(
+            _is_uniform_decode_fallback(
+                dispatcher,
+                True,
+                CUDAGraphMode.FULL,
+            )
+        )
+        dispatcher.cudagraph_mode = CUDAGraphMode.NONE
+        self.assertTrue(
+            _is_uniform_decode_fallback(
+                dispatcher,
+                True,
+                CUDAGraphMode.NONE,
+            )
+        )
+
+    def test_mtp_native_op_validation_lists_missing_ops(self) -> None:
+        namespace = SimpleNamespace(
+            npu_gemma_rms_norm=object(),
+            moe_gating_top_k=object(),
+        )
+        self.assertEqual(
+            _missing_ascend_mtp_ops(namespace),
+            ("npu_causal_conv1d_custom",),
+        )
+
+    def test_mtp_explicit_gamma_overrides_default_and_rejects_draft_model(self) -> None:
+        options, _ = parse_args(
+            [
+                "--target-model",
+                "/models/Qwen3.5-35B-A3B",
+                "--method",
+                "mtp",
+                "--gamma",
+                "3",
+            ]
+        )
+        self.assertEqual(options.gamma, 3)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(
+                    [
+                        "--target-model",
+                        "/models/Qwen3.5-35B-A3B",
+                        "--method",
+                        "mtp",
+                        "--draft-model",
+                        "/models/not-used",
+                    ]
+                )
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(
+                    [
+                        "--target-model",
+                        "/models/Qwen3.5-35B-A3B",
+                        "--method",
+                        "mtp",
                         "--adaptive-speculation",
                     ]
                 )

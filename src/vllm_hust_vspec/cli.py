@@ -40,7 +40,39 @@ SERVE_PROTOCOLS: dict[str, dict[str, Any]] = {
         "chunked_prefill": True,
         "capture_policy": "auto",
         "disable_log_stats": False,
-    }
+    },
+    "qwen35-frontier-mtp2": {
+        "method": "mtp",
+        "served_model_name": "qwen3.5-35b-a3b-frontier-mtp2",
+        "gamma": 2,
+        "max_num_seqs": 16,
+        "max_num_batched_tokens": 8192,
+        "max_model_len": 262144,
+        "dtype": "bfloat16",
+        "kv_cache_dtype": "auto",
+        "block_size": 128,
+        "tensor_parallel_size": 2,
+        "gpu_memory_utilization": 0.90,
+        "host": "127.0.0.1",
+        "port": 18185,
+        "device": "0,1",
+        "graph_mode": "full-and-piecewise",
+        "generation_config": "vllm",
+        "async_scheduling": True,
+        "prefix_caching": True,
+        "chunked_prefill": True,
+        "language_model_only": True,
+        "capture_policy": "exact",
+        "disable_log_stats": False,
+        "adaptive_speculation": False,
+        "mtp_strict_graph": True,
+        "mtp_local_argmax_reduction": False,
+        "extra_args": [
+            "--enable-expert-parallel",
+            "--additional-config",
+            '{"enable_cpu_binding":true}',
+        ],
+    },
 }
 
 ARC_EASY_SERVED_MODEL_NAMES = {
@@ -115,6 +147,7 @@ SERVE_CONFIG_KEYS = frozenset(
         "max_num_batched_tokens",
         "max_model_len",
         "dtype",
+        "kv_cache_dtype",
         "block_size",
         "tensor_parallel_size",
         "draft_tensor_parallel_size",
@@ -127,6 +160,7 @@ SERVE_CONFIG_KEYS = frozenset(
         "async_scheduling",
         "prefix_caching",
         "chunked_prefill",
+        "language_model_only",
         "shared_tokenizer_padding",
         "merged_full",
         "merged_full_max_batch",
@@ -151,6 +185,9 @@ SERVE_CONFIG_KEYS = frozenset(
         "eagle_disable_draft_torch_compile",
         "eagle_relaxed_accept_topk",
         "eagle_relaxed_accept_after_tokens",
+        "mtp_strict_graph",
+        "mtp_local_argmax_reduction",
+        "synthetic_acceptance_length",
         "confidence_accept_margin",
         "confidence_accept_from_position",
         "confidence_accept_after_tokens",
@@ -260,13 +297,25 @@ def generate_capture_sizes(
     if policy == "steady":
         return sorted({1, max_num_seqs, max_num_seqs * verification_width})
     if policy == "exact" or (
-        policy == "auto" and (method in {"eagle", "eagle3", "dflash"} or dynamic_widths)
+        policy == "auto" and (method in {"eagle", "eagle3", "dflash", "mtp"} or dynamic_widths)
     ):
         if request_step is not None:
             if request_step <= 0:
                 raise ValueError("request_step must be positive")
             request_buckets = list(range(request_step, max_num_seqs + 1, request_step))
             request_buckets.extend(size for size in (1, 2, 4, 8) if size <= max_num_seqs)
+        elif (
+            policy == "exact"
+            and (
+                method in {"eagle", "eagle3"}
+                or (method == "mtp" and dynamic_widths)
+            )
+            and max_num_seqs <= 16
+        ):
+            # At small serving batches, every live-request count is cheap to
+            # capture and avoids padding speculative verification to the next
+            # sparse bucket during cohort refill and drain.
+            request_buckets = list(range(1, max_num_seqs + 1))
         else:
             request_buckets = [size for size in EAGLE_REQUEST_CAPTURE_SIZES if size <= max_num_seqs]
         if max_num_seqs not in request_buckets:
@@ -275,13 +324,25 @@ def generate_capture_sizes(
         request_buckets = _power_of_two_buckets(max_num_seqs)
     else:
         raise ValueError(f"unsupported capture policy: {policy}")
-    verification_widths = (
-        range(2, verification_width + 1) if dynamic_widths else (verification_width,)
-    )
-    return sorted(
-        set(request_buckets)
-        | {batch_size * width for batch_size in request_buckets for width in verification_widths}
-    )
+    if dynamic_widths and method == "mtp":
+        # MTP2 changes gamma in complete two-token groups. Its Target widths
+        # are therefore q3/q5/q7 rather than every width up to capacity.
+        verification_widths = range(3, verification_width + 1, 2)
+    else:
+        verification_widths = (
+            range(2, verification_width + 1)
+            if dynamic_widths
+            else (verification_width,)
+        )
+    capture_sizes = set(request_buckets) | {
+        batch_size * width for batch_size in request_buckets for width in verification_widths
+    }
+    if method == "mtp" and not dynamic_widths:
+        capture_sizes = {
+            ((size + verification_width - 1) // verification_width) * verification_width
+            for size in capture_sizes
+        }
+    return sorted(capture_sizes)
 
 
 def load_config(path: Path | None) -> tuple[dict[str, Any], dict[str, str]]:
@@ -324,13 +385,14 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
     parser.add_argument(
         "--gamma",
         type=positive_int,
-        default=4,
-        help="Maximum speculative tokens; Adaptive chooses a gamma in 1..4 by default.",
+        default=None,
+        help=("Maximum speculative tokens. Defaults to 2 for MTP and 4 for Draft/EAGLE methods."),
     )
     parser.add_argument("--max-num-seqs", type=positive_int, default=128)
     parser.add_argument("--max-num-batched-tokens", type=positive_int, default=8192)
     parser.add_argument("--max-model-len", type=positive_int, default=32768)
     parser.add_argument("--dtype", default="float16")
+    parser.add_argument("--kv-cache-dtype", default="auto")
     parser.add_argument("--block-size", type=positive_int, default=128)
     parser.add_argument("--tensor-parallel-size", type=positive_int, default=1)
     parser.add_argument("--draft-tensor-parallel-size", type=positive_int, default=1)
@@ -372,6 +434,12 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
         "--chunked-prefill",
         action=argparse.BooleanOptionalAction,
         default=True,
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Skip a multimodal encoder for text-only serving.",
     )
     parser.add_argument(
         "--shared-tokenizer-padding",
@@ -475,6 +543,29 @@ def build_parser(defaults: Mapping[str, Any] | None = None) -> argparse.Argument
         "--eagle-relaxed-accept-after-tokens",
         type=nonnegative_int,
         default=0,
+    )
+    parser.add_argument(
+        "--mtp-strict-graph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail instead of silently running eager when an MTP decode graph is missing.",
+    )
+    parser.add_argument(
+        "--mtp-local-argmax-reduction",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Select greedy MTP draft tokens with a vocab-parallel local argmax "
+            "instead of gathering full-vocabulary logits."
+        ),
+    )
+    parser.add_argument(
+        "--synthetic-acceptance-length",
+        type=float,
+        help=(
+            "Benchmark-only mean acceptance length used by the host synthetic "
+            "rejection sampler. Requires a fixed gamma and matched SPEED-Bench evidence."
+        ),
     )
     parser.add_argument(
         "--confidence-accept-margin",
@@ -713,11 +804,41 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
     parser = build_parser(defaults)
     namespace = parser.parse_args(raw_args)
     namespace.method = METHOD_ALIASES[namespace.method]
+    if namespace.gamma is None:
+        namespace.gamma = 2 if namespace.method == "mtp" else 4
+    if namespace.synthetic_acceptance_length is not None and not (
+        1.0 <= namespace.synthetic_acceptance_length <= namespace.gamma + 1
+    ):
+        parser.error(
+            f"--synthetic-acceptance-length must be between 1 and gamma + 1 ({namespace.gamma + 1})"
+        )
+    if namespace.protocol == "qwen35-frontier-mtp2":
+        frontier_contract = {
+            "method": "mtp",
+            "gamma": 2,
+            "tensor_parallel_size": 2,
+            "max_model_len": 262144,
+            "prefix_caching": True,
+            "async_scheduling": True,
+            "graph_mode": "full-and-piecewise",
+        }
+        mismatches = [
+            f"{name}={getattr(namespace, name)!r} (required {required!r})"
+            for name, required in frontier_contract.items()
+            if getattr(namespace, name) != required
+        ]
+        if mismatches:
+            parser.error(
+                "qwen35-frontier-mtp2 has a fixed serving contract: " + ", ".join(mismatches)
+            )
     if namespace.protocol == "arc-easy" and not namespace.served_model_name:
         namespace.served_model_name = ARC_EASY_SERVED_MODEL_NAMES.get(namespace.method)
     if not namespace.target_model:
         parser.error("--target-model is required")
-    if not namespace.draft_model:
+    if namespace.method == "mtp":
+        if namespace.draft_model:
+            parser.error("--draft-model is not used by MTP; the head is loaded from target-model")
+    elif not namespace.draft_model:
         model_environment = dict(os.environ)
         model_environment.update(environment)
         try:
@@ -742,6 +863,22 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
     adaptive_policy_explicit = "--adaptive-policy" in raw_args or ("adaptive_policy" in defaults)
     if namespace.adaptive_profile is not None and not adaptive_policy_explicit:
         namespace.adaptive_policy = "profile"
+    if namespace.method == "mtp" and namespace.adaptive_speculation:
+        if not (adaptive_explicitly_enabled or adaptive_policy_explicit):
+            namespace.adaptive_speculation = False
+        else:
+            if namespace.adaptive_policy != "online":
+                parser.error("adaptive MTP supports only --adaptive-policy online")
+            if namespace.adaptive_min_gamma < 2:
+                parser.error("adaptive MTP requires --adaptive-min-gamma >= 2")
+            if namespace.adaptive_min_gamma % 2 or namespace.gamma % 2:
+                parser.error("adaptive MTP gamma candidates must be multiples of 2")
+            if namespace.adaptive_max_gamma_step < 2:
+                parser.error("adaptive MTP requires --adaptive-max-gamma-step >= 2")
+    if namespace.synthetic_acceptance_length is not None and namespace.adaptive_speculation:
+        parser.error(
+            "--synthetic-acceptance-length requires fixed gamma; pass --no-adaptive-speculation"
+        )
     if (
         namespace.method == "dflash"
         and namespace.adaptive_speculation
@@ -801,7 +938,7 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
             if namespace.method == "dflash":
                 parser.error(
                     "--adaptive-policy online currently supports serial "
-                    "Draft, EAGLE, and EAGLE3 only"
+                    "Draft, EAGLE, EAGLE3, and MTP only"
                 )
             if not namespace.adaptive_latency_calibration:
                 parser.error("--adaptive-policy online requires --adaptive-latency-calibration")
@@ -820,8 +957,7 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
         namespace.merged_full = (
             namespace.adaptive_full_graph
             and namespace.method == "draft_model"
-            and namespace.graph_mode
-            in {"full", "full-decode-only", "full-and-piecewise"}
+            and namespace.graph_mode in {"full", "full-decode-only", "full-and-piecewise"}
         )
         if not namespace.merged_full:
             namespace.merged_full_max_batch = 0
@@ -843,8 +979,31 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
         or namespace.eagle_target_hidden_trace_dir is not None
         or namespace.eagle_target_argmax_trace_path is not None
     )
-    if eagle_only_requested and namespace.method != "eagle":
-        parser.error("the selected EAGLE optimization only supports --method eagle")
+    if eagle_only_requested and namespace.method not in {"eagle", "eagle3"}:
+        parser.error("the selected EAGLE optimization only supports --method eagle/eagle3")
+    if namespace.method == "eagle3":
+        eagle3_unsupported = eagle_only_requested and (
+            namespace.eagle_draft_active_vocab_size > 0
+            or namespace.eagle_draft_active_vocab_ids is not None
+            or namespace.eagle_disable_draft_torch_compile
+            or namespace.eagle_relaxed_accept_topk > 1
+            or namespace.eagle_relaxed_accept_after_tokens > 0
+            or namespace.eagle_target_width
+            or namespace.eagle_tree_graph_commit
+            or namespace.eagle_zero_draft_kv_first_step
+            or namespace.eagle_draft_trace
+            or namespace.eagle_draft_io_trace_dir is not None
+            or namespace.eagle_target_hidden_trace_dir is not None
+            or namespace.eagle_target_argmax_trace_path is not None
+        )
+        if eagle3_unsupported:
+            parser.error(
+                "EAGLE3 currently supports --eagle-target-active-vocab-ids and "
+                "--eagle-draft-lm-head-quantization=w8a16; "
+                "the selected EAGLE-only option has not been adapted"
+            )
+        if namespace.eagle_draft_lm_head_quantization == "w8a8":
+            parser.error("EAGLE3 Draft LM head currently supports w8a16 only")
     draft_only_requested = (
         namespace.draft_active_vocab_size > 0
         or namespace.draft_active_vocab_ids is not None
@@ -863,6 +1022,12 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, d
         namespace.shared_tokenizer_padding = False
         namespace.merged_full = False
         namespace.merged_full_max_batch = 0
+    configured_extra_args = defaults.get("extra_args")
+    if not namespace.extra_args and configured_extra_args:
+        if isinstance(configured_extra_args, str):
+            namespace.extra_args = [configured_extra_args]
+        else:
+            namespace.extra_args = list(configured_extra_args)
     if namespace.extra_args and namespace.extra_args[0] == "--":
         namespace.extra_args = namespace.extra_args[1:]
     return namespace, environment
@@ -882,11 +1047,17 @@ def build_vllm_command(options: argparse.Namespace) -> list[str]:
     graph_enabled = options.graph_mode != "eager"
     speculative_config = {
         "method": options.method,
-        "model": options.draft_model,
-        "draft_tensor_parallel_size": options.draft_tensor_parallel_size,
         "num_speculative_tokens": options.gamma,
         "enforce_eager": not graph_enabled,
     }
+    if options.synthetic_acceptance_length is not None:
+        speculative_config["rejection_sample_method"] = "synthetic"
+        speculative_config["synthetic_acceptance_length"] = options.synthetic_acceptance_length
+    if options.method != "mtp":
+        speculative_config["model"] = options.draft_model
+        speculative_config["draft_tensor_parallel_size"] = options.draft_tensor_parallel_size
+    else:
+        speculative_config["use_local_argmax_reduction"] = options.mtp_local_argmax_reduction
     if options.method == "draft_model":
         speculative_config["use_heterogeneous_vocab"] = options.shared_tokenizer_padding
     command = [
@@ -902,7 +1073,7 @@ def build_vllm_command(options: argparse.Namespace) -> list[str]:
         "--dtype",
         options.dtype,
         "--kv-cache-dtype",
-        "auto",
+        options.kv_cache_dtype,
         "--block-size",
         str(options.block_size),
         "--tensor-parallel-size",
@@ -945,6 +1116,8 @@ def build_vllm_command(options: argparse.Namespace) -> list[str]:
     command.append(
         "--enable-chunked-prefill" if options.chunked_prefill else "--no-enable-chunked-prefill"
     )
+    if options.language_model_only:
+        command.append("--language-model-only")
     command.append("--async-scheduling" if options.async_scheduling else "--no-async-scheduling")
     command.append("--no-enforce-eager" if graph_enabled else "--enforce-eager")
 
@@ -1006,18 +1179,15 @@ def build_environment(
         draft_active_vocab=draft_active_vocab,
         draft_target_active_vocab=draft_target_active_vocab,
         draft_parallel_graph_updates=options.draft_parallel_graph_updates,
-        draft_target_parallel_graph_updates=(
-            options.draft_target_parallel_graph_updates
-        ),
+        draft_target_parallel_graph_updates=(options.draft_target_parallel_graph_updates),
         draft_exact_repetition_topk=options.draft_exact_repetition_topk,
         draft_exact_repetition_trace=options.draft_exact_repetition_trace,
-        draft_exact_repetition_sync_proof=(
-            options.draft_exact_repetition_sync_proof
-        ),
+        draft_exact_repetition_sync_proof=(options.draft_exact_repetition_sync_proof),
         eagle_tree_width=options.eagle_tree_width,
         eagle_draft_active_vocab=eagle_draft_active_vocab,
         eagle_target_active_vocab=eagle_target_active_vocab,
         eagle_relaxed_accept_topk=options.eagle_relaxed_accept_topk,
+        mtp_strict_graph=options.mtp_strict_graph,
         confidence_accept_margin=options.confidence_accept_margin,
         confidence_accept_from_position=options.confidence_accept_from_position,
         confidence_accept_after_tokens=options.confidence_accept_after_tokens,

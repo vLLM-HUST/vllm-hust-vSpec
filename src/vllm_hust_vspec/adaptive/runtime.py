@@ -92,6 +92,241 @@ def _adaptive_scheduled_batch_size(
     return int(num_scheduled_requests)
 
 
+def _should_hold_initial_cohort(
+    num_running: int,
+    num_waiting: int,
+    target_size: int,
+    started_at: float,
+    now: float,
+    max_wait_seconds: float,
+) -> bool:
+    """Briefly coalesce an empty engine's first speculative decode cohort."""
+    return (
+        target_size > 1
+        and num_running == 0
+        and 0 < num_waiting < target_size
+        and now - started_at < max_wait_seconds
+    )
+
+
+def _should_hold_growing_initial_cohort(
+    scheduler: Any,
+    num_running: int,
+    num_waiting: int,
+    now: float,
+    quiet_seconds: float,
+    max_wait_seconds: float,
+) -> bool:
+    """Gate an empty engine until a request burst stops growing.
+
+    This is a bounded gated-batching policy, not a fixed batch threshold. The
+    observed arrival burst determines the cohort size; the quiet period avoids
+    committing a stateful speculative width from only the first HTTP request.
+    """
+    state_attr = "_vspec_adaptive_arrival_gate"
+    if (
+        num_running != 0
+        or num_waiting <= 0
+        or quiet_seconds <= 0
+        or max_wait_seconds <= 0
+    ):
+        if hasattr(scheduler, state_attr):
+            delattr(scheduler, state_attr)
+        return False
+
+    state = getattr(scheduler, state_attr, None)
+    if state is None:
+        state = {
+            "started_at": now,
+            "last_growth_at": now,
+            "waiting_count": num_waiting,
+        }
+        setattr(scheduler, state_attr, state)
+    elif num_waiting > int(state["waiting_count"]):
+        state["last_growth_at"] = now
+        state["waiting_count"] = num_waiting
+
+    within_latency_budget = now - float(state["started_at"]) < max_wait_seconds
+    burst_is_growing = now - float(state["last_growth_at"]) < quiet_seconds
+    if within_latency_budget and burst_is_growing:
+        return True
+
+    delattr(scheduler, state_attr)
+    return False
+
+
+def _adaptive_graph_batch_limit(
+    method: str | None,
+    gamma: int,
+    max_gamma: int,
+    max_num_seqs: int,
+) -> int:
+    """Bound low-width EAGLE3 graph materialization by serving geometry.
+
+    The graph-backed anchor and its immediate lower neighbor retain every
+    concurrency. Each farther low-gamma arm gets half as many request rows.
+    This preserves all online arms where they are useful without allowing cold
+    low-width graphs to evict the high-concurrency hot graph pool.
+    """
+    if method != "eagle3" or gamma <= 0:
+        return max_num_seqs
+    anchor_gamma = min(max_gamma, 5)
+    full_width_floor = max(1, anchor_gamma - 1)
+    if gamma >= full_width_floor:
+        return max_num_seqs
+    return max(1, max_num_seqs // (1 << (full_width_floor - gamma)))
+
+
+def _adaptive_candidate_batch_limits(
+    method: str,
+    min_gamma: int,
+    max_gamma: int,
+    max_num_seqs: int,
+) -> dict[int, int]:
+    if method != "eagle3":
+        return {}
+    return {
+        gamma: _adaptive_graph_batch_limit(
+            method,
+            gamma,
+            max_gamma,
+            max_num_seqs,
+        )
+        for gamma in range(min_gamma, max_gamma + 1)
+    }
+
+
+def _online_probe_shared_cost_units(method: str) -> float:
+    """Return a conservative shared-cost prior for an unmeasured gamma arm."""
+    # EAGLE3's head is cheap relative to the Target, but a width transition
+    # also changes graph and recurrent-state bindings. Treat that runtime cost
+    # as part of the serial Draft unit until direct serving feedback exists.
+    return 8.0 if method == "eagle3" else 2.0
+
+
+def _should_hold_eagle3_async_cohort(
+    method: str,
+    adaptive_async: bool,
+    num_running: int,
+    *,
+    runtime_width_switching: bool = False,
+) -> bool:
+    """Keep one stateful speculative width until an async cohort drains.
+
+    Async scheduling can have multiple Target frames in flight. A mid-cohort
+    width change makes older EAGLE3 or hybrid-MTP frames consume state with a
+    different layout and attributes delayed feedback to the wrong arm.
+    """
+    return (
+        method in {"eagle3", "mtp"}
+        and adaptive_async
+        and not runtime_width_switching
+        and num_running > 0
+    )
+
+
+def _can_use_eagle3_native_scheduler_hold(
+    method: str,
+    adaptive_async: bool,
+    runtime_width_switching: bool,
+    num_running: int,
+    schedule_gamma: int,
+    configured_gamma: int,
+    *,
+    target_only_latched: bool = False,
+) -> bool:
+    """Return whether an active EAGLE3 cohort can use native scheduling."""
+    return (
+        not target_only_latched
+        and schedule_gamma == configured_gamma
+        and _should_hold_eagle3_async_cohort(
+            method,
+            adaptive_async,
+            num_running,
+            runtime_width_switching=runtime_width_switching,
+        )
+    )
+
+
+def _eagle3_cohort_refill_enabled(
+    method: str,
+    schedule: Any,
+    environ: Any = os.environ,
+) -> bool:
+    """Detect a native refill hook before or after patch installation."""
+    if method == "eagle3":
+        return bool(
+            getattr(
+                schedule,
+                "_vllm_hust_vspec_eagle3_cohort_refill_patched",
+                False,
+            )
+            or environ.get("HUST_VSPEC_EAGLE3_COHORT_REFILL", "0") == "1"
+        )
+    if method == "mtp":
+        return bool(
+            getattr(schedule, "_vspec_mtp_cohort_refill", False)
+            or environ.get("HUST_VSPEC_MTP_COHORT_REFILL", "0") == "1"
+        )
+    return False
+
+
+@contextmanager
+def _scheduler_runtime_gamma(scheduler: Any, gamma: int) -> Any:
+    """Use the selected arm for scheduling without shrinking engine capacity."""
+    native_gamma = int(scheduler.num_spec_tokens)
+    configured_gamma = int(
+        getattr(
+            scheduler,
+            "_vspec_adaptive_configured_gamma",
+            native_gamma,
+        )
+    )
+    runtime_gamma = int(gamma)
+    if runtime_gamma < 0 or runtime_gamma > configured_gamma:
+        raise RuntimeError(
+            "adaptive scheduler gamma is outside configured capacity: "
+            f"runtime={runtime_gamma}, configured={configured_gamma}"
+        )
+    if runtime_gamma == native_gamma:
+        yield
+        return
+
+    # Scheduler.schedule() uses num_spec_tokens both to pad newly admitted
+    # decode requests and to size their placeholder list. Keeping the configured
+    # maximum here mixes q(max+1) refill rows with the active arm's q(gamma+1)
+    # rows, which makes an otherwise uniform Target batch eager. Allocation
+    # buffers remain sized for configured_gamma; only scheduling is scoped.
+    scheduler.num_spec_tokens = runtime_gamma
+    try:
+        yield
+    finally:
+        scheduler.num_spec_tokens = native_gamma
+
+
+def _normalize_spec_decoding_stats_width(stats: Any, width: int) -> Any:
+    """Keep adaptive metrics at the configured maximum Draft width."""
+    if stats is None:
+        return None
+    configured_width = int(width)
+    if configured_width <= 0:
+        raise ValueError("spec decoding stats width must be positive")
+    for attribute in (
+        "num_accepted_tokens_per_pos",
+        "num_draft_tokens_per_pos",
+    ):
+        values = getattr(stats, attribute)
+        if len(values) > configured_width:
+            raise RuntimeError(
+                "spec decoding stats exceed configured adaptive capacity: "
+                f"attribute={attribute}, actual={len(values)}, "
+                f"configured={configured_width}"
+            )
+        values.extend([0] * (configured_width - len(values)))
+    stats.num_spec_tokens = configured_width
+    return stats
+
+
 def _adaptive_target_query_lens(existing: Any, max_gamma: int) -> tuple[int, ...]:
     widths = {int(width) for width in existing}
     widths.update(range(1, max_gamma + 2))
@@ -102,8 +337,23 @@ def _adaptive_capture_query_lens(
     existing: Any,
     max_gamma: int,
     method: str,
+    min_gamma: int | None = None,
 ) -> tuple[int, ...]:
-    widths = set(_adaptive_target_query_lens(existing, max_gamma))
+    if method == "draft_model" and min_gamma is not None and min_gamma <= 2 <= max_gamma:
+        # Gamma 2 is the graph-backed serial-Draft arm. Its Target width is 3
+        # and its merged Draft continuation width is 4. Other arms stay fully
+        # selectable, but run eagerly until they have a validated graph path.
+        return (3, 4)
+    if method == "eagle3" and min_gamma is not None:
+        # Every online arm needs an independent Target graph. Registering only
+        # the old gamma-5 anchor silently sends all other widths through the
+        # non-uniform slow path and biases the controller toward that anchor.
+        return tuple(range(min_gamma + 1, max_gamma + 2))
+    if method == "mtp" and min_gamma is not None:
+        return tuple(gamma + 1 for gamma in range(min_gamma, max_gamma + 1, 2))
+    widths = {int(width) for width in existing}
+    first_width = 1 if min_gamma is None else min_gamma + 1
+    widths.update(range(first_width, max_gamma + 2))
     if method == "draft_model":
         widths.add(max_gamma + 2)
     return tuple(sorted(widths))
@@ -111,7 +361,10 @@ def _adaptive_capture_query_lens(
 
 def _uses_width_isolated_target_graph_params(cudagraph_mode: Any) -> bool:
     """Return whether Target graph state is independent for each query width."""
-    return getattr(cudagraph_mode, "name", "") == "FULL_DECODE_ONLY"
+    return getattr(cudagraph_mode, "name", "") in {
+        "FULL_DECODE_ONLY",
+        "FULL_AND_PIECEWISE",
+    }
 
 
 def _runtime_target_query_width(scheduler_output: Any) -> int | None:
@@ -119,6 +372,20 @@ def _runtime_target_query_width(scheduler_output: Any) -> int | None:
     draft_tokens = scheduler_output.scheduled_spec_decode_tokens
     widths = {len(draft_tokens.get(request_id, ())) + 1 for request_id in scheduled}
     return widths.pop() if len(widths) == 1 else None
+
+
+def _runtime_target_metadata_query_width(scheduler_output: Any) -> int | None:
+    """Return the widest request layout represented by the current frame."""
+    scheduled = scheduler_output.num_scheduled_tokens
+    draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+    widths = [len(draft_tokens.get(request_id, ())) + 1 for request_id in scheduled]
+    return max(widths, default=None)
+
+
+def _runtime_proposal_query_width(scheduler_output: Any) -> int:
+    """Return the runner width needed while sampling the next proposal."""
+    gamma = int(getattr(scheduler_output, "num_spec_tokens_to_schedule", 0))
+    return gamma + 1
 
 
 def _current_target_is_target_only(
@@ -229,6 +496,24 @@ def _uniform_decode_fits_capture_bucket(
     return int(padded_sizes[num_tokens]) % query_width == 0
 
 
+def _active_dispatch_query_width(
+    dispatcher: Any,
+    explicit_query_width: int | None = None,
+) -> int:
+    """Resolve Target or Draft width before validating a uniform graph bucket."""
+    if explicit_query_width is not None:
+        return int(explicit_query_width)
+    for attribute in (
+        "_vspec_capture_uniform_query_len",
+        "_vspec_active_uniform_query_len",
+        "_vspec_runtime_draft_query_len",
+    ):
+        query_width = getattr(dispatcher, attribute, None)
+        if query_width is not None:
+            return int(query_width)
+    return int(dispatcher.uniform_decode_query_len)
+
+
 def _add_adaptive_decode_graph_keys(
     dispatcher: Any,
     query_widths: tuple[int, ...],
@@ -240,13 +525,25 @@ def _add_adaptive_decode_graph_keys(
         return
     capture_sizes = dispatcher.compilation_config.cudagraph_capture_sizes or ()
     max_num_seqs = dispatcher.vllm_config.scheduler_config.max_num_seqs
+    speculative_config = getattr(dispatcher.vllm_config, "speculative_config", None)
+    method = getattr(speculative_config, "method", None)
+    max_gamma = max((width - 1 for width in query_widths), default=0)
     lora_cases = dispatcher._get_lora_cases()
     previous_width = dispatcher.uniform_decode_query_len
     try:
         for query_width in query_widths:
             dispatcher.uniform_decode_query_len = query_width
+            gamma = query_width - 1
+            batch_limit = _adaptive_graph_batch_limit(
+                method,
+                gamma,
+                max_gamma,
+                max_num_seqs,
+            )
             for size in capture_sizes:
                 if size < query_width or size > query_width * max_num_seqs or size % query_width:
+                    continue
+                if size // query_width > batch_limit:
                     continue
                 for num_active_loras in lora_cases:
                     descriptor = dispatcher._create_padded_batch_descriptor(
@@ -274,6 +571,45 @@ def _initialize_adaptive_decode_only_graph_keys(
     dispatcher.keys_initialized = True
 
 
+def _initialize_adaptive_graph_keys(
+    dispatcher: Any,
+    cudagraph_mode: Any,
+    query_widths: tuple[int, ...],
+    mixed_capture_sizes: tuple[int, ...] = (),
+) -> None:
+    """Initialize mixed graphs once and FULL decode graphs per runtime width."""
+    from vllm.config import CUDAGraphMode
+
+    dispatcher.cudagraph_mode = cudagraph_mode
+    dispatcher._compute_bs_to_padded_graph_size()
+    lora_cases = dispatcher._get_lora_cases()
+    dispatcher.captured_lora_counts = [count for count in lora_cases if count]
+
+    mixed_mode = cudagraph_mode.mixed_mode()
+    if mixed_mode != CUDAGraphMode.NONE:
+        sizes = mixed_capture_sizes or tuple(
+            dispatcher.compilation_config.cudagraph_capture_sizes or ()
+        )
+        for size in sizes:
+            for num_active_loras in lora_cases:
+                descriptor = dispatcher._create_padded_batch_descriptor(
+                    size,
+                    False,
+                    num_active_loras > 0,
+                    num_active_loras,
+                )
+                if mixed_mode == CUDAGraphMode.PIECEWISE:
+                    descriptor = replace(
+                        descriptor,
+                        num_reqs=None,
+                        uniform=False,
+                    )
+                dispatcher.add_cudagraph_key(mixed_mode, descriptor)
+
+    _add_adaptive_decode_graph_keys(dispatcher, query_widths)
+    dispatcher.keys_initialized = True
+
+
 @contextmanager
 def _runner_query_width(
     runner: Any,
@@ -287,16 +623,349 @@ def _runner_query_width(
 
     previous_runner_width = runner.uniform_decode_query_len
     previous_dispatcher_width = dispatcher.uniform_decode_query_len
-    if previous_runner_width == query_width and previous_dispatcher_width == query_width:
+    previous_decode_width = getattr(
+        runner,
+        "decode_token_per_req",
+        previous_runner_width,
+    )
+    previous_num_spec_tokens = getattr(
+        runner,
+        "num_spec_tokens",
+        max(previous_runner_width - 1, 0),
+    )
+    previous_decode_threshold = getattr(
+        runner,
+        "decode_threshold",
+        previous_runner_width,
+    )
+    previous_reorder_threshold = getattr(
+        runner,
+        "reorder_batch_threshold",
+        None,
+    )
+    metadata_builder_states = [
+        (
+            builder,
+            getattr(builder, "decode_threshold", None),
+            getattr(builder, "reorder_batch_threshold", None),
+            getattr(builder, "num_spec", None),
+            getattr(builder, "spec_state_indices_tensor", None),
+        )
+        for builder in _adaptive_metadata_builders(runner)
+    ]
+    runtime_gamma = max(query_width - 1, 0)
+    if (
+        previous_runner_width == query_width
+        and previous_dispatcher_width == query_width
+        and previous_decode_width == query_width
+        and previous_num_spec_tokens == runtime_gamma
+        and previous_decode_threshold == query_width
+        and (previous_reorder_threshold is None or previous_reorder_threshold == query_width)
+        and all(
+            decode_threshold in (None, query_width)
+            and reorder_threshold in (None, query_width)
+            and builder_num_spec in (None, runtime_gamma)
+            and (state_indices is None or state_indices.shape[1] == query_width)
+            for (
+                _,
+                decode_threshold,
+                reorder_threshold,
+                builder_num_spec,
+                state_indices,
+            ) in metadata_builder_states
+        )
+    ):
         yield
         return
     runner.uniform_decode_query_len = query_width
     dispatcher.uniform_decode_query_len = query_width
+    # Ascend copies the configured maximum into this attention-metadata field
+    # during runner construction.  Leaving it at max_gamma + 1 makes a gamma-2
+    # frame retain a q5 decode layout in a 1..4 deployment even though graph
+    # dispatch is correctly bound to q3.
+    runner.decode_token_per_req = query_width
+    runner.num_spec_tokens = runtime_gamma
+    runner.decode_threshold = query_width
+    if previous_reorder_threshold is not None:
+        runner.reorder_batch_threshold = query_width
+    for (
+        builder,
+        decode_threshold,
+        reorder_threshold,
+        builder_num_spec,
+        state_indices,
+    ) in metadata_builder_states:
+        if decode_threshold is not None:
+            builder.decode_threshold = query_width
+        if reorder_threshold is not None:
+            builder.reorder_batch_threshold = query_width
+        if builder_num_spec is not None:
+            # GDN builders allocate their buffers at configured capacity, but
+            # ``num_spec`` controls how many recurrent-state slots are consumed
+            # by this frame. Using max_gamma here with a narrower runtime arm
+            # advances an extra state slot and corrupts subsequent verification.
+            builder.num_spec = runtime_gamma
+        if state_indices is not None and state_indices.shape[1] != query_width:
+            buffers = getattr(
+                builder,
+                "_vspec_adaptive_spec_state_indices_by_width",
+                None,
+            )
+            if buffers is None:
+                buffers = {int(state_indices.shape[1]): state_indices}
+                builder._vspec_adaptive_spec_state_indices_by_width = buffers
+            else:
+                buffers.setdefault(int(state_indices.shape[1]), state_indices)
+            if query_width not in buffers:
+                buffers[query_width] = state_indices.new_empty(
+                    (state_indices.shape[0], query_width)
+                )
+            builder.spec_state_indices_tensor = buffers[query_width]
     try:
         yield
     finally:
         runner.uniform_decode_query_len = previous_runner_width
         dispatcher.uniform_decode_query_len = previous_dispatcher_width
+        runner.decode_token_per_req = previous_decode_width
+        runner.num_spec_tokens = previous_num_spec_tokens
+        runner.decode_threshold = previous_decode_threshold
+        if previous_reorder_threshold is not None:
+            runner.reorder_batch_threshold = previous_reorder_threshold
+        for (
+            builder,
+            decode_threshold,
+            reorder_threshold,
+            builder_num_spec,
+            state_indices,
+        ) in metadata_builder_states:
+            if decode_threshold is not None:
+                builder.decode_threshold = decode_threshold
+            if reorder_threshold is not None:
+                builder.reorder_batch_threshold = reorder_threshold
+            if builder_num_spec is not None:
+                builder.num_spec = builder_num_spec
+            if state_indices is not None:
+                builder.spec_state_indices_tensor = state_indices
+
+
+def _adaptive_metadata_builders(runner: Any) -> tuple[Any, ...]:
+    """Resolve stable attention builders once after KV-cache initialization."""
+    cached = getattr(runner, "_vspec_adaptive_metadata_builders", None)
+    if cached is not None:
+        return cached
+
+    attn_group_iterator = getattr(runner, "_attn_group_iterator", None)
+    if not callable(attn_group_iterator):
+        return ()
+    try:
+        builders = tuple(group.get_metadata_builder() for group in attn_group_iterator())
+    except (AttributeError, TypeError):
+        # Attention groups are populated after runner construction.
+        return ()
+    if builders:
+        runner._vspec_adaptive_metadata_builders = builders
+    return builders
+
+
+def _state_indices_for_query_width(builder: Any, query_width: int) -> Any:
+    state_indices = getattr(builder, "spec_state_indices_tensor", None)
+    if state_indices is None:
+        return None
+    buffers = getattr(
+        builder,
+        "_vspec_adaptive_spec_state_indices_by_width",
+        None,
+    )
+    if buffers is None:
+        buffers = {int(state_indices.shape[1]): state_indices}
+        builder._vspec_adaptive_spec_state_indices_by_width = buffers
+    else:
+        buffers.setdefault(int(state_indices.shape[1]), state_indices)
+    if query_width not in buffers:
+        buffers[query_width] = state_indices.new_empty((state_indices.shape[0], query_width))
+    return buffers[query_width]
+
+
+def _runner_query_width_pin_plan(
+    runner: Any,
+    query_width: int,
+) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], tuple[tuple[Any, Any], ...]]:
+    """Cache the host assignments needed to restore one native query width."""
+    plans = getattr(runner, "_vspec_adaptive_query_width_pin_plans", None)
+    if plans is None:
+        plans = {}
+        runner._vspec_adaptive_query_width_pin_plans = plans
+    cached = plans.get(query_width)
+    if cached is not None:
+        return cached
+
+    builders = _adaptive_metadata_builders(runner)
+    plan = (
+        tuple(builder for builder in builders if hasattr(builder, "decode_threshold")),
+        tuple(builder for builder in builders if hasattr(builder, "reorder_batch_threshold")),
+        tuple(builder for builder in builders if hasattr(builder, "num_spec")),
+        tuple(
+            (builder, state_indices)
+            for builder in builders
+            if (
+                state_indices := _state_indices_for_query_width(
+                    builder,
+                    query_width,
+                )
+            )
+            is not None
+        ),
+    )
+    if builders:
+        plans[query_width] = plan
+    return plan
+
+
+def _pin_runner_query_width(runner: Any, query_width: int) -> None:
+    """Make the dominant adaptive width the runner's native host state."""
+    dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    if runner is None or dispatcher is None:
+        return
+
+    runtime_gamma = max(query_width - 1, 0)
+    runner.uniform_decode_query_len = query_width
+    dispatcher.uniform_decode_query_len = query_width
+    runner.decode_token_per_req = query_width
+    runner.num_spec_tokens = runtime_gamma
+    runner.decode_threshold = query_width
+    if hasattr(runner, "reorder_batch_threshold"):
+        runner.reorder_batch_threshold = query_width
+
+    (
+        decode_builders,
+        reorder_builders,
+        num_spec_builders,
+        state_index_bindings,
+    ) = _runner_query_width_pin_plan(runner, query_width)
+    for builder in decode_builders:
+        builder.decode_threshold = query_width
+    for builder in reorder_builders:
+        builder.reorder_batch_threshold = query_width
+    for builder in num_spec_builders:
+        builder.num_spec = runtime_gamma
+    for builder, state_indices in state_index_bindings:
+        builder.spec_state_indices_tensor = state_indices
+
+    runner._vspec_adaptive_pinned_query_width = query_width
+
+
+def _is_eagle3_anchor_runtime(
+    runner: Any,
+    method: str,
+    gamma: int,
+    query_width: int | None,
+    *,
+    require_pinned: bool = True,
+) -> bool:
+    """Return whether a stateful frame can use its native anchor fast path."""
+    if method not in {"eagle3", "mtp"} or runner is None or query_width is None:
+        return False
+    anchor_gamma = getattr(runner, "_vspec_adaptive_anchor_gamma", None)
+    if gamma != anchor_gamma or query_width != gamma + 1:
+        return False
+    if (
+        require_pinned
+        and getattr(
+            runner,
+            "_vspec_adaptive_pinned_query_width",
+            None,
+        )
+        != query_width
+    ):
+        return False
+    dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    return (
+        int(getattr(runner, "num_spec_tokens", -1)) == gamma
+        and int(getattr(runner, "uniform_decode_query_len", -1)) == query_width
+        and (
+            dispatcher is None
+            or int(getattr(dispatcher, "uniform_decode_query_len", -1)) == query_width
+        )
+    )
+
+
+def _eagle3_native_anchor_query_width(
+    runner: Any,
+    method: str,
+    scheduler_output: Any,
+    *,
+    cohort_locked: bool,
+) -> int | None:
+    """Resolve a cohort-locked native frame without scanning requests."""
+    if not cohort_locked or bool(scheduler_output.scheduled_new_reqs):
+        return None
+    gamma = int(getattr(scheduler_output, "num_spec_tokens_to_schedule", -1))
+    query_width = gamma + 1
+    if not _is_eagle3_anchor_runtime(
+        runner,
+        method,
+        gamma,
+        query_width,
+        require_pinned=False,
+    ):
+        return None
+    return query_width
+
+
+def _synchronize_eagle3_width_transition(
+    runner: Any,
+    method: str,
+    gamma: int,
+    *,
+    enabled: bool,
+    synchronize: Any | None = None,
+) -> bool:
+    """Fence queued graph work before changing stateful EAGLE3 width.
+
+    Async scheduling can prepare the next cohort while the final graph of the
+    previous cohort is still executing. EAGLE3's GDN metadata owns tensors
+    whose second dimension is the speculative width, so rebinding those
+    tensors before the old graph completes can expose a width-5 allocation to
+    a width-6 replay. The controller changes width only at a drained-cohort
+    boundary; this one-time fence makes that boundary real on the device.
+    """
+    if not enabled or method != "eagle3" or runner is None:
+        return False
+
+    previous_gamma = int(
+        getattr(
+            runner,
+            "_vspec_eagle3_synchronized_gamma",
+            getattr(runner, "_vspec_adaptive_anchor_gamma", gamma),
+        )
+    )
+    if previous_gamma == gamma:
+        runner._vspec_eagle3_synchronized_gamma = gamma
+        return False
+
+    if synchronize is None:
+        import torch
+
+        synchronize = torch.npu.synchronize
+    synchronize()
+    runner._vspec_eagle3_synchronized_gamma = gamma
+
+    drafter = getattr(runner, "drafter", None)
+    if drafter is not None:
+        # No request survives this boundary. Start the new cohort directly at
+        # its selected width instead of executing one compatibility step at
+        # the old width.
+        drafter._vspec_adaptive_previous_proposal_gamma = gamma
+
+    # The leader rebuilds shared GDN metadata on the first frame of the new
+    # cohort. Invalidate its old-width gather plan so followers cannot consume
+    # it if their build order changes during the transition.
+    for builder in _adaptive_metadata_builders(runner):
+        state = getattr(builder, "_vspec_gdn_shared_state", None)
+        if state is not None:
+            state.metadata = None
+            state.gather_indices = None
+    return True
 
 
 @contextmanager
@@ -343,7 +1012,13 @@ def _runtime_draft_continuation_query_width(
     proposer: Any,
     gamma: int,
 ) -> Any:
-    """Bind the continuation width so padded metadata cannot mask tail batches."""
+    """Bind the validated gamma-2 continuation width for padded tail batches."""
+    # The compact gamma-2 path merges two serial continuation forwards into a
+    # four-token descriptor. Wider gammas still have runtime-dependent layouts;
+    # forcing ``gamma + 2`` can bind a captured FIA query to shorter metadata.
+    if gamma != 2:
+        yield
+        return
     dispatcher = getattr(
         getattr(proposer, "runner", None),
         "cudagraph_dispatcher",
@@ -436,6 +1111,19 @@ def _update_async_next_frame_gamma(
     scheduler_config = getattr(scheduler, "scheduler_config", None)
     if not getattr(scheduler_config, "async_scheduling", False):
         return
+    if gamma == int(getattr(scheduler, "num_spec_tokens", -1)):
+        # The native async scheduler already installed the configured-width
+        # placeholders. Replacing them here can race queued async frames even
+        # though the selected arm did not change.
+        return
+
+    current_placeholders = getattr(scheduler, "_spec_token_placeholders", None)
+    if current_placeholders is not None and len(current_placeholders) == gamma:
+        # A non-native arm can remain active for hundreds of async frames.
+        # Rebinding an equivalent list on every frame races requests whose
+        # previous Target output is still in flight. New requests already use
+        # this scheduler-level list, so only a real width change needs repair.
+        return
 
     placeholders = [-1] * gamma
     scheduler._spec_token_placeholders = placeholders
@@ -503,10 +1191,30 @@ def _proposal_execution_gamma(
     requested_gamma: int,
     previous_gamma: int,
 ) -> int:
-    """Keep serial EAGLE aligned while reducing the proposal width."""
-    if method == "eagle" and 0 < requested_gamma < previous_gamma:
+    """Keep serial EAGLE-family state aligned while reducing proposal width."""
+    if method in {"eagle", "eagle3"} and 0 < requested_gamma < previous_gamma:
         return previous_gamma
     return requested_gamma
+
+
+def _online_initial_gamma(
+    method: str,
+    min_gamma: int,
+    max_gamma: int,
+) -> int | None:
+    """Choose a graph-backed cold-start arm without restricting exploration."""
+    if method == "draft_model" and min_gamma <= 2 <= max_gamma:
+        return 2
+    if method == "eagle3":
+        # Gamma 5 is only the graph-backed cold-start prior.  All configured
+        # arms remain available to the online model and UCB selector.
+        return min(max_gamma, max(min_gamma, 5))
+    if method == "mtp":
+        # MTP2 rolls the two-layer head repeatedly. Gamma 4 is the measured
+        # B16 knee while 2 and 6 remain explicit online candidates.
+        anchor = min(max_gamma, max(min_gamma, 4))
+        return anchor - (anchor % 2)
+    return None
 
 
 def _can_use_stable_configured_draft_path(
@@ -517,15 +1225,39 @@ def _can_use_stable_configured_draft_path(
     *,
     adaptive_full_graph: bool,
     entropy_stop: bool,
+    native_gamma: int | None = None,
 ) -> bool:
-    """Return whether serial Draft can keep its native configured state."""
+    """Return whether the proposal can keep its native FULL-graph state."""
+    if not adaptive_full_graph or entropy_stop or requested_gamma != previous_gamma:
+        return False
+    if method == "draft_model":
+        # Serial Draft anchors its native graph at gamma 2 when that arm is
+        # available, even if the configured capacity is wider.
+        return configured_gamma >= 2 and requested_gamma == 2
+    return requested_gamma == (configured_gamma if native_gamma is None else native_gamma)
+
+
+def _force_non_native_serial_draft_target_eager(
+    method: str,
+    adaptive_full_graph: bool,
+    query_width: int | None,
+) -> bool:
+    """Keep dynamic serial-Draft probes off incompatible Target graph widths."""
     return (
         method == "draft_model"
         and adaptive_full_graph
-        and not entropy_stop
-        and requested_gamma == configured_gamma
-        and previous_gamma == configured_gamma
+        and query_width is not None
+        and query_width != 3
     )
+
+
+def _force_eagle3_non_decode_target_eager(
+    method: str,
+    adaptive_full_graph: bool,
+    query_width: int | None,
+) -> bool:
+    """Keep EAGLE3 admission and heterogeneous frames off decode graphs."""
+    return method == "eagle3" and adaptive_full_graph and (query_width is None or query_width <= 1)
 
 
 def _copy_dynamic_draft_tokens(
@@ -567,6 +1299,226 @@ def _unwrap_model_runner_output(result: Any) -> Any:
     return output
 
 
+def _native_full_graph_gamma(
+    proposer: Any,
+    configured_gamma: int,
+    min_gamma: int,
+) -> int:
+    """Choose which adaptive arm owns the host's native FULL graph wrapper."""
+    explicit_gamma = getattr(
+        proposer,
+        "_vspec_adaptive_graph_native_gamma",
+        None,
+    )
+    if explicit_gamma is not None:
+        native_gamma = int(explicit_gamma)
+        if not min_gamma <= native_gamma <= configured_gamma:
+            raise RuntimeError(
+                "adaptive native graph gamma is outside the configured range: "
+                f"native={native_gamma}, range=[{min_gamma}, {configured_gamma}]"
+            )
+        return native_gamma
+    if getattr(proposer, "method", None) == "draft_model" and min_gamma <= 2 <= configured_gamma:
+        return 2
+    if getattr(proposer, "method", None) == "eagle3":
+        return min(configured_gamma, max(min_gamma, 5))
+    if getattr(proposer, "method", None) == "mtp":
+        anchor = min(configured_gamma, max(min_gamma, 4))
+        return anchor - (anchor % 2)
+    return configured_gamma
+
+
+def _configure_serial_draft_runtime_anchor(
+    runner: Any,
+    method: str,
+    min_gamma: int,
+    max_gamma: int,
+) -> int | None:
+    """Keep gamma-2 hot while preserving all buffers at max-gamma capacity."""
+    if method != "draft_model" or not min_gamma <= 2 <= max_gamma:
+        return None
+
+    anchor_gamma = 2
+    query_width = anchor_gamma + 1
+    configured_target_gamma = int(runner.num_spec_tokens)
+    if configured_target_gamma < max_gamma:
+        raise RuntimeError(
+            "Target runner capacity is smaller than the adaptive range: "
+            f"capacity={configured_target_gamma}, max_gamma={max_gamma}"
+        )
+    runner._vspec_adaptive_configured_target_gamma = configured_target_gamma
+    runner.num_spec_tokens = anchor_gamma
+    runner.prev_num_spec_tokens = anchor_gamma
+    runner.uniform_decode_query_len = query_width
+    runner.decode_token_per_req = query_width
+    runner.decode_threshold = query_width
+    if hasattr(runner, "reorder_batch_threshold"):
+        runner.reorder_batch_threshold = query_width
+
+    dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    if dispatcher is not None:
+        dispatcher.uniform_decode_query_len = query_width
+
+    drafter = getattr(runner, "drafter", None)
+    if drafter is not None:
+        configured_draft_gamma = int(drafter.num_speculative_tokens)
+        if configured_draft_gamma < max_gamma:
+            raise RuntimeError(
+                "Draft proposer capacity is smaller than the adaptive range: "
+                f"capacity={configured_draft_gamma}, max_gamma={max_gamma}"
+            )
+        drafter._vspec_adaptive_configured_gamma = configured_draft_gamma
+        drafter.num_speculative_tokens = anchor_gamma
+        if hasattr(drafter, "num_draft_steps"):
+            drafter.num_draft_steps = anchor_gamma
+        if hasattr(drafter, "decode_threshold"):
+            drafter.decode_threshold = query_width
+    return anchor_gamma
+
+
+def _configure_eagle3_runtime_anchor(
+    runner: Any,
+    method: str,
+    min_gamma: int,
+    max_gamma: int,
+) -> int | None:
+    """Configure a native EAGLE3 arm while retaining graphs for all arms."""
+    if method != "eagle3" or max_gamma < 1:
+        return None
+
+    anchor_gamma = _online_initial_gamma(method, min_gamma, max_gamma)
+    if anchor_gamma is None:
+        return None
+    query_width = anchor_gamma + 1
+    configured_target_gamma = int(
+        getattr(
+            runner,
+            "_vspec_adaptive_configured_target_gamma",
+            runner.num_spec_tokens,
+        )
+    )
+    if configured_target_gamma < max_gamma:
+        raise RuntimeError(
+            "Target runner capacity is smaller than the adaptive range: "
+            f"capacity={configured_target_gamma}, max_gamma={max_gamma}"
+        )
+    runner._vspec_adaptive_configured_target_gamma = configured_target_gamma
+    runner._vspec_adaptive_anchor_gamma = anchor_gamma
+    runner._vspec_adaptive_anchor_uses_configured_width = (
+        anchor_gamma == configured_target_gamma
+    )
+    if runner._vspec_adaptive_anchor_uses_configured_width:
+        runner._vspec_adaptive_pinned_query_width = query_width
+    runner.num_spec_tokens = anchor_gamma
+    runner.prev_num_spec_tokens = anchor_gamma
+    runner.uniform_decode_query_len = query_width
+    runner.decode_token_per_req = query_width
+    runner.decode_threshold = query_width
+    if hasattr(runner, "reorder_batch_threshold"):
+        runner.reorder_batch_threshold = query_width
+
+    dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    if dispatcher is not None:
+        dispatcher.uniform_decode_query_len = query_width
+
+    drafter = getattr(runner, "drafter", None)
+    if drafter is not None:
+        configured_draft_gamma = int(
+            getattr(
+                drafter,
+                "_vspec_adaptive_configured_gamma",
+                drafter.num_speculative_tokens,
+            )
+        )
+        if configured_draft_gamma < max_gamma:
+            raise RuntimeError(
+                "EAGLE3 proposer capacity is smaller than the adaptive range: "
+                f"capacity={configured_draft_gamma}, max_gamma={max_gamma}"
+            )
+        drafter._vspec_adaptive_configured_gamma = configured_draft_gamma
+        drafter._vspec_adaptive_graph_min_gamma = min_gamma
+        drafter._vspec_adaptive_graph_max_gamma = max_gamma
+        drafter._vspec_adaptive_candidate_gammas = tuple(
+            range(min_gamma, max_gamma + 1)
+        )
+        drafter._vspec_adaptive_graph_native_gamma = anchor_gamma
+        drafter.num_speculative_tokens = anchor_gamma
+        if hasattr(drafter, "num_draft_steps"):
+            drafter.num_draft_steps = anchor_gamma
+        if hasattr(drafter, "decode_threshold"):
+            drafter.decode_threshold = query_width
+        if getattr(drafter, "parallel_drafting", False):
+            drafter.extra_slots_per_request = anchor_gamma
+            drafter.net_num_new_slots_per_request = anchor_gamma - (
+                1
+                if (
+                    getattr(drafter, "pass_hidden_states_to_model", False)
+                    and getattr(drafter, "method", None) != "dflash"
+                )
+                else 0
+            )
+            drafter.needs_extra_input_slots = drafter.net_num_new_slots_per_request > 0
+    return anchor_gamma
+
+
+def _configure_mtp_runtime_anchor(
+    runner: Any,
+    method: str,
+    min_gamma: int,
+    max_gamma: int,
+) -> int | None:
+    """Keep native MTP state at gamma 4 with capacity through gamma 6."""
+    if method != "mtp":
+        return None
+
+    anchor_gamma = _online_initial_gamma(method, min_gamma, max_gamma)
+    if anchor_gamma is None:
+        return None
+    configured_target_gamma = int(runner.num_spec_tokens)
+    if configured_target_gamma < max_gamma:
+        raise RuntimeError(
+            "MTP Target runner capacity is smaller than the adaptive range: "
+            f"capacity={configured_target_gamma}, max_gamma={max_gamma}"
+        )
+
+    query_width = anchor_gamma + 1
+    runner._vspec_adaptive_configured_target_gamma = configured_target_gamma
+    runner._vspec_adaptive_anchor_gamma = anchor_gamma
+    runner._vspec_adaptive_anchor_uses_configured_width = (
+        anchor_gamma == configured_target_gamma
+    )
+    runner.num_spec_tokens = anchor_gamma
+    runner.prev_num_spec_tokens = anchor_gamma
+    runner.uniform_decode_query_len = query_width
+    runner.decode_token_per_req = query_width
+    runner.decode_threshold = query_width
+    if hasattr(runner, "reorder_batch_threshold"):
+        runner.reorder_batch_threshold = query_width
+
+    dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    if dispatcher is not None:
+        dispatcher.uniform_decode_query_len = query_width
+
+    drafter = getattr(runner, "drafter", None)
+    if drafter is not None:
+        configured_draft_gamma = int(drafter.num_speculative_tokens)
+        if configured_draft_gamma < max_gamma:
+            raise RuntimeError(
+                "MTP proposer capacity is smaller than the adaptive range: "
+                f"capacity={configured_draft_gamma}, max_gamma={max_gamma}"
+            )
+        candidates = tuple(range(min_gamma, max_gamma + 1, 2))
+        drafter._vspec_adaptive_candidate_gammas = candidates
+        drafter._vspec_adaptive_configured_gamma = configured_draft_gamma
+        drafter._vspec_adaptive_graph_native_gamma = anchor_gamma
+        drafter.num_speculative_tokens = anchor_gamma
+        if hasattr(drafter, "num_draft_steps"):
+            drafter.num_draft_steps = anchor_gamma
+        if hasattr(drafter, "decode_threshold"):
+            drafter.decode_threshold = query_width
+    return anchor_gamma
+
+
 def _initialize_full_graph_runnables(
     proposer: Any,
     configured_gamma: int,
@@ -591,10 +1543,33 @@ def _initialize_full_graph_runnables(
     ):
         return None
 
-    graph_min_gamma = max(1, min_gamma)
+    graph_min_gamma = max(
+        1,
+        int(getattr(proposer, "_vspec_adaptive_graph_min_gamma", min_gamma)),
+    )
+    native_gamma = _native_full_graph_gamma(
+        proposer,
+        configured_gamma,
+        graph_min_gamma,
+    )
     body = runnable.unwrap()
-    runnables = {configured_gamma: runnable}
-    for gamma in range(configured_gamma - 1, graph_min_gamma - 1, -1):
+    graph_max_gamma = min(
+        configured_gamma,
+        int(getattr(proposer, "_vspec_adaptive_graph_max_gamma", configured_gamma)),
+    )
+    candidate_gammas = tuple(
+        gamma
+        for gamma in getattr(
+            proposer,
+            "_vspec_adaptive_candidate_gammas",
+            range(graph_min_gamma, graph_max_gamma + 1),
+        )
+        if graph_min_gamma <= gamma <= graph_max_gamma
+    )
+    runnables = {native_gamma: runnable}
+    for gamma in reversed(candidate_gammas):
+        if gamma == native_gamma:
+            continue
         runnables[gamma] = call_with_supported_kwargs(
             ACLGraphWrapper,
             body,
@@ -702,14 +1677,35 @@ def _prepare_gamma_graph_params(
         return None
     source_id = id(base_graph_params)
     if getattr(proposer, "_vspec_adaptive_graph_params_source_id", None) != source_id:
-        graph_min_gamma = max(1, min_gamma)
+        graph_min_gamma = max(
+            1,
+            int(getattr(proposer, "_vspec_adaptive_graph_min_gamma", min_gamma)),
+        )
+        native_gamma = _native_full_graph_gamma(
+            proposer,
+            configured_gamma,
+            graph_min_gamma,
+        )
+        graph_max_gamma = min(
+            configured_gamma,
+            int(getattr(proposer, "_vspec_adaptive_graph_max_gamma", configured_gamma)),
+        )
+        candidate_gammas = tuple(
+            gamma
+            for gamma in getattr(
+                proposer,
+                "_vspec_adaptive_candidate_gammas",
+                range(graph_min_gamma, graph_max_gamma + 1),
+            )
+            if graph_min_gamma <= gamma <= graph_max_gamma
+        )
         proposer._vspec_adaptive_graph_params_by_gamma = {
             gamma: (
                 base_graph_params
-                if gamma == configured_gamma
+                if gamma == native_gamma
                 else _empty_graph_params_like(base_graph_params)
             )
-            for gamma in range(graph_min_gamma, configured_gamma + 1)
+            for gamma in candidate_gammas
         }
         proposer._vspec_adaptive_graph_params_source_id = source_id
     return proposer._vspec_adaptive_graph_params_by_gamma
@@ -722,18 +1718,26 @@ def _prepare_target_graph_params(
 ) -> dict[int, Any] | None:
     if base_graph_params is None:
         return None
-    source_id = id(base_graph_params)
-    if getattr(runner, "_vspec_adaptive_target_graph_source_id", None) != source_id:
-        base_width = max(query_widths)
+    native_width = int(
+        getattr(
+            runner,
+            "uniform_decode_query_len",
+            max(query_widths),
+        )
+    )
+    if native_width not in query_widths:
+        native_width = max(query_widths)
+    source_key = (id(base_graph_params), query_widths, native_width)
+    if getattr(runner, "_vspec_adaptive_target_graph_source_key", None) != source_key:
         runner._vspec_adaptive_target_graph_params_by_width = {
             width: (
                 base_graph_params
-                if width == base_width
+                if width == native_width
                 else _empty_graph_params_like(base_graph_params)
             )
             for width in query_widths
         }
-        runner._vspec_adaptive_target_graph_source_id = source_id
+        runner._vspec_adaptive_target_graph_source_key = source_key
     return runner._vspec_adaptive_target_graph_params_by_width
 
 
@@ -786,9 +1790,7 @@ def _draft_capture_gamma(
     """Map a continuation capture descriptor to its runtime gamma."""
     if _draft_capture_request_count(proposer, kwargs) is None:
         return None
-    query_width = _batch_descriptor_query_width(
-        kwargs.get("batch_descriptor")
-    )
+    query_width = _batch_descriptor_query_width(kwargs.get("batch_descriptor"))
     if query_width is None or query_width < 3:
         return None
     return query_width - 2
@@ -798,10 +1800,19 @@ def _adaptive_draft_capture_gammas(
     configured_gamma: int,
     min_gamma: int,
     capture_gamma: int | None,
+    native_gamma: int | None = None,
 ) -> tuple[int, ...]:
     """Select the runtime gamma(s) compatible with a capture descriptor."""
     graph_min_gamma = max(1, min_gamma)
     if capture_gamma is None:
+        if native_gamma is not None:
+            if not graph_min_gamma <= native_gamma <= configured_gamma:
+                raise RuntimeError(
+                    "native Draft graph gamma is outside the configured range: "
+                    f"native={native_gamma}, range=[{graph_min_gamma}, "
+                    f"{configured_gamma}]"
+                )
+            return (native_gamma,)
         return tuple(range(configured_gamma, graph_min_gamma - 1, -1))
     if not graph_min_gamma <= capture_gamma <= configured_gamma:
         raise RuntimeError(
@@ -869,11 +1880,29 @@ def _capture_all_adaptive_draft_graphs(
     configured_result = None
     try:
         # Capture the largest graph first so smaller graphs reuse its pool.
-        capture_gammas = _adaptive_draft_capture_gammas(
+        requested_capture_gammas = _adaptive_draft_capture_gammas(
             configured_gamma,
             min_gamma,
             capture_gamma,
+            native_gamma=(
+                _native_full_graph_gamma(
+                    proposer,
+                    configured_gamma,
+                    max(1, min_gamma),
+                )
+                if getattr(proposer, "method", None) == "draft_model"
+                else None
+            ),
         )
+        capture_gammas = tuple(
+            gamma
+            for gamma in requested_capture_gammas
+            if gamma in runnables
+            and (graph_params_by_gamma is None or gamma in graph_params_by_gamma)
+        )
+        if not capture_gammas:
+            return callback(proposer, *args, **kwargs)
+        result_gamma = max(capture_gammas)
         for gamma in capture_gammas:
             proposer._vspec_entropy_measure_enabled = gamma >= _MIN_CONFIDENCE_STOP_GAMMA
             if getattr(proposer, "_vspec_entropy_probe_installed", False):
@@ -889,7 +1918,7 @@ def _capture_all_adaptive_draft_graphs(
                 else graph_runnable
             )
             if graph_params_by_gamma is not None:
-                if gamma == capture_gamma:
+                if capture_gamma is None or gamma == capture_gamma:
                     selected_graph_params = graph_params_by_gamma[gamma]
                 else:
                     selected_graph_params = discarded_graph_params.setdefault(
@@ -913,7 +1942,7 @@ def _capture_all_adaptive_draft_graphs(
                         gamma,
                         {},
                     )[captured_batch] = captured
-            if gamma == configured_gamma or capture_gamma is not None:
+            if gamma == result_gamma or capture_gamma is not None:
                 configured_result = result
     finally:
         proposer._vspec_entropy_measure_enabled = previous_entropy_enabled
@@ -995,8 +2024,7 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
         return False
     if settings.adaptive_min_gamma == settings.adaptive_max_gamma:
         logger.warning(
-            "vSpec Adaptive gamma range is fixed at %d; using the native "
-            "fixed-gamma runtime",
+            "vSpec Adaptive gamma range is fixed at %d; using the native fixed-gamma runtime",
             settings.adaptive_max_gamma,
         )
         return False
@@ -1016,6 +2044,7 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
     from vllm.config import CUDAGraphMode
     from vllm.v1.core.sched.scheduler import Scheduler
     from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+    from vllm.v1.spec_decode.metrics import SpecDecodingStats
     from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput
     from vllm_ascend.spec_decode.llm_base_proposer import (
         AscendSpecDecodeBaseProposer,
@@ -1050,6 +2079,16 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
     # into serving goodput.
     measure_step_latency = (
         settings.adaptive_latency_calibration and settings.adaptive_policy != "online"
+    )
+    runtime_switch_env = (
+        "HUST_VSPEC_MTP_ASYNC_RUNTIME_SWITCH"
+        if settings.method == "mtp"
+        else "HUST_VSPEC_EAGLE3_ASYNC_RUNTIME_SWITCH"
+    )
+    stateful_cohort_locked = (
+        settings.method in {"eagle3", "mtp"}
+        and settings.adaptive_async
+        and os.environ.get(runtime_switch_env, "0") != "1"
     )
     draft_stopper = (
         EntropyDraftStopper(
@@ -1109,10 +2148,9 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             invalid_modes: Any = None,
             uniform_decode_query_len: int | None = None,
         ) -> Any:
-            query_width = int(
-                uniform_decode_query_len
-                if uniform_decode_query_len is not None
-                else self.uniform_decode_query_len
+            query_width = _active_dispatch_query_width(
+                self,
+                uniform_decode_query_len,
             )
             if uniform_decode and not _uniform_decode_fits_capture_bucket(
                 self,
@@ -1215,11 +2253,26 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             if settings.adaptive_policy == "online":
                 self._vspec_adaptive_controller = OnlineGammaController(
                     **common_options,
+                    candidate_stride=(2 if settings.method == "mtp" else 1),
                     window_size=settings.adaptive_online_window,
                     exploration=settings.adaptive_online_exploration,
                     warmup_samples=(settings.adaptive_online_warmup_samples),
                     warmup_return=(settings.adaptive_online_warmup_return),
                     inflight_warmup_padding=(1 if settings.adaptive_async else 0),
+                    initial_gamma=_online_initial_gamma(
+                        settings.method,
+                        settings.adaptive_min_gamma,
+                        settings.adaptive_max_gamma,
+                    ),
+                    probe_shared_cost_units=_online_probe_shared_cost_units(
+                        settings.method,
+                    ),
+                    candidate_batch_limits=_adaptive_candidate_batch_limits(
+                        settings.method,
+                        settings.adaptive_min_gamma,
+                        settings.adaptive_max_gamma,
+                        int(self.scheduler_config.max_num_seqs),
+                    ),
                 )
             else:
                 assert profile is not None
@@ -1231,21 +2284,169 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 )
             self._vspec_adaptive_target_only = _TargetOnlyLatch()
             self._vspec_adaptive_summary_logged = False
+            self._vspec_adaptive_configured_gamma = int(self.num_spec_tokens)
+            native_gamma = _online_initial_gamma(
+                settings.method,
+                settings.adaptive_min_gamma,
+                settings.adaptive_max_gamma,
+            )
+            if native_gamma is not None:
+                self.num_spec_tokens = native_gamma
+            self._vspec_eagle3_async_runtime_switching = (
+                os.environ.get(runtime_switch_env, "0") == "1"
+            )
+            self._vspec_eagle3_stateful_cohort_lock = (
+                settings.method == "eagle3"
+                and settings.adaptive_async
+                and os.environ.get(
+                    "HUST_VSPEC_EAGLE3_STATEFUL_COHORT_LOCK",
+                    "1",
+                )
+                == "1"
+            )
+            self._vspec_adaptive_native_eagle3_refill = _eagle3_cohort_refill_enabled(
+                settings.method,
+                original_schedule,
+            )
+            self._vspec_adaptive_initial_cohort_size = max(
+                int(os.environ.get("HUST_VSPEC_ADAPTIVE_INITIAL_COHORT_SIZE", "0")),
+                0,
+            )
+            self._vspec_adaptive_initial_cohort_wait_seconds = max(
+                float(os.environ.get("HUST_VSPEC_ADAPTIVE_INITIAL_COHORT_WAIT_MS", "0")) / 1000.0,
+                0.0,
+            )
+            default_quiet_ms = "1.0" if settings.method == "eagle3" else "0"
+            default_max_wait_ms = "6.0" if settings.method == "eagle3" else "0"
+            self._vspec_adaptive_arrival_quiet_seconds = max(
+                float(
+                    os.environ.get(
+                        "HUST_VSPEC_ADAPTIVE_ARRIVAL_QUIET_MS",
+                        default_quiet_ms,
+                    )
+                )
+                / 1000.0,
+                0.0,
+            )
+            self._vspec_adaptive_arrival_max_wait_seconds = max(
+                float(
+                    os.environ.get(
+                        "HUST_VSPEC_ADAPTIVE_ARRIVAL_MAX_WAIT_MS",
+                        default_max_wait_ms,
+                    )
+                )
+                / 1000.0,
+                0.0,
+            )
+            self._vspec_adaptive_isolate_refill = (
+                os.environ.get("HUST_VSPEC_ADAPTIVE_ISOLATE_REFILL", "0") == "1"
+            )
 
         def adaptive_schedule(self: Any, *args: Any, **kwargs: Any) -> Any:
-            active_request_ids = set(self.requests)
+            needs_target_only_latch = settings.adaptive_gamma0_mode == "sticky" and (
+                settings.adaptive_min_gamma == 0
+            )
+            active_request_ids = set(self.requests) if needs_target_only_latch else set()
+            if self.requests and self._vspec_adaptive_summary_logged:
+                self._vspec_adaptive_summary_logged = False
             target_only_latched = (
-                settings.adaptive_gamma0_mode == "sticky"
+                needs_target_only_latch
                 and self._vspec_adaptive_target_only.refresh(active_request_ids)
             )
+            schedule_gamma = (
+                0 if target_only_latched else int(self._vspec_adaptive_controller.current_gamma)
+            )
+            num_running = len(self.running) + self.num_waiting_for_streaming_input
             previous_max_num_running_reqs = self.max_num_running_reqs
             refill_batch = settings.adaptive_refill_batch
             if refill_batch == 0:
                 refill_batch = 8 if settings.method == "draft_model" else 4
-            num_running = len(self.running) + self.num_waiting_for_streaming_input
+            if self._vspec_adaptive_native_eagle3_refill:
+                # The backend scheduler wrapper already owns refill coalescing.
+                # Applying a second, slightly different limiter here creates
+                # avoidable tail stalls and diverges from the fixed-gamma path.
+                refill_batch = 1
             num_waiting = len(self.waiting) + len(self.skipped_waiting)
             free_slots = previous_max_num_running_reqs - num_running
             refill_target = min(refill_batch, num_waiting)
+            initial_cohort_target = min(
+                self._vspec_adaptive_initial_cohort_size,
+                previous_max_num_running_reqs,
+            )
+            initial_cohort_wait_seconds = self._vspec_adaptive_initial_cohort_wait_seconds
+            now = time.monotonic()
+            initial_cohort_started_at = getattr(
+                self,
+                "_vspec_adaptive_initial_cohort_started_at",
+                now,
+            )
+            if num_running == 0 and num_waiting > 0:
+                if not hasattr(self, "_vspec_adaptive_initial_cohort_started_at"):
+                    self._vspec_adaptive_initial_cohort_started_at = now
+                    initial_cohort_started_at = now
+            else:
+                self._vspec_adaptive_initial_cohort_started_at = now
+                initial_cohort_started_at = now
+            hold_initial_cohort = _should_hold_initial_cohort(
+                num_running,
+                num_waiting,
+                initial_cohort_target,
+                initial_cohort_started_at,
+                now,
+                initial_cohort_wait_seconds,
+            )
+            hold_initial_cohort = hold_initial_cohort or _should_hold_growing_initial_cohort(
+                self,
+                num_running,
+                num_waiting,
+                now,
+                self._vspec_adaptive_arrival_quiet_seconds,
+                self._vspec_adaptive_arrival_max_wait_seconds,
+            )
+            preselected_decision = None
+            if (
+                not hold_initial_cohort
+                and not target_only_latched
+                and settings.adaptive_policy == "online"
+                and num_running == 0
+                and num_waiting > 0
+            ):
+                anticipated_batch_size = _adaptive_scheduled_batch_size(
+                    self,
+                    min(num_waiting, previous_max_num_running_reqs),
+                )
+                preselected_decision = self._vspec_adaptive_controller.choose(
+                    anticipated_batch_size,
+                    0,
+                )
+                schedule_gamma = preselected_decision.gamma
+
+            if (
+                not hold_initial_cohort
+                and self._vspec_adaptive_native_eagle3_refill
+                and _can_use_eagle3_native_scheduler_hold(
+                    settings.method,
+                    settings.adaptive_async,
+                    self._vspec_eagle3_async_runtime_switching,
+                    num_running,
+                    schedule_gamma,
+                    int(self.num_spec_tokens),
+                    target_only_latched=target_only_latched,
+                )
+            ):
+                scheduler_output = original_schedule(self, *args, **kwargs)
+                if not scheduler_output.num_scheduled_tokens:
+                    return scheduler_output
+                batch_size = _adaptive_scheduled_batch_size(
+                    self,
+                    len(scheduler_output.num_scheduled_tokens),
+                )
+                scheduler_output.num_spec_tokens_to_schedule = schedule_gamma
+                scheduler_output.vspec_adaptive_batch_size = batch_size
+                scheduler_output.vspec_adaptive_context_tokens = 0
+                if preselected_decision is not None:
+                    self._vspec_adaptive_last_decision = preselected_decision
+                return scheduler_output
             hold_waiting = (
                 refill_batch > 1
                 and num_running > 0
@@ -1253,11 +2454,7 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 and free_slots < refill_target
             )
             isolate_refill = (
-                os.environ.get(
-                    "HUST_VSPEC_ADAPTIVE_ISOLATE_REFILL",
-                    "0",
-                )
-                == "1"
+                self._vspec_adaptive_isolate_refill
                 and refill_batch > 1
                 and num_running > 0
                 and num_waiting > 0
@@ -1265,13 +2462,16 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             )
             if hold_waiting:
                 self.max_num_running_reqs = num_running
+            elif hold_initial_cohort:
+                self.max_num_running_reqs = 0
             previous_running = None
             if isolate_refill:
                 previous_running = self.running
                 self.running = []
                 self.max_num_running_reqs = free_slots
             try:
-                scheduler_output = original_schedule(self, *args, **kwargs)
+                with _scheduler_runtime_gamma(self, schedule_gamma):
+                    scheduler_output = original_schedule(self, *args, **kwargs)
             finally:
                 if previous_running is not None:
                     self.running = previous_running + self.running
@@ -1294,6 +2494,27 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                     batch_size,
                     context_tokens,
                     reason="target_only_latched",
+                )
+            elif preselected_decision is not None:
+                decision = preselected_decision
+            elif _should_hold_eagle3_async_cohort(
+                settings.method,
+                settings.adaptive_async,
+                num_running,
+                # Width switching remains enabled at an empty-cohort boundary
+                # so the regular async graph path stays hot. Recurrent EAGLE3
+                # state is protected independently by holding the selected
+                # width while any request from that cohort is still active.
+                runtime_width_switching=(
+                    self._vspec_eagle3_async_runtime_switching
+                    and not self._vspec_eagle3_stateful_cohort_lock
+                ),
+            ):
+                decision = self._vspec_adaptive_controller.force(
+                    schedule_gamma,
+                    batch_size,
+                    context_tokens,
+                    reason="eagle3_async_cohort_hold",
                 )
             else:
                 decision = self._vspec_adaptive_controller.choose(
@@ -1418,7 +2639,15 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 valid_accepted_tokens,
                 request_id=request_id,
             )
-            return original_make_stats(
+            configured_gamma = int(self._vspec_adaptive_configured_gamma)
+            if spec_decoding_stats is None and self.log_stats and num_draft_tokens:
+                spec_decoding_stats = SpecDecodingStats.new(configured_gamma)
+            else:
+                _normalize_spec_decoding_stats_width(
+                    spec_decoding_stats,
+                    configured_gamma,
+                )
+            result = original_make_stats(
                 self,
                 spec_decoding_stats,
                 num_draft_tokens,
@@ -1426,6 +2655,7 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 num_invalid_spec_tokens,
                 request_id,
             )
+            return _normalize_spec_decoding_stats_width(result, configured_gamma)
 
         def adaptive_update_draft_token_ids(
             self: Any,
@@ -1552,25 +2782,41 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 configured_gamma,
                 adaptive_full_graph=settings.adaptive_full_graph,
                 entropy_stop=settings.adaptive_entropy_stop,
+                native_gamma=_native_full_graph_gamma(
+                    self,
+                    configured_gamma,
+                    max(1, settings.adaptive_min_gamma),
+                ),
             ):
-                # The configured gamma already owns the native runnable and
-                # graph-parameter table. Keep only the two width bindings that
-                # serial Draft needs for padded tail batches; bypassing those
-                # bindings makes FIA see a stale actualSequenceLengthQ shape.
+                # Gamma 2 owns the native runnable and graph-parameter table.
+                # Keep only the two width bindings that serial Draft needs for
+                # padded tail batches; bypassing those bindings makes FIA see a
+                # stale actualSequenceLengthQ shape.
                 target_query_width = _proposal_input_query_width(
                     kwargs.get("common_attn_metadata"),
                     kwargs.get("target_model_batch_desc"),
                 )
+                if _is_eagle3_anchor_runtime(
+                    getattr(self, "runner", None),
+                    settings.method,
+                    requested_gamma,
+                    target_query_width,
+                ):
+                    result = original_propose(self, *args, **kwargs)
+                    self._vspec_adaptive_previous_proposal_gamma = requested_gamma
+                    return result
                 with _runtime_runner_query_width(
                     self,
                     target_query_width,
                 ):
                     with _runtime_draft_continuation_query_width(
                         self,
-                        configured_gamma,
+                        requested_gamma,
                     ):
-                        result = original_propose(
+                        result = _run_with_runtime_gamma(
                             self,
+                            requested_gamma,
+                            original_propose,
                             *args,
                             **kwargs,
                         )
@@ -1596,11 +2842,34 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 "_vspec_adaptive_graph_params_by_gamma",
                 None,
             )
-            if graph_params_by_gamma is not None:
-                acl_graph_module._draft_graph_params = graph_params_by_gamma[execution_gamma]
+            graph_params_for_gamma = (
+                graph_params_by_gamma.get(execution_gamma)
+                if graph_params_by_gamma is not None
+                else None
+            )
+            if graph_params_for_gamma is not None:
+                acl_graph_module._draft_graph_params = graph_params_for_gamma
             proposal_force_eager = False
             if settings.adaptive_full_graph:
-                if previous_proposal_gamma == execution_gamma:
+                # Only gamma 2 currently has a runtime-stable continuation
+                # descriptor and metadata layout. Keep the other online arms
+                # executable through eager Draft so the controller can measure
+                # them without triggering a forbidden lazy graph capture.
+                if settings.method == "draft_model" and execution_gamma != 2:
+                    proposal_force_eager = True
+                    self._runnable = getattr(
+                        self,
+                        "_vspec_adaptive_full_graph_body",
+                        previous_runnable,
+                    )
+                elif graph_params_by_gamma is not None and graph_params_for_gamma is None:
+                    proposal_force_eager = True
+                    self._runnable = getattr(
+                        self,
+                        "_vspec_adaptive_full_graph_body",
+                        previous_runnable,
+                    )
+                elif previous_proposal_gamma == execution_gamma:
                     if settings.method == "draft_model":
                         graph_batch_matches = _draft_full_graph_batch_matches_capture(
                             self,
@@ -1703,6 +2972,16 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                                 self,
                                 proposal_force_eager,
                             ):
+                                if settings.adaptive_trace:
+                                    logger.warning(
+                                        "vSpec Adaptive Draft propose start: "
+                                        "requested_gamma=%d execution_gamma=%d "
+                                        "force_eager=%s target_query_width=%s",
+                                        requested_gamma,
+                                        execution_gamma,
+                                        proposal_force_eager,
+                                        target_query_width,
+                                    )
                                 result = _run_with_runtime_gamma(
                                     self,
                                     execution_gamma,
@@ -1710,6 +2989,13 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                                     *args,
                                     **proposal_kwargs,
                                 )
+                                if settings.adaptive_trace:
+                                    logger.warning(
+                                        "vSpec Adaptive Draft propose complete: "
+                                        "requested_gamma=%d execution_gamma=%d",
+                                        requested_gamma,
+                                        execution_gamma,
+                                    )
                 if execution_gamma != requested_gamma:
                     result = result[:, :requested_gamma]
                 self._vspec_adaptive_previous_proposal_gamma = requested_gamma
@@ -1834,10 +3120,29 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 existing_widths,
                 settings.adaptive_max_gamma,
                 settings.method,
+                settings.adaptive_min_gamma,
             )
             # Serial Draft's gamma + 2 descriptor passes through the shared
             # Target capture wrapper, so the helper includes that width too.
             self._nanoparl_uniform_decode_query_lens = adaptive_query_widths
+            _configure_serial_draft_runtime_anchor(
+                self,
+                settings.method,
+                settings.adaptive_min_gamma,
+                settings.adaptive_max_gamma,
+            )
+            _configure_eagle3_runtime_anchor(
+                self,
+                settings.method,
+                settings.adaptive_min_gamma,
+                settings.adaptive_max_gamma,
+            )
+            _configure_mtp_runtime_anchor(
+                self,
+                settings.method,
+                settings.adaptive_min_gamma,
+                settings.adaptive_max_gamma,
+            )
             if measure_step_latency:
                 self._vspec_adaptive_pending_measurements = deque()
 
@@ -1854,22 +3159,64 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                     settings.adaptive_max_gamma,
                 )
             )
-            current_query_width = _runtime_target_query_width(scheduler_output)
-            stable_decode = (
-                not bool(scheduler_output.scheduled_new_reqs)
-                and current_query_width == runtime_gamma + 1
-            )
-            with _runtime_dynamic_eagle_state_kernel(
+            _synchronize_eagle3_width_transition(
                 self,
-                stable_decode=stable_decode,
-                gamma=runtime_gamma,
+                settings.method,
+                runtime_gamma,
+                enabled=stateful_cohort_locked,
+            )
+            native_query_width = _eagle3_native_anchor_query_width(
+                self,
+                settings.method,
+                scheduler_output,
+                cohort_locked=stateful_cohort_locked,
+            )
+            if native_query_width is None:
+                current_query_width = _runtime_target_query_width(scheduler_output)
+                metadata_query_width = _runtime_target_metadata_query_width(scheduler_output)
+                stable_decode = (
+                    not bool(scheduler_output.scheduled_new_reqs)
+                    and current_query_width == runtime_gamma + 1
+                )
+            else:
+                current_query_width = native_query_width
+                metadata_query_width = native_query_width
+                stable_decode = True
+            if stable_decode and _is_eagle3_anchor_runtime(
+                self,
+                settings.method,
+                runtime_gamma,
+                metadata_query_width,
+                require_pinned=False,
             ):
+                if (
+                    getattr(
+                        self,
+                        "_vspec_adaptive_pinned_query_width",
+                        None,
+                    )
+                    != metadata_query_width
+                ):
+                    assert metadata_query_width is not None
+                    _pin_runner_query_width(self, metadata_query_width)
                 return original_prepare_inputs(
                     self,
                     scheduler_output,
                     *args,
                     **kwargs,
                 )
+            with _runtime_dynamic_eagle_state_kernel(
+                self,
+                stable_decode=stable_decode,
+                gamma=runtime_gamma,
+            ):
+                with _runner_query_width(self, metadata_query_width):
+                    return original_prepare_inputs(
+                        self,
+                        scheduler_output,
+                        *args,
+                        **kwargs,
+                    )
 
         def execute_model(
             self: Any,
@@ -1904,15 +3251,78 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                     settings.adaptive_max_gamma,
                 )
             )
-            current_query_width = _runtime_target_query_width(scheduler_output)
-            stable_decode = (
-                not bool(scheduler_output.scheduled_new_reqs)
-                and current_query_width == runtime_gamma + 1
+            native_query_width = _eagle3_native_anchor_query_width(
+                self,
+                settings.method,
+                scheduler_output,
+                cohort_locked=stateful_cohort_locked,
             )
+            if native_query_width is None:
+                current_query_width = _runtime_target_query_width(scheduler_output)
+                metadata_query_width = _runtime_target_metadata_query_width(scheduler_output)
+                stable_decode = (
+                    not bool(scheduler_output.scheduled_new_reqs)
+                    and current_query_width == runtime_gamma + 1
+                )
+            else:
+                current_query_width = native_query_width
+                metadata_query_width = native_query_width
+                stable_decode = True
+            if (
+                not measure_step_latency
+                and not settings.adaptive_trace
+                and stable_decode
+                and _is_eagle3_anchor_runtime(
+                    self,
+                    settings.method,
+                    runtime_gamma,
+                    metadata_query_width,
+                )
+            ):
+                # The dominant EAGLE3 arm already owns the native Target graph
+                # and host layout. Avoid rebuilding generic dynamic bindings on
+                # every decode step, but restore GDN metadata after the async
+                # launch because the runner may replace its width-specific view.
+                try:
+                    return original_execute_model(
+                        self,
+                        scheduler_output,
+                        *args,
+                        **kwargs,
+                    )
+                finally:
+                    if not getattr(
+                        self,
+                        "_vspec_adaptive_anchor_uses_configured_width",
+                        False,
+                    ):
+                        assert metadata_query_width is not None
+                        _pin_runner_query_width(self, metadata_query_width)
             previous_target_only = getattr(
                 self,
                 "_vspec_adaptive_target_only_step",
                 False,
+            )
+            had_force_target_eager = hasattr(
+                self,
+                "_vspec_adaptive_force_target_eager_step",
+            )
+            previous_force_target_eager = getattr(
+                self,
+                "_vspec_adaptive_force_target_eager_step",
+                False,
+            )
+            self._vspec_adaptive_force_target_eager_step = (
+                _force_non_native_serial_draft_target_eager(
+                    settings.method,
+                    settings.adaptive_full_graph,
+                    current_query_width,
+                )
+                or _force_eagle3_non_decode_target_eager(
+                    settings.method,
+                    settings.adaptive_full_graph,
+                    current_query_width,
+                )
             )
             # With async scheduling, ``runtime_gamma`` controls the proposal
             # produced after this Target pass. The current pass still verifies
@@ -1926,10 +3336,9 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             from vllm_ascend.compilation import acl_graph as acl_graph_module
 
             base_graph_params = acl_graph_module._graph_params
-            # FULL_DECODE_ONLY has independent uniform decode descriptors for
-            # each query width. Combined FULL shares one mixed descriptor and
-            # event family; swapping its global graph-parameter table can
-            # deadlock a repeated replay on Ascend.
+            # GraphParams are indexed only by total token count. Different
+            # adaptive widths can therefore collide (for example q6/B14 and
+            # q7/B12 both use 84 tokens) unless each width owns a table.
             isolate_target_graph_params = _uses_width_isolated_target_graph_params(
                 self.compilation_config.cudagraph_mode
             )
@@ -1942,7 +3351,11 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 if isolate_target_graph_params
                 else None
             )
-            runtime_query_width = current_query_width
+            # Mixed async frames can contain q1 admissions beside the previous
+            # proposal width. They are not eligible for a uniform FULL replay,
+            # but still need the event/workspace table of their widest layout
+            # so the preceding width-specific graph is retired consistently.
+            runtime_query_width = metadata_query_width
             if graph_params_by_width is not None and runtime_query_width in graph_params_by_width:
                 acl_graph_module._graph_params = graph_params_by_width[runtime_query_width]
             rejection_sampler = getattr(self, "rejection_sampler", None)
@@ -1970,17 +3383,48 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 if settings.adaptive_trace:
                     logger.warning(
                         "vSpec Adaptive Target execute start: gamma=%d "
-                        "query_width=%s stable_decode=%s",
+                        "query_width=%s stable_decode=%s force_eager=%s",
                         runtime_gamma,
                         current_query_width,
                         stable_decode,
+                        self._vspec_adaptive_force_target_eager_step,
                     )
-                result = original_execute_model(
+                if stable_decode and _is_eagle3_anchor_runtime(
                     self,
-                    scheduler_output,
-                    *args,
-                    **kwargs,
-                )
+                    settings.method,
+                    runtime_gamma,
+                    metadata_query_width,
+                ):
+                    # execute_model may replace GDN builder state while the
+                    # asynchronous Target frame is launched. The anchor starts
+                    # from its pinned native state, then restores that state
+                    # after launch without first snapshotting every builder.
+                    try:
+                        result = original_execute_model(
+                            self,
+                            scheduler_output,
+                            *args,
+                            **kwargs,
+                        )
+                    finally:
+                        if not getattr(
+                            self,
+                            "_vspec_adaptive_anchor_uses_configured_width",
+                            False,
+                        ):
+                            assert metadata_query_width is not None
+                            _pin_runner_query_width(self, metadata_query_width)
+                else:
+                    # The host runner is initialized with max_gamma + 1, but a
+                    # dynamic step must classify uniform decode against the
+                    # width of the proposal currently being verified.
+                    with _runner_query_width(self, metadata_query_width):
+                        result = original_execute_model(
+                            self,
+                            scheduler_output,
+                            *args,
+                            **kwargs,
+                        )
                 if settings.adaptive_trace:
                     logger.warning(
                         "vSpec Adaptive Target execute complete: gamma=%d result_type=%s",
@@ -2058,6 +3502,13 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                         )
                 acl_graph_module._graph_params = base_graph_params
                 self._vspec_adaptive_target_only_step = previous_target_only
+                if had_force_target_eager:
+                    self._vspec_adaptive_force_target_eager_step = previous_force_target_eager
+                else:
+                    delattr(
+                        self,
+                        "_vspec_adaptive_force_target_eager_step",
+                    )
 
         def sample_tokens(
             self: Any,
@@ -2066,7 +3517,30 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
         ) -> Any:
             if settings.adaptive_trace:
                 logger.warning("vSpec Adaptive Target sample start")
-            result = original_sample_tokens(self, *args, **kwargs)
+            execute_model_state = getattr(self, "execute_model_state", None)
+            scheduler_output = execute_model_state[0] if execute_model_state is not None else None
+            proposal_query_width = (
+                _runtime_proposal_query_width(scheduler_output)
+                if scheduler_output is not None
+                else None
+            )
+            proposal_gamma = (
+                int(getattr(scheduler_output, "num_spec_tokens_to_schedule", -1))
+                if scheduler_output is not None
+                else -1
+            )
+            if not measure_step_latency and _is_eagle3_anchor_runtime(
+                self,
+                settings.method,
+                proposal_gamma,
+                proposal_query_width,
+            ):
+                return original_sample_tokens(self, *args, **kwargs)
+            # Ascend async execute_model() only launches the Target forward.
+            # Sampling and EAGLE proposal happen here, after the execute-time
+            # width context has been restored to configured capacity.
+            with _runner_query_width(self, proposal_query_width):
+                result = original_sample_tokens(self, *args, **kwargs)
             if settings.adaptive_trace:
                 logger.warning(
                     "vSpec Adaptive Target sample complete: result_type=%s",
@@ -2111,9 +3585,7 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 not settings.adaptive_full_graph
                 or cudagraph_runtime_mode != CUDAGraphMode.FULL
                 or not desc.uniform
-                or not _uses_width_isolated_target_graph_params(
-                    self.compilation_config.cudagraph_mode
-                )
+                or not self.compilation_config.cudagraph_mode.separate_routine()
             ):
                 return original_warmup_and_capture(
                     self,
@@ -2128,20 +3600,29 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             if desc.num_tokens % desc.num_reqs:
                 raise RuntimeError("adaptive Target graph query width is not integral")
             query_width = desc.num_tokens // desc.num_reqs
-            from vllm_ascend.compilation import acl_graph as acl_graph_module
-
-            base_graph_params = acl_graph_module._graph_params
-            graph_params_by_width = _prepare_target_graph_params(
-                self,
-                base_graph_params,
-                self._nanoparl_uniform_decode_query_lens,
+            isolate_graph_params = _uses_width_isolated_target_graph_params(
+                self.compilation_config.cudagraph_mode
             )
-            if graph_params_by_width is None or query_width not in graph_params_by_width:
-                raise RuntimeError(
-                    f"missing adaptive Target graph-parameter table for query width {query_width}"
+            acl_graph_module = None
+            base_graph_params = None
+            if isolate_graph_params:
+                from vllm_ascend.compilation import acl_graph as acl_graph_module
+
+                base_graph_params = acl_graph_module._graph_params
+                graph_params_by_width = _prepare_target_graph_params(
+                    self,
+                    base_graph_params,
+                    self._nanoparl_uniform_decode_query_lens,
                 )
-            acl_graph_module._graph_params = graph_params_by_width[query_width]
+                if graph_params_by_width is None or query_width not in graph_params_by_width:
+                    raise RuntimeError(
+                        "missing adaptive Target graph-parameter table for "
+                        f"query width {query_width}"
+                    )
+                acl_graph_module._graph_params = graph_params_by_width[query_width]
             try:
+                # Every separate-routine FULL capture needs the descriptor's
+                # actual query width and a width-private parameter table.
                 with _runner_query_width(self, query_width):
                     with _draft_capture_query_width(self, query_width):
                         return original_warmup_and_capture(
@@ -2152,7 +3633,9 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                             **kwargs,
                         )
             finally:
-                acl_graph_module._graph_params = base_graph_params
+                if isolate_graph_params:
+                    assert acl_graph_module is not None
+                    acl_graph_module._graph_params = base_graph_params
 
         def determine_batch_execution_and_padding(
             self: Any,
@@ -2163,10 +3646,15 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             # target-only step can collide with a graph captured at q(max+1),
             # whose static FIA metadata is incompatible. FULL_DECODE_ONLY has
             # width-specific uniform descriptors and remains graph-backed.
-            if (
+            force_target_eager = getattr(
+                self,
+                "_vspec_adaptive_force_target_eager_step",
+                False,
+            ) or (
                 getattr(self, "_vspec_adaptive_target_only_step", False)
                 and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-            ):
+            )
+            if force_target_eager:
                 if len(args) >= 7:
                     mutable_args = list(args)
                     mutable_args[6] = True
@@ -2312,6 +3800,9 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 cudagraph_mode: Any,
                 uniform_decode_query_len: int = 1,
             ) -> Any:
+                resolved_capture_sizes = tuple(
+                    self.compilation_config.cudagraph_capture_sizes or ()
+                )
                 restore_adaptive_capture_sizes(
                     self.compilation_config,
                     method=(
@@ -2321,11 +3812,12 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                     ),
                     requested_capture_sizes=requested_capture_sizes,
                 )
-                if getattr(cudagraph_mode, "name", None) == "FULL_DECODE_ONLY":
-                    _initialize_adaptive_decode_only_graph_keys(
+                if cudagraph_mode.separate_routine():
+                    _initialize_adaptive_graph_keys(
                         dispatcher,
                         cudagraph_mode,
                         self._nanoparl_uniform_decode_query_lens,
+                        resolved_capture_sizes,
                     )
                     if settings.method == "draft_model":
                         from ..backends.draft import (
@@ -2333,16 +3825,26 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                         )
 
                         graph_min_gamma = max(1, settings.adaptive_min_gamma)
-                        _add_draft_continuation_graph_keys(
-                            dispatcher,
-                            cudagraph_mode,
-                            settings.adaptive_max_gamma + 1,
-                            query_lens=tuple(
+                        native_gamma = _native_full_graph_gamma(
+                            self.drafter,
+                            settings.adaptive_max_gamma,
+                            graph_min_gamma,
+                        )
+                        continuation_query_lens = (
+                            (native_gamma + 2,)
+                            if native_gamma == 2
+                            else tuple(
                                 range(
                                     graph_min_gamma + 2,
                                     settings.adaptive_max_gamma + 3,
                                 )
-                            ),
+                            )
+                        )
+                        _add_draft_continuation_graph_keys(
+                            dispatcher,
+                            cudagraph_mode,
+                            settings.adaptive_max_gamma + 1,
+                            query_lens=continuation_query_lens,
                         )
                     return None
                 result = original_initialize(cudagraph_mode, uniform_decode_query_len)

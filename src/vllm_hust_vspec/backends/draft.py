@@ -307,16 +307,9 @@ def _draft_request_buckets(max_num_seqs: int) -> tuple[int, ...]:
     buckets.append(max_num_seqs)
     configured = os.environ.get("VSPEC_DRAFT_REQUEST_BUCKETS", "")
     if configured:
-        requested = {
-            int(value.strip())
-            for value in configured.split(",")
-            if value.strip()
-        }
+        requested = {int(value.strip()) for value in configured.split(",") if value.strip()}
         if any(value <= 0 or value > max_num_seqs for value in requested):
-            raise ValueError(
-                "VSPEC_DRAFT_REQUEST_BUCKETS values must be in "
-                f"[1, {max_num_seqs}]"
-            )
+            raise ValueError(f"VSPEC_DRAFT_REQUEST_BUCKETS values must be in [1, {max_num_seqs}]")
         buckets.extend(requested)
     return tuple(sorted(set(buckets)))
 
@@ -327,13 +320,7 @@ def _compact_first_pass_capture_buckets(max_num_tokens: int) -> tuple[int, ...]:
         "52,56",
     )
     buckets = tuple(
-        sorted(
-            {
-                int(value.strip())
-                for value in configured.split(",")
-                if value.strip()
-            }
-        )
+        sorted({int(value.strip()) for value in configured.split(",") if value.strip()})
     )
     if any(bucket <= 0 or bucket >= max_num_tokens for bucket in buckets):
         raise ValueError(
@@ -383,14 +370,9 @@ def _add_draft_continuation_graph_keys(
                     dispatcher.add_cudagraph_key(CUDAGraphMode.FULL, descriptor)
                     added += 1
     compact_first_pass_buckets: tuple[int, ...] = ()
-    if (
-        os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_PASS") == "1"
-        and base_query_len == 3
-    ):
+    if os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_PASS") == "1" and base_query_len == 3:
         max_num_tokens = max_num_seqs * (base_query_len + 1)
-        compact_first_pass_buckets = _compact_first_pass_capture_buckets(
-            max_num_tokens
-        )
+        compact_first_pass_buckets = _compact_first_pass_capture_buckets(max_num_tokens)
         for num_tokens in compact_first_pass_buckets:
             for num_active_loras in dispatcher._get_lora_cases():
                 descriptor = BatchDescriptor(
@@ -405,9 +387,7 @@ def _add_draft_continuation_graph_keys(
                     added += 1
     dispatcher._vspec_draft_merged_query_lens = query_lens
     dispatcher._vspec_draft_continuation_query_len = query_lens[-1]
-    dispatcher._vspec_draft_compact_first_pass_buckets = (
-        compact_first_pass_buckets
-    )
+    dispatcher._vspec_draft_compact_first_pass_buckets = compact_first_pass_buckets
     return added
 
 
@@ -985,9 +965,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         )
         fused_proposal_repetition = os.environ.get("VSPEC_DRAFT_FUSED_PROPOSAL_REPETITION") == "1"
         self._vspec_fused_proposal_repetition = fused_proposal_repetition
-        sparse_proposal_repetition = (
-            os.environ.get("VSPEC_DRAFT_SPARSE_PROPOSAL_REPETITION") == "1"
-        )
+        sparse_proposal_repetition = os.environ.get("VSPEC_DRAFT_SPARSE_PROPOSAL_REPETITION") == "1"
         self._vspec_sparse_proposal_repetition = sparse_proposal_repetition
         if os.environ.get("VSPEC_DRAFT_ALIGN_REPETITION") == "1":
             from .draft_repetition import DraftRepetitionState
@@ -1014,15 +992,9 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         if os.environ.get("VSPEC_DRAFT_HYBRID_SECOND_TOKEN") == "1":
             from .draft_hybrid import DraftHybridSecondTokenState
 
-            history_width = int(
-                os.environ.get("VSPEC_DRAFT_HYBRID_HISTORY_WIDTH", "1024")
-            )
-            capture_sizes = (
-                vllm_config.compilation_config.cudagraph_capture_sizes or ()
-            )
-            capture_limit = (
-                vllm_config.compilation_config.max_cudagraph_capture_size or 0
-            )
+            history_width = int(os.environ.get("VSPEC_DRAFT_HYBRID_HISTORY_WIDTH", "1024"))
+            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
+            capture_limit = vllm_config.compilation_config.max_cudagraph_capture_size or 0
             max_hybrid_rows = max(
                 self.max_batch_size,
                 capture_limit,
@@ -1057,9 +1029,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
             metadata_lens = self.seq_lens_group[0].numel()
             pin_memory = bool(self.runner.pin_memory)
             seq_lens_cpu = self.runner.optimistic_seq_lens_cpu
-            computed_tokens_cpu = (
-                self.runner.input_batch.num_computed_tokens_cpu_tensor
-            )
+            computed_tokens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor
             self._vspec_fast_seq_lens_cpu = torch.empty(
                 metadata_lens,
                 dtype=seq_lens_cpu.dtype,
@@ -1082,9 +1052,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                 dtype=torch.int32,
                 device="cpu",
             )
-        self._vspec_compact_first_pass = (
-            os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_PASS") == "1"
-        )
+        self._vspec_compact_first_pass = os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_PASS") == "1"
         if self._vspec_compact_first_pass:
             max_tokens = self.input_ids.shape[0]
             pin_memory = bool(self.runner.pin_memory)
@@ -1101,9 +1069,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
             )
             self._vspec_compact_input_ids = torch.empty_like(self.input_ids)
             self._vspec_compact_positions = torch.empty_like(self.positions)
-            self._vspec_compact_slot_mapping = torch.empty_like(
-                self.slot_mapping_group[0]
-            )
+            self._vspec_compact_slot_mapping = torch.empty_like(self.slot_mapping_group[0])
             self._vspec_compact_sample_indices_cpu = torch.empty(
                 self.max_batch_size,
                 dtype=torch.int32,
@@ -1119,6 +1085,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         self._vspec_gamma2_compact_num_tokens: dict[int, int] = {}
         self._vspec_gamma2_unified_compact_num_tokens: dict[int, int] = {}
         self._vspec_compact_trace_count = 0
+
     def draft_dummy_run(self: Any, *args: Any, **kwargs: Any) -> Any:
         repetition_prefix = getattr(self, "_vspec_repetition_prefix", None)
         if repetition_prefix is not None:
@@ -1177,10 +1144,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         )
         if (
             num_reqs is None
-            or (
-                capture_query_len not in merged_query_lens
-                and not compact_capture
-            )
+            or (capture_query_len not in merged_query_lens and not compact_capture)
             or not isinstance(self._runnable, ACLGraphWrapper)
         ):
             return original_draft_dummy_run(self, *args, **kwargs)
@@ -1298,14 +1262,10 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         attempts = getattr(self, "_vspec_compact_first_attempts", 0) + 1
         self._vspec_compact_first_attempts = attempts
         if not event.query():
-            if (
-                os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_TRACE") == "1"
-                and attempts % 100 == 0
-            ):
+            if os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_TRACE") == "1" and attempts % 100 == 0:
                 hits = getattr(self, "_vspec_compact_first_hits", 0)
                 print(
-                    "VSPEC_DRAFT_COMPACT_FIRST: "
-                    f"attempts={attempts} hits={hits} event_pending=1",
+                    f"VSPEC_DRAFT_COMPACT_FIRST: attempts={attempts} hits={hits} event_pending=1",
                     flush=True,
                 )
             return result
@@ -1326,13 +1286,8 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         )
         if padded_tokens is None or padded_tokens >= num_tokens:
             return result
-        self._vspec_compact_first_hits = (
-            getattr(self, "_vspec_compact_first_hits", 0) + 1
-        )
-        if (
-            os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_TRACE") == "1"
-            and attempts % 100 == 0
-        ):
+        self._vspec_compact_first_hits = getattr(self, "_vspec_compact_first_hits", 0) + 1
+        if os.environ.get("VSPEC_DRAFT_COMPACT_FIRST_TRACE") == "1" and attempts % 100 == 0:
             print(
                 "VSPEC_DRAFT_COMPACT_FIRST: "
                 f"attempts={attempts} "
@@ -1377,12 +1332,8 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
             compact_indices,
             out=self._vspec_compact_slot_mapping[:compact_tokens],
         )
-        self.input_ids[:compact_tokens].copy_(
-            self._vspec_compact_input_ids[:compact_tokens]
-        )
-        self.positions[:compact_tokens].copy_(
-            self._vspec_compact_positions[:compact_tokens]
-        )
+        self.input_ids[:compact_tokens].copy_(self._vspec_compact_input_ids[:compact_tokens])
+        self.positions[:compact_tokens].copy_(self._vspec_compact_positions[:compact_tokens])
         metadata.query_start_loc.copy_(
             metadata.query_start_loc_cpu,
             non_blocking=True,
@@ -1447,9 +1398,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         hybrid_state = getattr(self, "_vspec_hybrid_second_token", None)
         base_token_ids = None
         if hybrid_state is not None:
-            base_token_ids = model_input_ids[token_indices_to_sample][
-                :batch_size
-            ].clone()
+            base_token_ids = model_input_ids[token_indices_to_sample][:batch_size].clone()
         ret_hidden_states = self.model(
             input_ids=model_input_ids,
             positions=model_positions,
@@ -1508,14 +1457,10 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
             forward_context.num_tokens if forward_context is not None else None
         )
         original_context_padded_tokens = (
-            forward_context.padded_num_tokens
-            if forward_context is not None
-            else None
+            forward_context.padded_num_tokens if forward_context is not None else None
         )
         original_context_descriptor = (
-            forward_context.batch_descriptor
-            if forward_context is not None
-            else None
+            forward_context.batch_descriptor if forward_context is not None else None
         )
         original_extra_num_tokens = _EXTRA_CTX.num_tokens
         _EXTRA_CTX.num_accept_tokens = batch_size
@@ -1534,17 +1479,13 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
             self._set_positions(batch_size, clamped_positions)
             if continuation_index < len(multi_steps_attn_metadata):
                 if compact_continuations:
-                    multi_steps_attn_metadata[continuation_index] = (
-                        _compact_draft_metadata(
-                            self,
-                            multi_steps_attn_metadata[continuation_index],
-                            continuation_num_tokens,
-                        )
+                    multi_steps_attn_metadata[continuation_index] = _compact_draft_metadata(
+                        self,
+                        multi_steps_attn_metadata[continuation_index],
+                        continuation_num_tokens,
                     )
                 if forward_context is not None:
-                    forward_context.attn_metadata = multi_steps_attn_metadata[
-                        continuation_index
-                    ]
+                    forward_context.attn_metadata = multi_steps_attn_metadata[continuation_index]
 
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
@@ -1578,22 +1519,14 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                 )
 
                 graph_params = get_draft_graph_params()
-                compact_graph_key = (
-                    num_input_tokens
-                    if unified_compact
-                    else -(num_input_tokens + 1)
-                )
+                compact_graph_key = num_input_tokens if unified_compact else -(num_input_tokens + 1)
                 if unified_compact:
-                    self._vspec_gamma2_unified_compact_num_tokens[
-                        num_input_tokens
-                    ] = continuation_num_tokens
-                else:
-                    self._vspec_gamma2_compact_graph_keys[num_input_tokens] = (
-                        compact_graph_key
+                    self._vspec_gamma2_unified_compact_num_tokens[num_input_tokens] = (
+                        continuation_num_tokens
                     )
-                self._vspec_gamma2_compact_num_tokens[num_input_tokens] = (
-                    continuation_num_tokens
-                )
+                else:
+                    self._vspec_gamma2_compact_graph_keys[num_input_tokens] = compact_graph_key
+                self._vspec_gamma2_compact_num_tokens[num_input_tokens] = continuation_num_tokens
                 for mapping in (
                     graph_params.events,
                     graph_params.handles,
@@ -1603,9 +1536,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                         continuation_num_tokens,
                         missing_alias,
                     )
-                    graph_param_aliases.append(
-                        (mapping, continuation_num_tokens, previous)
-                    )
+                    graph_param_aliases.append((mapping, continuation_num_tokens, previous))
                     mapping[continuation_num_tokens] = mapping.setdefault(
                         compact_graph_key,
                         [],
@@ -1616,9 +1547,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                     missing_alias,
                 )
                 workspace_mapping.setdefault(compact_graph_key, None)
-                workspace_mapping[continuation_num_tokens] = workspace_mapping[
-                    compact_graph_key
-                ]
+                workspace_mapping[continuation_num_tokens] = workspace_mapping[compact_graph_key]
                 graph_workspace_alias = (
                     workspace_mapping,
                     continuation_num_tokens,
@@ -1837,13 +1766,9 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         ):
             old_common_metadata = bound.arguments["old_common_metadata"]
             input_batch_size = bound.arguments["input_batch_size"]
-            used_update_positions = bound.arguments[
-                "used_update_positions"
-            ]
+            used_update_positions = bound.arguments["used_update_positions"]
             attn_group = bound.arguments["attn_group"]
-            common_attn_metadata = self.shallow_copy_metadata(
-                old_common_metadata
-            )
+            common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
             common_attn_metadata.num_reqs = input_batch_size
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
@@ -1851,14 +1776,10 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                 input_batch_size,
             )
 
-            seq_lens = self.seq_lens_group[draft_index][
-                :input_batch_size
-            ]
+            seq_lens = self.seq_lens_group[draft_index][:input_batch_size]
             source_seq_lens = old_common_metadata.seq_lens
             copied_reqs = min(input_batch_size, source_seq_lens.shape[0])
-            seq_lens[:copied_reqs].copy_(
-                source_seq_lens[:copied_reqs]
-            )
+            seq_lens[:copied_reqs].copy_(source_seq_lens[:copied_reqs])
             if copied_reqs < input_batch_size:
                 seq_lens[copied_reqs:].zero_()
             common_attn_metadata.seq_lens = seq_lens
@@ -1884,23 +1805,17 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                 self._vspec_fast_internal_seq_lens_cpu,
                 old_common_metadata._seq_lens_cpu,
             )
-            common_attn_metadata.num_computed_tokens_cpu = (
-                copy_cpu_metadata(
-                    self._vspec_fast_computed_tokens_cpu,
-                    old_common_metadata.num_computed_tokens_cpu,
-                )
+            common_attn_metadata.num_computed_tokens_cpu = copy_cpu_metadata(
+                self._vspec_fast_computed_tokens_cpu,
+                old_common_metadata.num_computed_tokens_cpu,
             )
 
-            query_start_loc = self.query_start_loc_group[draft_index][
-                : input_batch_size + 1
-            ]
+            query_start_loc = self.query_start_loc_group[draft_index][: input_batch_size + 1]
             query_start_loc.copy_(self.arange[: input_batch_size + 1])
             common_attn_metadata.query_start_loc = query_start_loc
-            common_attn_metadata.query_start_loc_cpu = (
-                self._vspec_fast_query_start_loc_cpu[
-                    : input_batch_size + 1
-                ]
-            )
+            common_attn_metadata.query_start_loc_cpu = self._vspec_fast_query_start_loc_cpu[
+                : input_batch_size + 1
+            ]
             common_attn_metadata.num_actual_tokens = batch_size
             common_attn_metadata.max_query_len = 1
             common_attn_metadata.decode_token_per_req = 1
@@ -1911,9 +1826,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
             common_attn_metadata.num_input_tokens = input_batch_size
 
             used_update_positions.add_(1)
-            exceeds_max_model_len = (
-                used_update_positions >= self.max_model_len
-            )
+            exceeds_max_model_len = used_update_positions >= self.max_model_len
             clamped_positions = torch.where(
                 exceeds_max_model_len,
                 0,
@@ -1936,14 +1849,10 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                         1,
                     )
             if common_attn_metadata.num_computed_tokens_cpu is not None:
-                common_attn_metadata.num_computed_tokens_cpu[
-                    :batch_size
-                ].add_(1)
+                common_attn_metadata.num_computed_tokens_cpu[:batch_size].add_(1)
 
             positions = self._vspec_fast_positions
-            positions[:input_batch_size].copy_(
-                old_common_metadata.positions[:input_batch_size]
-            )
+            positions[:input_batch_size].copy_(old_common_metadata.positions[:input_batch_size])
             positions[:batch_size].copy_(clamped_positions)
             common_attn_metadata.positions = positions
 
@@ -1953,21 +1862,14 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
                 dim=1,
                 index=block_numbers.view(-1, 1),
             ).view(-1)
-            slot_mapping = (
-                block_ids * block_size
-                + clamped_positions % block_size
-            )
+            slot_mapping = block_ids * block_size + clamped_positions % block_size
             slot_mapping.masked_fill_(
                 exceeds_max_model_len,
                 ascend_base_proposer.PADDING_SLOT_ID,
             )
             slot_mapping_group = self.slot_mapping_group[draft_index]
-            slot_mapping_group[:batch_size].copy_(
-                slot_mapping.to(torch.int32)
-            )
-            slot_mapping_group[batch_size:].fill_(
-                ascend_base_proposer.PADDING_SLOT_ID
-            )
+            slot_mapping_group[:batch_size].copy_(slot_mapping.to(torch.int32))
+            slot_mapping_group[batch_size:].fill_(ascend_base_proposer.PADDING_SLOT_ID)
             common_attn_metadata.slot_mapping = slot_mapping_group
 
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
@@ -2036,9 +1938,8 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
             "_vspec_gamma2_unified_compact_num_tokens",
             {},
         ).get(num_tokens)
-        if (
-            self.num_speculative_tokens == 2
-            and getattr(self, "_vspec_gamma2_unified_compact_second", False)
+        if self.num_speculative_tokens == 2 and getattr(
+            self, "_vspec_gamma2_unified_compact_second", False
         ):
             descriptor_num_reqs = _uniform_descriptor_request_count(
                 getattr(forward_context, "batch_descriptor", None),
@@ -2054,9 +1955,7 @@ def apply_draft_patches(settings: PluginSettings) -> bool:
         ):
             continuations_are_compact = all(
                 metadata
-                and len(
-                    next(iter(metadata.values())).actual_seq_lengths_q
-                )
+                and len(next(iter(metadata.values())).actual_seq_lengths_q)
                 == unified_compact_num_tokens
                 for metadata in draft_attn_metadatas[1:]
             )

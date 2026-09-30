@@ -16,18 +16,15 @@ ENV_MAX_NUM_SEQS = "HUST_VSPEC_MAX_NUM_SEQS"
 ENV_DRAFT_ACTIVE_VOCAB = "HUST_VSPEC_DRAFT_ACTIVE_VOCAB"
 ENV_DRAFT_TARGET_ACTIVE_VOCAB = "HUST_VSPEC_DRAFT_TARGET_ACTIVE_VOCAB"
 ENV_DRAFT_PARALLEL_GRAPH_UPDATES = "HUST_VSPEC_DRAFT_PARALLEL_GRAPH_UPDATES"
-ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES = (
-    "HUST_VSPEC_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES"
-)
+ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES = "HUST_VSPEC_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES"
 ENV_DRAFT_EXACT_REPETITION_TOPK = "HUST_VSPEC_DRAFT_EXACT_REPETITION_TOPK"
 ENV_DRAFT_EXACT_REPETITION_TRACE = "HUST_VSPEC_DRAFT_EXACT_REPETITION_TRACE"
-ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF = (
-    "HUST_VSPEC_DRAFT_EXACT_REPETITION_SYNC_PROOF"
-)
+ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF = "HUST_VSPEC_DRAFT_EXACT_REPETITION_SYNC_PROOF"
 ENV_EAGLE_TREE_WIDTH = "HUST_VSPEC_EAGLE_TREE_WIDTH"
 ENV_EAGLE_DRAFT_ACTIVE_VOCAB = "HUST_VSPEC_EAGLE_DRAFT_ACTIVE_VOCAB"
 ENV_EAGLE_TARGET_ACTIVE_VOCAB = "HUST_VSPEC_EAGLE_TARGET_ACTIVE_VOCAB"
 ENV_EAGLE_RELAXED_ACCEPT_TOPK = "HUST_VSPEC_EAGLE_RELAXED_ACCEPT_TOPK"
+ENV_MTP_STRICT_GRAPH = "HUST_VSPEC_MTP_STRICT_GRAPH"
 ENV_CONFIDENCE_ACCEPT_MARGIN = "HUST_VSPEC_CONFIDENCE_ACCEPT_MARGIN"
 ENV_CONFIDENCE_ACCEPT_FROM_POSITION = "HUST_VSPEC_CONFIDENCE_ACCEPT_FROM_POSITION"
 ENV_CONFIDENCE_ACCEPT_AFTER_TOKENS = "HUST_VSPEC_CONFIDENCE_ACCEPT_AFTER_TOKENS"
@@ -69,6 +66,9 @@ METHOD_ALIASES = {
     "eagle": "eagle",
     "eagle3": "eagle3",
     "dflash": "dflash",
+    "mtp": "mtp",
+    "qwen3_5_mtp": "mtp",
+    "qwen3_next_mtp": "mtp",
 }
 
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -191,6 +191,7 @@ class PluginSettings:
     eagle_draft_active_vocab: bool = False
     eagle_target_active_vocab: bool = False
     eagle_relaxed_accept_topk: int = 1
+    mtp_strict_graph: bool = True
     confidence_accept_margin: float | None = None
     confidence_accept_from_position: int = 0
     confidence_accept_after_tokens: int = 0
@@ -365,6 +366,7 @@ class PluginSettings:
                 1,
                 1,
             ),
+            mtp_strict_graph=_read_bool(values, ENV_MTP_STRICT_GRAPH, True),
             confidence_accept_margin=_read_optional_float(
                 values,
                 ENV_CONFIDENCE_ACCEPT_MARGIN,
@@ -542,18 +544,10 @@ class PluginSettings:
             ENV_MAX_NUM_SEQS: str(self.max_num_seqs),
             ENV_DRAFT_ACTIVE_VOCAB: ("1" if self.draft_active_vocab else "0"),
             ENV_DRAFT_TARGET_ACTIVE_VOCAB: ("1" if self.draft_target_active_vocab else "0"),
-            ENV_DRAFT_PARALLEL_GRAPH_UPDATES: str(
-                self.draft_parallel_graph_updates
-            ),
-            ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES: str(
-                self.draft_target_parallel_graph_updates
-            ),
-            ENV_DRAFT_EXACT_REPETITION_TOPK: str(
-                self.draft_exact_repetition_topk
-            ),
-            ENV_DRAFT_EXACT_REPETITION_TRACE: (
-                "1" if self.draft_exact_repetition_trace else "0"
-            ),
+            ENV_DRAFT_PARALLEL_GRAPH_UPDATES: str(self.draft_parallel_graph_updates),
+            ENV_DRAFT_TARGET_PARALLEL_GRAPH_UPDATES: str(self.draft_target_parallel_graph_updates),
+            ENV_DRAFT_EXACT_REPETITION_TOPK: str(self.draft_exact_repetition_topk),
+            ENV_DRAFT_EXACT_REPETITION_TRACE: ("1" if self.draft_exact_repetition_trace else "0"),
             ENV_DRAFT_EXACT_REPETITION_SYNC_PROOF: (
                 "1" if self.draft_exact_repetition_sync_proof else "0"
             ),
@@ -561,6 +555,7 @@ class PluginSettings:
             ENV_EAGLE_DRAFT_ACTIVE_VOCAB: ("1" if self.eagle_draft_active_vocab else "0"),
             ENV_EAGLE_TARGET_ACTIVE_VOCAB: ("1" if self.eagle_target_active_vocab else "0"),
             ENV_EAGLE_RELAXED_ACCEPT_TOPK: str(self.eagle_relaxed_accept_topk),
+            ENV_MTP_STRICT_GRAPH: "1" if self.mtp_strict_graph else "0",
             ENV_CONFIDENCE_ACCEPT_MARGIN: (
                 "" if self.confidence_accept_margin is None else str(self.confidence_accept_margin)
             ),

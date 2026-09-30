@@ -6,7 +6,7 @@ from vllm_hust_vspec.backends.kv_cache import (
     PATCH_MARKER,
     apply_multi_layer_kv_cache_patch,
 )
-from vllm_hust_vspec.host_compat import call_with_supported_kwargs
+from vllm_hust_vspec.host_compat import _keyword_support, call_with_supported_kwargs
 
 
 def test_call_with_supported_kwargs_filters_removed_host_argument() -> None:
@@ -32,6 +32,18 @@ def test_call_with_supported_kwargs_preserves_variadic_host_arguments() -> None:
         "current": 1,
         "legacy": 2,
     }
+
+
+def test_call_with_supported_kwargs_caches_signature_inspection() -> None:
+    def host(*, current: int) -> int:
+        return current
+
+    _keyword_support.cache_clear()
+    call_with_supported_kwargs(host, current=1, legacy=2)
+    call_with_supported_kwargs(host, current=2, legacy=3)
+
+    assert _keyword_support.cache_info().misses == 1
+    assert _keyword_support.cache_info().hits == 1
 
 
 def test_multi_layer_kv_cache_patch_replaces_inherited_guard() -> None:

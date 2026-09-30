@@ -249,6 +249,7 @@ def bootstrap_default_models(
     model_dir: Path | None = None,
     registry_path: Path | None = None,
     download: bool = True,
+    allow_missing: bool = False,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Path]:
     values = os.environ if environment is None else environment
@@ -266,6 +267,13 @@ def bootstrap_default_models(
         )
         if model is None:
             if not download:
+                if allow_missing:
+                    print(
+                        f"Skipping missing {spec.key} model ({spec.repo_id}); "
+                        "configure it before using this method",
+                        flush=True,
+                    )
+                    continue
                 raise ModelStoreError(
                     f"no usable {spec.key} model found; expected {spec.repo_id} under {root}"
                 )
@@ -299,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Download missing models from Hugging Face (enabled by default).",
     )
+    parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="Write entries for models that already exist without failing on missing models.",
+    )
     return parser
 
 
@@ -309,6 +322,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             model_dir=options.model_dir,
             registry_path=options.registry,
             download=options.download,
+            allow_missing=options.allow_missing,
         )
     except ModelStoreError as exc:
         raise SystemExit(f"vSpec model setup: {exc}") from exc

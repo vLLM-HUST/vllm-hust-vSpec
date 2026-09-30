@@ -243,6 +243,43 @@ def _configure_draft_active_vocab(proposer: Any) -> None:
     proposer._eagle_draft_active_lm_head_w8a16_chunks = None
     if not active_ids_path and active_size == 0 and not use_w8a16 and not use_w8a8:
         return
+    if proposer.method == "eagle3":
+        if active_ids_path or active_size:
+            raise RuntimeError(
+                "EAGLE3 Draft active vocabulary is defined by its trained "
+                "draft_id_to_target_id mapping and cannot be replaced"
+            )
+        if use_w8a8:
+            raise RuntimeError("EAGLE3 Draft LM head currently supports W8A16 only")
+        if proposer.speculative_config.draft_tensor_parallel_size != 1:
+            raise RuntimeError("EAGLE3 Draft LM head W8A16 currently requires draft TP=1")
+        if proposer.vllm_config.quant_config is not None:
+            raise RuntimeError("EAGLE3 Draft LM head W8A16 does not support a quantized target")
+
+        from .eagle_body_quant import _quantize_weight, _WeightOnlyLinearMethod
+
+        lm_head = proposer.model.lm_head
+        weight = getattr(lm_head, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+            raise RuntimeError("EAGLE3 Draft LM head W8A16 requires a 2-D weight")
+        if weight.shape[0] % 64 or weight.shape[1] % 64:
+            raise RuntimeError(
+                "EAGLE3 Draft LM head W8A16 requires dimensions divisible by 64: "
+                f"{tuple(weight.shape)}"
+            )
+        quant_weight, quant_scale = _quantize_weight(weight)
+        lm_head.register_buffer("_vspec_w8a16_weight", quant_weight)
+        lm_head.register_buffer("_vspec_w8a16_scale", quant_scale)
+        bias = getattr(lm_head, "bias", None)
+        quant_bias = (
+            bias.to(dtype=weight.dtype).contiguous()
+            if isinstance(bias, torch.Tensor)
+            else None
+        )
+        lm_head.register_buffer("_vspec_w8a16_bias", quant_bias)
+        lm_head.quant_method = _WeightOnlyLinearMethod()
+        proposer._eagle_draft_active_lm_head_w8a16_weight = quant_weight
+        return
     if proposer.method != "eagle":
         raise RuntimeError("EAGLE Draft active vocabulary requires method=eagle")
     if proposer.vllm_config.parallel_config.tensor_parallel_size != 1:
