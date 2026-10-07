@@ -119,7 +119,7 @@ vllm-hust-vSpec/
 │   │   └── qwen2_eagle.py
 │   ├── manifests/
 │   │   ├── __init__.py
-│   │   └── vllm-hust-extension-v0.2.json
+│   │   └── vllm-hust-extension-v0.3.json
 │   ├── cli.py
 │   ├── compatibility.py
 │   ├── config.py
@@ -258,6 +258,10 @@ vllm-hust-ext run -- vllm-hust-vspec \
 Manager 设置 `HUST_VSPEC_ENABLED=1`，具体 method、模型、gamma 和图模式仍由 vSpec
 启动器提供。直接执行 `vllm-hust-vspec` 仍是受支持的显式启动方式，不受 Manager
 保存的 enabled 状态控制。
+
+ECPA 0.3 manifest 将进程内 speculative-decoding patchset 和 Qwen2 EAGLE
+模型注册声明为独占资源；因此与声明相同资源的 MOD 会在启动前被拒绝，而不是按
+导入顺序静默覆盖。安装、启用意图与 `runtime_effective` 仍是三个不同状态。
 
 停用、清理 Manager 意图和卸载：
 

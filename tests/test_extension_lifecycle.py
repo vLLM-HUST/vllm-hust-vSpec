@@ -43,7 +43,7 @@ def _compatible_vllm_is_available() -> bool:
         installed = Version(importlib.metadata.version("vllm"))
     except importlib.metadata.PackageNotFoundError:
         return False
-    manifest_path = Path(str(resources.files(manifests).joinpath("vllm-hust-extension-v0.2.json")))
+    manifest_path = Path(str(resources.files(manifests).joinpath("vllm-hust-extension-v0.3.json")))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     supported = SpecifierSet(manifest["host"]["version_range"])
     return installed in supported
