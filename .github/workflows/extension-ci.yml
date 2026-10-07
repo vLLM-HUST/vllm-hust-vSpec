@@ -7,17 +7,20 @@ on:
 
 jobs:
   package:
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@v6
       - name: Install packaging tools and Extension Manager
         run: |
           python -m pip install build pytest "ruff>=0.12"
-          python -m pip install "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
+          python -m pip install "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@0061862102324a8ad2db59e154bc0f811bf4d4e2"
       - name: Install vSpec
         run: python -m pip install --no-deps --editable .
       - name: Check source and static discovery
@@ -30,6 +33,19 @@ jobs:
           vllm-hust-ext extension list --json
           vllm-hust-ext extension validate org.vllm-hust.vspec
           vllm-hust-ext extension inspect org.vllm-hust.vspec
+          vllm-hust-ext extension check org.vllm-hust.vspec \
+            | grep 'host version is unavailable'
+          vllm-hust-ext extension enable org.vllm-hust.vspec
+          vllm-hust-ext extension plan org.vllm-hust.vspec \
+            | grep 'vllm.speculative-decoding.patchset'
+          vllm-hust-ext extension render org.vllm-hust.vspec \
+            | grep 'HUST_VSPEC_ENABLED'
+          if vllm-hust-ext run --dry-run -- python -c pass; then
+            echo 'unknown host version was unexpectedly accepted' >&2
+            exit 1
+          fi
+          vllm-hust-ext extension disable org.vllm-hust.vspec
+          vllm-hust-ext extension forget org.vllm-hust.vspec
       - name: Build and verify wheel discovery
         run: |
           ./release.sh build

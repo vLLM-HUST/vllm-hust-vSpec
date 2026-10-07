@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.2-experimental",
+  "schema_version": "0.3-experimental",
   "extension_id": "org.vllm-hust.vspec",
   "extension_version": "0.14.3",
   "kind": "in_process_plugin",
@@ -28,10 +28,24 @@
     {
       "type": "python_entry_point",
       "group": "vllm.general_plugins",
-      "name": "vspec"
+      "name": "vspec",
+      "value": "vllm_hust_vspec:register"
     }
   ],
   "requires_services": [],
+  "requires_extensions": [],
+  "resource_claims": [
+    {
+      "resource": "vllm.speculative-decoding.patchset",
+      "scope": "vllm-process",
+      "mode": "exclusive"
+    },
+    {
+      "resource": "vllm.model-registry.qwen2-eagle",
+      "scope": "vllm-process",
+      "mode": "exclusive"
+    }
+  ],
   "components": [],
   "activation": {
     "entry_points": [

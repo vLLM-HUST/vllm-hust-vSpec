@@ -17,7 +17,7 @@ import vllm_hust_vspec
 from vllm_hust_vspec import manifests
 
 EXTENSION_ID = "org.vllm-hust.vspec"
-MANIFEST_NAME = "vllm-hust-extension-v0.2.json"
+MANIFEST_NAME = "vllm-hust-extension-v0.3.json"
 
 
 def manifest_path() -> Path:
@@ -33,6 +33,10 @@ def test_manifest_matches_registration_boundary() -> None:
     assert manifest.host.provider == "vllm"
     assert manifest.runtime.isolation == "trusted_in_process"
     assert manifest.lifecycle_owner == "vllm"
+    assert {claim.resource for claim in manifest.resource_claims} == {
+        "vllm.speculative-decoding.patchset",
+        "vllm.model-registry.qwen2-eagle",
+    }
     assert dict(manifest.activation.environment) == {"HUST_VSPEC_ENABLED": "1"}
     assert version("vllm-hust-vspec") == vllm_hust_vspec.__version__
     assert manifest_path().parent.name == "manifests"

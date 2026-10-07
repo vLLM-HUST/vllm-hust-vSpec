@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "vllm_hust_vspec"
 VERSION_FILE = PACKAGE / "_version.py"
 MANIFEST_DIR = PACKAGE / "manifests"
-MANIFEST_NAME = "vllm-hust-extension-v0.2.json"
+MANIFEST_NAME = "vllm-hust-extension-v0.3.json"
 MANIFEST = MANIFEST_DIR / MANIFEST_NAME
 EXTENSION_ID = "org.vllm-hust.vspec"
 PROJECT_NAME = "vllm-hust-vspec"
@@ -61,13 +61,13 @@ def verify_source() -> str:
         "release must not expose an automatic model download command",
     )
     require((MANIFEST_DIR / "__init__.py").is_file(), "manifests package is missing")
-    require(MANIFEST.is_file(), "0.2 manifest is missing")
+    require(MANIFEST.is_file(), "0.3 manifest is missing")
     require(
         not (PACKAGE / MANIFEST_NAME).exists(),
         "legacy package-root manifest must be removed",
     )
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    require(manifest["schema_version"] == "0.2-experimental", "wrong schema version")
+    require(manifest["schema_version"] == "0.3-experimental", "wrong schema version")
     require(manifest["extension_id"] == EXTENSION_ID, "wrong extension ID")
     require(manifest["extension_version"] == version, "manifest version mismatch")
     require(manifest["kind"] == "in_process_plugin", "wrong extension kind")
