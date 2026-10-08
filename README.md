@@ -147,7 +147,7 @@ vllm-hust-vSpec/
 统一管理入口默认安装当前版本 wheel；需要继续开发源码时使用 editable 模式：
 
 ```bash
-cd /root/data/vllm-hust-vSpec
+cd /path/to/vllm-hust-vSpec
 ./manage.sh install
 ./manage.sh install --editable
 ./manage.sh install --enable
@@ -668,5 +668,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 和未通过本目录启动的任务不受影响。
 
 插件不复制完整的 scheduler、attention 和模型执行器，而是在公开类边界注入
-本目录中的 Draft/EAGLE 实现。它仍依赖 `/root/data/vllm-hust-latest` 与
-`/root/data/vllm-ascend-hust-latest` 提供基础投机解码 ABI；具体所有权见上一节。
+本目录中的 Draft/EAGLE 实现。它依赖已安装且版本匹配的 `vllm-hust` 与 `vllm-ascend-hust` 提供基础投机解码 ABI；具体所有权见上一节。
+
+## Canonical MOD metadata
+
+Repository identity, directly responsible maintainers, advisor status, default-off
+activation, rollback, scope, and evidence qualification are recorded in
+[`MOD_METADATA.json`](MOD_METADATA.json). `advisor_status: unknown` is not the
+same as confirmed `none`. Performance statements remain limited to the workloads
+and evidence labels recorded there; they are not general online claims.
