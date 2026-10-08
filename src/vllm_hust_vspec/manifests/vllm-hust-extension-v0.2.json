@@ -6,7 +6,7 @@
   "host": {
     "provider": "vllm",
     "name": "vllm",
-    "version_range": "==0.17.2rc1.dev5871+g762f85b31.empty"
+    "version_range": ">=0.25.1,<0.26"
   },
   "runtime": {
     "type": "python",

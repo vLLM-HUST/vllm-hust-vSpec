@@ -12,7 +12,10 @@ def apply_patches(settings: PluginSettings) -> bool:
         settings.method,
         adaptive=settings.adaptive_speculation,
     )
-    from .backends.kv_cache import apply_multi_layer_kv_cache_patch
+    from .backends.kv_cache import (
+        apply_eagle_kv_cache_page_size_patch,
+        apply_multi_layer_kv_cache_patch,
+    )
 
     applied = apply_multi_layer_kv_cache_patch()
     if settings.adaptive_speculation:
@@ -26,7 +29,8 @@ def apply_patches(settings: PluginSettings) -> bool:
     if settings.method in {"eagle", "eagle3"}:
         from .backends.eagle import apply_eagle_patches
 
-        return apply_eagle_patches(settings) or applied
+        page_size_applied = apply_eagle_kv_cache_page_size_patch()
+        return apply_eagle_patches(settings) or page_size_applied or applied
     if settings.method == "dflash":
         # DFlash is provided by vLLM-Ascend; vSpec contributes the adaptive
         # control and graph-width hooks installed above.
