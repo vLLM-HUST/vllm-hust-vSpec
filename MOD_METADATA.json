@@ -1,0 +1,48 @@
+{
+  "canonical_repository": "https://github.com/vLLM-HUST/vllm-hust-vSpec",
+  "display_name": "vSpec",
+  "evidence": {
+    "index": "https://github.com/vLLM-HUST/vllm-hust-vSpec/blob/main/docs/gsm8k_b128_recovery_and_arc_easy_20260913.md",
+    "latest_result": "https://github.com/vLLM-HUST/vllm-hust-vSpec/blob/main/docs/gsm8k_b128_recovery_and_arc_easy_20260913.md",
+    "performance_claims": [],
+    "qualification": "unqualified"
+  },
+  "lifecycle": {
+    "activation_contract": "See the extension manifest and README; discovery alone does not enable this MOD.",
+    "default_enabled": false,
+    "rollback_contract": "Disable the MOD and return to the unmodified host path.",
+    "status": "experimental"
+  },
+  "metadata_source": {
+    "commit": "7df1647048ac5f05fcc502ce4bea94f26d0f5362",
+    "repository": "vLLM-HUST/vllm-hust-website"
+  },
+  "mod_id": "vspec",
+  "repository": "vllm-hust-vSpec",
+  "responsibility": {
+    "advisor_status": "declared",
+    "advisors": [
+      {
+        "name": "Qinggang Wang / 王庆刚",
+        "relationship": "internal"
+      }
+    ],
+    "maintainers": [
+      {
+        "github": "Renty-0",
+        "name": "Renty-0"
+      }
+    ],
+    "organization": "vLLM-HUST"
+  },
+  "schema_version": "vllm-hust-mod-metadata-v1",
+  "scope": {
+    "mechanism": "decoding_mechanism",
+    "out_of_scope": [],
+    "supported_workloads": [
+      "Qwen2.5-14B-Instruct — verified target",
+      "Qwen2.5-0.5B-Instruct — Draft",
+      "Eagle-Qwen2.5-14B-Instruct — EAGLE"
+    ]
+  }
+}
