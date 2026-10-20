@@ -9,7 +9,7 @@ from pathlib import Path
 
 PINS = {
     "vllm_ascend.spec_decode.llm_base_proposer": (
-        "5ae11410aee2367a2214640708e131ca57a6f4fb7b19a30443453c5d1c930892"
+        "d106cb3cc2e048734fa2986394c43c2177d04190715dc390d8a62d50830cb6e2"
     ),
     "vllm.model_executor.layers.logits_processor": (
         "6b0603d67b0c756253c2fdc882a3896d2e873a16e9aa2ef877aabca8d36bdb5f"
