@@ -31,9 +31,16 @@ def make_worker(base):
                 else:
                     result = original(proposer, hidden_states, sampling_metadata)
                 rows = hidden_states.shape[0]
-                if rows not in seen:
-                    seen.add(rows)
-                    event("selector_executed", rank=self.rank, rows=rows, active=active)
+                capturing = torch.npu.is_current_stream_capturing()
+                if (rows, capturing) not in seen:
+                    seen.add((rows, capturing))
+                    event(
+                        "selector_executed",
+                        rank=self.rank,
+                        rows=rows,
+                        active=active,
+                        capturing=capturing,
+                    )
                 return result
 
             AscendSpecDecodeBaseProposer.compute_draft_token_ids = compute
