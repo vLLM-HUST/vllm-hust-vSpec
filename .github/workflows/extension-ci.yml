@@ -29,7 +29,7 @@ jobs:
           ruff format --check .
           bash -n install.sh manage.sh release.sh run.sh uninstall.sh
           ./release.sh source-check
-          pytest -q tests/test_manifest.py tests/test_extension_lifecycle.py tests/test_management.py tests/test_release.py
+          pytest -q tests/test_manifest.py tests/test_extension_lifecycle.py tests/test_management.py tests/test_release.py tests/test_school028_argmax.py
           vllm-hust-ext extension list --json
           vllm-hust-ext extension validate org.vllm-hust.vspec
           vllm-hust-ext extension inspect org.vllm-hust.vspec
