@@ -64,6 +64,32 @@ def make_worker(base):
                 active=active,
                 original_source=inspect.getsourcefile(original),
             )
+            from vllm.forward_context import get_forward_context
+            from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+
+            original_call = ACLGraphWrapper.__call__
+            draft_runnable = proposer._runnable
+
+            @wraps(original_call)
+            def replay(wrapper, *call_args, **call_kwargs):
+                ctx = get_forward_context()
+                entry = wrapper.concrete_aclgraph_entries.get(ctx.batch_descriptor)
+                captured = (
+                    entry is not None
+                    and entry.aclgraph is not None
+                    and ctx.cudagraph_runtime_mode == wrapper.runtime_mode
+                )
+                output = original_call(wrapper, *call_args, **call_kwargs)
+                if wrapper is draft_runnable and captured:
+                    event(
+                        "draft_graph_replay",
+                        rank=self.rank,
+                        active=active,
+                        tokens=ctx.batch_descriptor.num_tokens,
+                    )
+                return output
+
+            ACLGraphWrapper.__call__ = replay
             return result
 
     return Worker
