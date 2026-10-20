@@ -47,6 +47,14 @@ def register():
         raise ValueError("Full vSpec and isolated school adapter are exclusive")
     if os.environ.get("HUST_VSPEC_SCHOOL_MODE") not in ("off", "on"):
         raise ValueError("Explicit OFF/ON arm required")
+    if (
+        os.environ.get("HUST_MICROFLOW_SCHOOL028_FA") != "1"
+        or os.environ.get("HUST_MICROFLOW_ARM") != "on"
+    ):
+        raise ValueError("This experiment requires the current FA Microflow B1")
+    from hust_prefill_microflow.school028 import preflight
+
+    preflight()
     for module, digest in PINS.items():
         spec = importlib.util.find_spec(module)
         if spec is None or hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest() != digest:
