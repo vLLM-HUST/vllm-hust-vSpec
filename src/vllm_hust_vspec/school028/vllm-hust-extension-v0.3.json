@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.3",
+  "extension_id": "org.vllm-hust.vspec-school028-argmax",
+  "extension_version": "0.1.0.dev0",
+  "kind": "in_process_plugin",
+  "host": {"provider": "vllm", "name": "vllm", "version_range": "==0.28.1.post1.dev143", "api_range": ">=1,<2"},
+  "runtime": {"type": "python", "process_scope": "worker", "isolation": "trusted_in_process"},
+  "lifecycle_owner": "vllm",
+  "protocols": [{"name": "vllm.general-plugin", "version_range": null}],
+  "implementation": [{"type": "python_module", "module": "vllm_hust_vspec.school028", "object": "register", "status": "active"}],
+  "requires_services": [],
+  "requires_extensions": [],
+  "resource_claims": [{"resource": "vllm-ascend.mtp.compute-draft-token-ids", "scope": "vllm-process", "mode": "exclusive"}],
+  "components": [{"component_id": "school028-argmax", "contracts": ["vllm.general-plugin.experimental"], "execution_planes": ["worker"], "isolation": "trusted_in_process", "implementation_ref": "vllm_hust_vspec.school028:register", "permissions": []}],
+  "activation": {"entry_points": [{"group": "vllm.general_plugins", "name": "vspec_school028_argmax"}], "environment": {"HUST_VSPEC_SCHOOL028_ARGMAX": "1"}, "additional_config": {}}
+}
