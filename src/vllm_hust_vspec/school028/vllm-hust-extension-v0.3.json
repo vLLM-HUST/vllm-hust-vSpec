@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.3",
+  "schema_version": "0.3-experimental",
   "extension_id": "org.vllm-hust.vspec-school028-argmax",
   "extension_version": "0.1.0.dev0",
   "kind": "in_process_plugin",
