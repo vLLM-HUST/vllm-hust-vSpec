@@ -23,10 +23,10 @@ PINS = {
 }
 
 
-def event(kind, **fields):
+def event(event_name, **fields):
     path = Path(os.environ["HUST_VSPEC_SCHOOL_EVENT_DIR"])
     with (path / f"vspec-{os.getpid()}.jsonl").open("a") as stream:
-        stream.write(json.dumps(dict(event=kind, time=time.time(), **fields)) + "\n")
+        stream.write(json.dumps(dict(event=event_name, time=time.time(), **fields)) + "\n")
 
 
 def validate_proposer(proposer, sampling_metadata):

@@ -41,3 +41,11 @@ def test_manifest():
     assert data["host"]["version_range"] == "==0.28.1.post1.dev143"
     assert data["resource_claims"][0]["mode"] == "exclusive"
     load_manifest(path)
+
+
+def test_head_event_preserves_input_kind(tmp_path, monkeypatch):
+    monkeypatch.setenv("HUST_VSPEC_SCHOOL_EVENT_DIR", str(tmp_path))
+    school028.event("head_equivalence", rank=0, rows=24, kind="zeros", exact=True)
+    row = json.loads(next(tmp_path.glob("vspec-*.jsonl")).read_text())
+    assert row["event"] == "head_equivalence"
+    assert row["kind"] == "zeros" and row["exact"]
