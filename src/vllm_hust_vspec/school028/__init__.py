@@ -8,6 +8,9 @@ import time
 from pathlib import Path
 
 PINS = {
+    "betterscale.models.qwen35.draft_fia": (
+        "8ca998cf2a2749862bd3c104d9f28a1427ed1cac65bf8007100ddd86bb1388bb"
+    ),
     "vllm_ascend.spec_decode.llm_base_proposer": (
         "d106cb3cc2e048734fa2986394c43c2177d04190715dc390d8a62d50830cb6e2"
     ),

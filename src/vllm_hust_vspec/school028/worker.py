@@ -75,7 +75,13 @@ def make_worker(base):
             from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 
             original_call = ACLGraphWrapper.__call__
-            draft_runnable = proposer._runnable
+            # The pinned FIA publisher wraps the actual ACL graph runnable.
+            publisher = proposer._runnable
+            if type(publisher).__module__ != "betterscale.models.qwen35.draft_fia":
+                raise ValueError("Expected pinned draft FIA publisher")
+            draft_runnable = publisher.inner
+            if not isinstance(draft_runnable, ACLGraphWrapper):
+                raise ValueError("Expected native merged draft ACL graph")
 
             @wraps(original_call)
             def replay(wrapper, *call_args, **call_kwargs):
