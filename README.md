@@ -679,3 +679,5 @@ activation, rollback, scope, and evidence qualification are recorded in
 [`MOD_METADATA.json`](MOD_METADATA.json). `advisor_status: unknown` is not the
 same as confirmed `none`. Performance statements remain limited to the workloads
 and evidence labels recorded there; they are not general online claims.
+
+Historical `benchmark_results/` inputs now use the [verified external originals](docs/benchmark-originals.md).

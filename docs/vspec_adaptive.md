@@ -320,3 +320,7 @@ proposal/verification 长度、连续请求下同时做到零 Draft 计算和同
 per-request 混合状态。离线 profile 自动采集 suite 仍会为每个测量重新启动模型；
 不希望承担这项部署成本时使用 `--adaptive-policy online`。
 `--adaptive-trace` 会产生逐 step 日志，只用于校准，不能用于正式吞吐测试。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

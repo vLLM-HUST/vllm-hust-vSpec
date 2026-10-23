@@ -70,3 +70,7 @@ burn-in 观测，因此本轮保持 gamma=2。这里的“0～4”表示控制�
 
 - `python -m pytest -q`：123 passed
 - `ruff` 未安装，因此本轮未执行 lint
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

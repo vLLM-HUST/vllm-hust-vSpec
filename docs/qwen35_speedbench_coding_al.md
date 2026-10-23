@@ -71,3 +71,7 @@ DATASET_DIR=/tmp/vspec-speedbench-data NPU_IDS=2,3 PORT=18186 \
 `spec_decode_num_drafts` 与 `spec_decode_accepted_tokens` 可直接复算上述 AL。
 两个服务日志均记录 target PIECEWISE/FULL 和 proposer FULL graph 捕获，严格图
 保护没有触发 eager fallback。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

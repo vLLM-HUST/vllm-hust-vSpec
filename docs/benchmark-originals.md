@@ -1,5 +1,11 @@
 # Benchmark originals
 
+[Remaining regression manifest](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/manifest.json)
+preserves all 316 remaining tracked `benchmark_results/` files. The downloader combines these with
+the previously migrated GSM8K originals at their historical relative paths. Diagnostic/eager runs,
+failures and original model identities remain separate from qualified results. Commands in old
+reports describe historical environments; migration does not recreate missing local datasets.
+
 This bounded collection is preserved by the benchmark repository. Original versions, failures,
 negative results and diagnostic scope remain unchanged; migration is not new runtime acceptance.
 Other historical collections are not declared migrated by this change.
