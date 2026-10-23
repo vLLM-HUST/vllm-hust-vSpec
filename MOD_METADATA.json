@@ -2,8 +2,8 @@
   "canonical_repository": "https://github.com/vLLM-HUST/vllm-hust-vSpec",
   "display_name": "vSpec",
   "evidence": {
-    "index": "https://github.com/vLLM-HUST/vllm-hust-vSpec/blob/main/docs/gsm8k_b128_recovery_and_arc_easy_20260913.md",
-    "latest_result": "https://github.com/vLLM-HUST/vllm-hust-vSpec/blob/main/docs/gsm8k_b128_recovery_and_arc_easy_20260913.md",
+    "index": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/9b81690f767aca56524ec6651535a9b8d484a4c3/archive/vspec-browser-raw-20261022/manifest.json",
+    "latest_result": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/9b81690f767aca56524ec6651535a9b8d484a4c3/archive/vspec-browser-raw-20261022/manifest.json",
     "performance_claims": [],
     "qualification": "unqualified"
   },

@@ -1,5 +1,7 @@
 # vllm-hust-vSpec
 
+历史原件下载与校验见 [benchmark custody guide](docs/benchmark-originals.md)。
+
 `vllm-hust-vSpec` 是面向 vLLM-HUST + vLLM-Ascend-HUST 的独立
 `vllm.general_plugins` 投机解码插件。插件支持动态 gamma，并提供已验证的 Draft 、EAGLE 和 MTP 投机解码方案。
 
@@ -69,7 +71,7 @@ batch-uniform 投机预算；online 还可叠加当前轮逐请求置信停止�
 无离线 profile 的在线策略实现和 NPU 对比见
 [`docs/vspec_online_adaptive_npu_report_20260902.md`](docs/vspec_online_adaptive_npu_report_20260902.md)。
 最新同卡 GSM8K B128 `1.518x` 恢复验证、工程模板 GSM8K 与 ARC-Easy 结果见
-[`docs/gsm8k_b128_recovery_and_arc_easy_20260913.md`](docs/gsm8k_b128_recovery_and_arc_easy_20260913.md)。
+[`docs/gsm8k_b128_recovery_and_arc_easy_20260913.md`](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/9b81690f767aca56524ec6651535a9b8d484a4c3/archive/mod-git-20261022/website-source-vllm-hust-vSpec/snapshot/docs/gsm8k_b128_recovery_and_arc_easy_20260913.md)。
 离线 profile 可用 `vllm-hust-vspec-profile` 自动采集固定 gamma component
 stats、选择 batch policy 并保存完整 measurement manifest。
 
