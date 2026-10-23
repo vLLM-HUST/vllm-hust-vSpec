@@ -327,3 +327,7 @@ N50 筛选压测（确认稳定提升后把 `50` 改为 `200`）：
 - 最近一次相关定向测试：169 passed，14 warnings。
 - 更早的 full pytest：202 passed、3 failed；3 个失败均由当前环境安装的 extension
   discovery 中存在重复 Bundle v1 manifest 引起，不是 Draft 算法失败。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

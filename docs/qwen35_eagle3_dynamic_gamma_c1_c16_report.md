@@ -61,3 +61,7 @@ test is output throughput relative to target-only, not TTFT or SLO goodput.
 - Target-only baseline: `benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/`
 - Server log: `benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated-server.log`
 - Runtime config: `configs/qwen35-35b-a3b-eagle3-adaptive.toml`
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

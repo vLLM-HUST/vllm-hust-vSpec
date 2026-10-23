@@ -64,3 +64,7 @@ token 数、逐条输出哈希和 GSM8K 结果完全一致。
 `benchmark_results/latest_stack_draft_online_formal_cli_refill8_exact_margin5p25_g1to4_full_b128_gsm8k_n200_max512.json`
 
 同名 `.log` 保留完整配置、编译、55 个 Graph capture 和控制器汇总。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

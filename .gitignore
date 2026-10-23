@@ -5,6 +5,8 @@ __pycache__/
 .coverage
 .ruff_cache/
 .release-smoke/
+# Measured originals belong in benchmark; historical Git remains recoverable.
+benchmark_results/
 build/
 dist/
 fusion_result.json

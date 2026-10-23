@@ -109,3 +109,7 @@ AOT 函数无法落盘的警告，但不影响首次运行；不要复用该次�
 - `benchmark_results/latest_stack_eagle_online_g1to2_full_b128_gsm8k_n200_max512.json`
 
 同名 `.log` 文件保留完整启动配置、编译、Graph capture、动态控制汇总和退出日志。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

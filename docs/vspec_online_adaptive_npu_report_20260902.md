@@ -129,3 +129,7 @@ Online 模式不读取 profile。正式吞吐测试关闭 `--adaptive-trace`。
 - `benchmark_results/draft_online_ucb_confidence_highgamma_final_c4_full_b128_gsm8k_n200_max512.json`
 - `benchmark_results/eagle_fixed_contemporary_full_b128_gsm8k_n200_max512.json`
 - `benchmark_results/eagle_online_ucb_final_c2_full_b128_gsm8k_n200_max512.json`
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

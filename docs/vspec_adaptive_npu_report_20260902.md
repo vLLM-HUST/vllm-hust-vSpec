@@ -169,3 +169,7 @@ FULL_DECODE_ONLY 继续使用 width 隔离。以下回归均完成：
 
 图模式实验不要导出 `TORCHDYNAMO_DISABLE=1`；实测该变量会导致
 `aot_compile is not supported`，与 FULL/FULL_DECODE_ONLY 编译配置冲突。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

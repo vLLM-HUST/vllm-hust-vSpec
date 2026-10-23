@@ -75,3 +75,7 @@ EAGLE 本轮将旧的 gamma 上限 2 改为默认上限 4，因此与上一轮 `
 - 实际 NPU 回归中 Draft/EAGLE 均完成 200 条请求并产生结果文件
 
 回归时显式加载了 `/opt/vllm-hust-cann91/Ascend/cann-9.1.0/set_env.sh`。没有设置 `TORCHDYNAMO_DISABLE=1`，因为该变量会关闭 torch.compile 并使 FULL Graph 的 `aot_compile` 初始化失败；这不是插件性能或正确性失败。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

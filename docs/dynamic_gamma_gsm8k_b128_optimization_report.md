@@ -86,3 +86,7 @@ HUST_VSPEC_ADAPTIVE_ONLINE_WARMUP_RETURN=best|incumbent
 
 EAGLE 的端到端结果超过 `1.10x` 门槛，但余量约 `0.07%`；用于发布回归门禁时，
 应在独占 NPU 上重复至少三次并使用中位数，避免系统噪声造成单次越线或掉线。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

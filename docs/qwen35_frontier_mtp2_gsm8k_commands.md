@@ -192,3 +192,7 @@ vllm bench serve \
 正式口径为 GSM8K 固定顺序前 200 条、每条最多生成 256 token、temperature 0、seed 0、
 客户端并发 4。已验证结果和 target-only 公平对照见
 [`qwen35_frontier_mtp2.md`](qwen35_frontier_mtp2.md)。
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

@@ -73,3 +73,7 @@ export TASK_QUEUE_ENABLE=1
   --result-dir /run_dir/benchmark_results/Qwen3.5-MTP2-GSM8K-B16 \
   --result-filename GSM8K.json
 ```
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

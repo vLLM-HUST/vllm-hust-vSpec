@@ -196,3 +196,7 @@ fallback、OOM、HCCL、context overflow、`RuntimeError` 或 traceback。
 - [AgentX 官方方法](https://inferencex.semianalysis.com/agentx/methodology)
 - [官方 AgentX harness](https://github.com/SemiAnalysisAI/agentx-harness)
 - [AgentX 256K 数据集](https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126-256k)
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

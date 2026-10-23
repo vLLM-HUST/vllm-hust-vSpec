@@ -119,3 +119,7 @@ Graph capturing finished in 7 secs
 
 - [Qwen3.5-35B-A3B 官方模型卡](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)
 - [vLLM-Ascend Qwen3.5 MoE + MTP + FlashComm1 问题](https://github.com/vllm-project/vllm-ascend/issues/7996)
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.

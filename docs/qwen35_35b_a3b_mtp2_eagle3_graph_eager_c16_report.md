@@ -158,3 +158,7 @@ target-Draft overlap，而不是继续增加捕获桶。
   `benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-adaptive-g2to6-n200/`
 - Eager 参考：
   `benchmark_results/qwen35_spec_compare_gsm8k/20260928-fixed-c16-n200/eager/`
+
+Evidence-path note: historical `benchmark_results/` inputs are preserved in the
+[fixed benchmark originals](benchmark-originals.md). Download the verified external
+snapshot before reading these paths; missing local datasets are not reconstructed by migration.
