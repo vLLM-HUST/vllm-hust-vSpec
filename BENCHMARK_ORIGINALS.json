@@ -16,6 +16,10 @@
     {
       "manifest_url": "https://raw.githubusercontent.com/vLLM-HUST/vllm-hust-benchmark/b3d2ed2692b5575b5ae77b93fc82e32c9119be8e/archive/mod-targeted-20261023/vspec-mixed/manifest.json",
       "manifest_sha256": "e9c39cf3472af7eef71864d6665a631a7a71fab80f91c16b0643bde7ba8b2a1b"
+    },
+    {
+      "manifest_url": "https://raw.githubusercontent.com/vLLM-HUST/vllm-hust-benchmark/2a97ad593c4fc3a6df051ec6dc3b78675a7a6225/archive/mod-targeted-20261023/vspec-legacy-narratives/manifest.json",
+      "manifest_sha256": "d34da10ca6366d766c5f18378487e884b36a6660207b9c3c613339747519e22b"
     }
   ],
   "migrated_paths": [
@@ -355,6 +359,116 @@
     "docs/migration_status.md": {
       "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/b3d2ed2692b5575b5ae77b93fc82e32c9119be8e/archive/mod-targeted-20261023/vspec-mixed/snapshot/docs/migration_status.md",
       "sha256": "88f8b2e65b3a9f92c076595206da8ebfe75682bc715b0139de3d30e9fd70b191"
+    },
+    "docs/default_gamma1to4_regression_20260907.md": {
+      "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/2a97ad593c4fc3a6df051ec6dc3b78675a7a6225/archive/mod-targeted-20261023/vspec-legacy-narratives/snapshot/docs/default_gamma1to4_regression_20260907.md",
+      "sha256": "8c0b254a051c9baa6b809fa448c8b3a4007f1e373244a404441616993c3486e2"
+    },
+    "docs/qwen35_35b_a3b_mtp2_gsm8k_report.md": {
+      "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/2a97ad593c4fc3a6df051ec6dc3b78675a7a6225/archive/mod-targeted-20261023/vspec-legacy-narratives/snapshot/docs/qwen35_35b_a3b_mtp2_gsm8k_report.md",
+      "sha256": "163b8f9a0895f0e729cdc0fa86163c35c0d9f83756c88366c3f266ef0fdf8a80"
+    },
+    "docs/vspec_online_adaptive_npu_report_20260902.md": {
+      "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/2a97ad593c4fc3a6df051ec6dc3b78675a7a6225/archive/mod-targeted-20261023/vspec-legacy-narratives/snapshot/docs/vspec_online_adaptive_npu_report_20260902.md",
+      "sha256": "fce33493c963720f599170fe12ad322c54add3922f4f0152debebb7c3d292e63"
     }
+  },
+  "document_data_links": {
+    "docs/default_gamma1to4_regression_20260907.md": [
+      {
+        "path": "benchmark_results/default_gamma1to4_regression_20260907/draft_adaptive_g1to4_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/default_gamma1to4_regression_20260907/draft_adaptive_g1to4_full_b128_gsm8k_n200_max512.json",
+        "sha256": "c440ac908823d87fb039360102bf2178014ee06666e26653697e39293b6e1eef"
+      },
+      {
+        "path": "benchmark_results/default_gamma1to4_regression_20260907/draft_adaptive_g1to4_full_b128_gsm8k_n200_max512.log",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/default_gamma1to4_regression_20260907/draft_adaptive_g1to4_full_b128_gsm8k_n200_max512.log",
+        "sha256": "4a0a1a3e75c4ed17f22a8ffe4ee791ee33be884ed2cf33b012d53df8f55a22ec"
+      },
+      {
+        "path": "benchmark_results/default_gamma1to4_regression_20260907/eagle_adaptive_g1to4_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/default_gamma1to4_regression_20260907/eagle_adaptive_g1to4_full_b128_gsm8k_n200_max512.json",
+        "sha256": "9fd03e11504a3d99b8943a6c9a764cf8e7c9edb716d74fdca5997e209bce9682"
+      },
+      {
+        "path": "benchmark_results/default_gamma1to4_regression_20260907/eagle_adaptive_g1to4_full_b128_gsm8k_n200_max512.log",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/default_gamma1to4_regression_20260907/eagle_adaptive_g1to4_full_b128_gsm8k_n200_max512.log",
+        "sha256": "08e294bfa57e1631a0db16ccc12655abebf4e8c059a567bdb86cbf539b5566a8"
+      },
+      {
+        "path": "benchmark_results/default_gamma1to4_regression_20260907/target_baseline_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/default_gamma1to4_regression_20260907/target_baseline_full_b128_gsm8k_n200_max512.json",
+        "sha256": "6f2d4df881b01248d55b98e6f9e84787348bf49609e11c629c7cd623ba21c77b"
+      },
+      {
+        "path": "benchmark_results/default_gamma1to4_regression_20260907/target_baseline_full_b128_gsm8k_n200_max512.log",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/default_gamma1to4_regression_20260907/target_baseline_full_b128_gsm8k_n200_max512.log",
+        "sha256": "a74e544ba02f29a729e696b5fa1d686a9ed30b455d5c049f22e1742ada865494"
+      }
+    ],
+    "docs/qwen35_35b_a3b_mtp2_gsm8k_report.md": [
+      {
+        "path": "benchmark_results/qwen35_mtp2_gsm8k/b16-n200-baseline-cann91-20260927/gsm8k.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_mtp2_gsm8k/b16-n200-baseline-cann91-20260927/gsm8k.json",
+        "sha256": "02ef91660f13a2dc53f1708e699d29c398f805a77a59a534c650d460b08d8add"
+      },
+      {
+        "path": "benchmark_results/qwen35_mtp2_gsm8k/b16-n200-mtp2-cann91-20260927/gsm8k.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_mtp2_gsm8k/b16-n200-mtp2-cann91-20260927/gsm8k.json",
+        "sha256": "fa2040101bbc7d9fe3ecc19877e7350af017fe1c374a0528f53d0b49c27b6f00"
+      },
+      {
+        "path": "benchmark_results/qwen35_mtp2_gsm8k/b16-n200-r2-cann91-20260927-baseline/gsm8k.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_mtp2_gsm8k/b16-n200-r2-cann91-20260927-baseline/gsm8k.json",
+        "sha256": "5a42b7f25be435f3716fc48549a5a56b322954ce0fae4812d4d520a8aac15efa"
+      },
+      {
+        "path": "benchmark_results/qwen35_mtp2_gsm8k/b16-n200-r2-cann91-20260927-mtp2/gsm8k.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_mtp2_gsm8k/b16-n200-r2-cann91-20260927-mtp2/gsm8k.json",
+        "sha256": "b780af002000df91e963698b9f5d0c8b2b999aaa58803cbcb28e16458ff05219"
+      }
+    ],
+    "docs/vspec_online_adaptive_npu_report_20260902.md": [
+      {
+        "path": "benchmark_results/draft_fixed_g1_contemporary2_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/draft_fixed_g1_contemporary2_full_b128_gsm8k_n200_max512.json",
+        "sha256": "d8f479577f7bb4264e7af4c9996c18033ae5983c4e4e19746e650b202b5d764e"
+      },
+      {
+        "path": "benchmark_results/draft_fixed_g2_contemporary2_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/draft_fixed_g2_contemporary2_full_b128_gsm8k_n200_max512.json",
+        "sha256": "453b45f9e0bf81009fe2fbc3707d5837351d43b35c94528e158557a99f2ce143"
+      },
+      {
+        "path": "benchmark_results/draft_fixed_g3_contemporary_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/draft_fixed_g3_contemporary_full_b128_gsm8k_n200_max512.json",
+        "sha256": "f135291920811294b663c88441b43cb9c764a2fa443411f1467bf50d7c6f8ba6"
+      },
+      {
+        "path": "benchmark_results/draft_fixed_g4_contemporary2_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/draft_fixed_g4_contemporary2_full_b128_gsm8k_n200_max512.json",
+        "sha256": "6743ccf13a3060b67c1b41019d4dbea3782cfce88eb7803d4f3c23fa83cb38a3"
+      },
+      {
+        "path": "benchmark_results/draft_online_ucb_confidence_highgamma_final_c4_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/draft_online_ucb_confidence_highgamma_final_c4_full_b128_gsm8k_n200_max512.json",
+        "sha256": "996d377f6fd05354fc16310d486e59ad2f22ebb8d78181f6e9570737c0930244"
+      },
+      {
+        "path": "benchmark_results/draft_online_ucb_valid_c4_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/draft_online_ucb_valid_c4_full_b128_gsm8k_n200_max512.json",
+        "sha256": "8cdbda5046fdd9df2f26a7ac23ca17399c23decbf67ec46996d50641fb10da00"
+      },
+      {
+        "path": "benchmark_results/eagle_fixed_contemporary_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/eagle_fixed_contemporary_full_b128_gsm8k_n200_max512.json",
+        "sha256": "d7d837cce4dad297fabbc2cf0a4a6ee5657300f3da706cc90c15557f5da37df8"
+      },
+      {
+        "path": "benchmark_results/eagle_online_ucb_final_c2_full_b128_gsm8k_n200_max512.json",
+        "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/eagle_online_ucb_final_c2_full_b128_gsm8k_n200_max512.json",
+        "sha256": "468e5f24a61ed718f62447b245d99c9381bcc634621ee5064b84c23bd343838c"
+      }
+    ]
   }
 }

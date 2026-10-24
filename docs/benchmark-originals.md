@@ -22,3 +22,8 @@ python scripts/fetch_benchmark_originals.py /absolute/external/originals
 The downloader checks the pinned manifest and each file's length and SHA256, rejects unsafe paths
 and never executes archived code. CI repeats the readback and rejects the migrated paths returning
 to Git. Fixed benchmark originals and unchanged source Git history preserve recoverability.
+
+[Additional legacy numerical narratives](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/2a97ad593c4fc3a6df051ec6dc3b78675a7a6225/archive/mod-targeted-20261023/vspec-legacy-narratives/manifest.json) preserves three complete reports and LICENSE.
+Current report entry points link each referenced raw result to the existing fixed benchmark capsules;
+brace expressions are expanded to verified members. Historical defaults, quality differences and
+negative results remain in the originals and are not promoted to current acceptance.
