@@ -12,6 +12,10 @@
     {
       "manifest_url": "https://raw.githubusercontent.com/vLLM-HUST/vllm-hust-benchmark/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/manifest.json",
       "manifest_sha256": "24be62c23992f6ee4abbfef11973aa6730b57f62942489f7af38c1bdad22c17f"
+    },
+    {
+      "manifest_url": "https://raw.githubusercontent.com/vLLM-HUST/vllm-hust-benchmark/b3d2ed2692b5575b5ae77b93fc82e32c9119be8e/archive/mod-targeted-20261023/vspec-mixed/manifest.json",
+      "manifest_sha256": "e9c39cf3472af7eef71864d6665a631a7a71fab80f91c16b0643bde7ba8b2a1b"
     }
   ],
   "migrated_paths": [
@@ -334,5 +338,23 @@
     "benchmark_results/target_baseline_full_async_b8_n8_max32.json",
     "benchmark_results/target_baseline_full_decode_async_b8_n8_max32.json",
     "docs/gsm8k_b128_recovery_and_arc_easy_20260913.md"
-  ]
+  ],
+  "document_projections": {
+    "docs/draft_latest_stack_performance_recovery_20260904.md": {
+      "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/b3d2ed2692b5575b5ae77b93fc82e32c9119be8e/archive/mod-targeted-20261023/vspec-mixed/snapshot/docs/draft_latest_stack_performance_recovery_20260904.md",
+      "sha256": "e13697eeb2c8a674c19e81036f5e7f09b4e660623fcf1bfd882ab37df1bc7c49"
+    },
+    "docs/latest_stack_gsm8k_graph_performance_20260904.md": {
+      "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/b3d2ed2692b5575b5ae77b93fc82e32c9119be8e/archive/mod-targeted-20261023/vspec-mixed/snapshot/docs/latest_stack_gsm8k_graph_performance_20260904.md",
+      "sha256": "96c8d2b6a4a86b3058151a483f0d0598748a16196bc6d3dfcbb4ce49779119d7"
+    },
+    "docs/latest_stack_validation_20260903.md": {
+      "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/b3d2ed2692b5575b5ae77b93fc82e32c9119be8e/archive/mod-targeted-20261023/vspec-mixed/snapshot/docs/latest_stack_validation_20260903.md",
+      "sha256": "69a0b3640e8d67fc0acb33c739076aa79167a6fd91693a0a06d7e8f7ca33aab2"
+    },
+    "docs/migration_status.md": {
+      "url": "https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/b3d2ed2692b5575b5ae77b93fc82e32c9119be8e/archive/mod-targeted-20261023/vspec-mixed/snapshot/docs/migration_status.md",
+      "sha256": "88f8b2e65b3a9f92c076595206da8ebfe75682bc715b0139de3d30e9fd70b191"
+    }
+  }
 }
