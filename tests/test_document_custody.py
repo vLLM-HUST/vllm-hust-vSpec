@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_document_projections_link_frozen_benchmark_originals():
     config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
     projections = config["document_projections"]
-    assert len(projections) == 7
+    assert len(projections) == 9
     for relative, binding in projections.items():
         source = (ROOT / relative).read_bytes()
         assert binding["url"].startswith("https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/")
@@ -34,7 +34,7 @@ def test_legacy_data_links_bind_downloaded_raw_members():
     originals = Path(os.environ["VLLM_HUST_BENCHMARK_ORIGINALS"])
     config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
     documents = config["document_data_links"]
-    assert len(documents) == 3
+    assert len(documents) == 5
     for relative, rows in documents.items():
         source = (ROOT / relative).read_text()
         assert rows

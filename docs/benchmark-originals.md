@@ -27,3 +27,5 @@ to Git. Fixed benchmark originals and unchanged source Git history preserve reco
 Current report entry points link each referenced raw result to the existing fixed benchmark capsules;
 brace expressions are expanded to verified members. Historical defaults, quality differences and
 negative results remain in the originals and are not promoted to current acceptance.
+
+[vspec-adaptive-narratives](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/5eeccc2d69b2c4a634e273a9f926584c8d252cf7/archive/mod-targeted-20261023/vspec-adaptive-narratives/manifest.json) — Adaptive NPU and dynamic-gamma historical reports plus LICENSE; direct JSON/log links are checksum-bound. Quality regressions and diagnostic limits remain unchanged.
