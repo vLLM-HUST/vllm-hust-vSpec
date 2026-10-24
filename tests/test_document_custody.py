@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_document_projections_link_frozen_benchmark_originals():
     config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
     projections = config["document_projections"]
-    assert len(projections) == 9
+    assert len(projections) == 15
     for relative, binding in projections.items():
         source = (ROOT / relative).read_bytes()
         assert binding["url"].startswith("https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/")
@@ -34,7 +34,7 @@ def test_legacy_data_links_bind_downloaded_raw_members():
     originals = Path(os.environ["VLLM_HUST_BENCHMARK_ORIGINALS"])
     config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
     documents = config["document_data_links"]
-    assert len(documents) == 5
+    assert len(documents) == 10
     for relative, rows in documents.items():
         source = (ROOT / relative).read_text()
         assert rows
@@ -48,3 +48,31 @@ def test_legacy_data_links_bind_downloaded_raw_members():
             assert (
                 hashlib.sha256((originals / row["path"]).read_bytes()).hexdigest() == row["sha256"]
             )
+
+
+def test_reference_audit_preserves_unavailable_paths_and_scope():
+    originals = Path(os.environ["VLLM_HUST_BENCHMARK_ORIGINALS"])
+    config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
+    audit = config["document_reference_audit"]
+    assert audit["scope_manifest_urls"] == [c["manifest_url"] for c in config["capsules"][:-1]]
+    assert len(audit["scope_manifest_urls"]) == 6
+    assert len(audit["documents"]) == 6
+    assert sum(len(rows) for rows in audit["documents"].values()) == 23
+    output_examples = []
+    for relative, rows in audit["documents"].items():
+        assert relative in config["document_projections"]
+        source = (ROOT / relative).read_text()
+        linked = {r["path"] for r in config["document_data_links"].get(relative, [])}
+        assert len({row["path"] for row in rows}) == len(rows)
+        for row in rows:
+            assert row["path"] in source
+            assert row["path"] not in linked
+            assert "{" not in row["path"] and "}" not in row["path"]
+            if row["status"] == "historical-output-example":
+                output_examples.append(row["path"])
+            else:
+                assert row["status"] == "not-found-in-pinned-capsules"
+                if row["path"].startswith("benchmark_results/"):
+                    assert not (originals / row["path"]).exists()
+    assert output_examples == ["benchmark_results/draft_b16_recovery_20260914/resume_n50"]
+    assert "## 256K 正确性" in (ROOT / "docs/qwen35_frontier_mtp2.md").read_text()

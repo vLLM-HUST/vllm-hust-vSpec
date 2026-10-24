@@ -1,67 +1,53 @@
 # Qwen3.5-35B-A3B EAGLE3 Dynamic Gamma C1-C16
 
-## Test setup
+本页为历史证据导航。完整配置、测量、实现说明、复现命令、失败和负收益已原样保存在
+[benchmark 历史原文](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/9e01d8b6870dcbefd474b1102ef7f01e2a662ec9/archive/mod-targeted-20261023/vspec-b16-frontier/snapshot/docs/qwen35_eagle3_dynamic_gamma_c1_c16_report.md)。旧文中的“当前”“未提交”和优化计划仅描述当时状态，
+不代表现在的默认配置、运行状态或补测授权。迁移不新增性能或正确性验收结论。
 
-- Target: `/workspace/models/Qwen3.5-35B-A3B`
-- EAGLE3: `/workspace/models/Qwen3.5-35B-A3B-Eagle3-Specforge`
-- Dataset: GSM8K materialized benchmark set
-- Requests: 64
-- Output length: 256
-- Tensor parallelism: TP2
-- Execution: graph (`FULL_AND_PIECEWISE`), asynchronous scheduling
-- Dynamic gamma candidates: 1-6
-- Refill: cohort-boundary admission, with no fixed refill size or hold count
-- Baseline: the fixed target-only C1-C16 results from `20260929-c1-c16`; it was not rerun
+## 可核验原始数据
 
-## Results
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c1.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c1.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c10.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c10.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c11.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c11.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c12.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c12.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c13.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c13.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c14.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c14.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c15.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c15.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c16.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c16.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c2.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c2.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c3.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c3.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c4.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c4.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c5.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c5.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c6.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c6.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c7.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c7.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c8.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c8.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c9.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/c9.json)
+- [benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/summary.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/summary.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c1.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c1.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c10.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c10.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c11.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c11.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c12.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c12.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c13.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c13.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c14.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c14.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c15.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c15.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c16.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c16.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c2.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c2.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c3.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c3.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c4.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c4.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c5.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c5.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c6.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c6.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c7.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c7.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c8.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c8.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c9.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/c9.json)
+- [benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/summary.json](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/aa041953616fa170014a0c7f43fb06bf1c59b846/archive/mod-targeted-20261023/vspec-regression/snapshot/benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/summary.json)
 
-| Concurrency | Target-only (tok/s) | EAGLE3 dynamic (tok/s) | Speedup | Mean TPOT (ms) | Acceptance length |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 58.45 | 84.10 | 1.439x | 9.99 | 3.56 |
-| 2 | 99.17 | 133.75 | 1.349x | 10.99 | 3.85 |
-| 3 | 133.77 | 198.71 | 1.485x | 11.02 | 3.78 |
-| 4 | 185.47 | 269.16 | 1.451x | 11.18 | 3.71 |
-| 5 | 208.23 | 298.22 | 1.432x | 11.87 | 3.59 |
-| 6 | 244.50 | 344.80 | 1.410x | 12.38 | 3.53 |
-| 7 | 268.51 | 375.27 | 1.398x | 12.58 | 3.79 |
-| 8 | 329.73 | 441.92 | 1.340x | 12.82 | 3.73 |
-| 9 | 319.05 | 478.87 | 1.501x | 12.94 | 3.74 |
-| 10 | 351.74 | 474.71 | 1.350x | 13.68 | 3.74 |
-| 11 | 409.08 | 531.47 | 1.299x | 14.03 | 3.66 |
-| 12 | 416.15 | 524.17 | 1.260x | 14.40 | 3.64 |
-| 13 | 472.43 | 593.05 | 1.255x | 14.85 | 3.68 |
-| 14 | 431.25 | 617.36 | 1.432x | 14.98 | 3.72 |
-| 15 | 473.71 | 587.14 | 1.239x | 15.68 | 3.59 |
-| 16 | 554.15 | 717.98 | 1.296x | 15.34 | 3.73 |
+## 引用可用性与边界
 
-All tested concurrency points exceed the 1.2x throughput requirement. The
-minimum is 1.239x at C15; the maximum is 1.501x at C9.
+以下仅说明本次已固定的六份 vSpec capsule 清单的覆盖范围，不是全组织永久丢失判定。
+没有用相邻运行、摘要或新实验补成原件。
 
-## Controller behavior
+- `benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated-server.log` — 固定清单内未匹配，原件不可在本集合回验。
 
-The refill controller no longer waits for a fixed running-request threshold.
-It preserves each active decode cohort and admits queued requests when that
-cohort drains. This avoids mixing prefill work into a recurrent EAGLE3 decode
-cohort and avoids repeated graph-width and GDN-state transitions. The initial
-cohort is released by an arrival quiet-period/max-wait rule rather than a fixed
-batch size.
+控制器候选范围不等于该轮实际遍历全部候选；吞吐准入不等于 TTFT/SLO goodput 通过。Graph 与 eager、质量约束仍按原文分别读取。
 
-Gamma remains independently adaptive over 1-6. Across this C16-to-C1 run, the
-controller selected gamma 3/4/5/6 and performed 51 gamma switches. The final
-batch-bucket choices were gamma 4 for B1/B2/B4, gamma 3 for B8, and gamma 5 for
-B16. Candidate gamma 1-6 were all launched during online exploration.
-
-The tradeoff is increased queueing/TTFT under burst load because a new request
-does not enter a partially drained cohort. The acceptance criterion in this
-test is output throughput relative to target-only, not TTFT or SLO goodput.
-
-## Artifacts
-
-- EAGLE3 results: `benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated/`
-- Target-only baseline: `benchmark_results/qwen35_frontier_mtp2_gsm8k/20260929-c1-c16/baseline/`
-- Server log: `benchmark_results/qwen35_eagle3_gsm8k/20260930-adaptive-cohort-gated-server.log`
-- Runtime config: `configs/qwen35-35b-a3b-eagle3-adaptive.toml`
-
-Evidence-path note: historical `benchmark_results/` inputs are preserved in the
-[fixed benchmark originals](benchmark-originals.md). Download the verified external
-snapshot before reading these paths; missing local datasets are not reconstructed by migration.
+下载与 SHA 核验见[原件说明](benchmark-originals.md)；精确核查清单及未匹配路径见 [BENCHMARK_ORIGINALS.json](../BENCHMARK_ORIGINALS.json)。
