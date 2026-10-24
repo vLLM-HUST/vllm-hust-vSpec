@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_document_projections_link_frozen_benchmark_originals():
     config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
     projections = config["document_projections"]
-    assert len(projections) == 15
+    assert len(projections) == 18
     for relative, binding in projections.items():
         source = (ROOT / relative).read_bytes()
         assert binding["url"].startswith("https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/")
@@ -34,7 +35,7 @@ def test_legacy_data_links_bind_downloaded_raw_members():
     originals = Path(os.environ["VLLM_HUST_BENCHMARK_ORIGINALS"])
     config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
     documents = config["document_data_links"]
-    assert len(documents) == 10
+    assert len(documents) == 12
     for relative, rows in documents.items():
         source = (ROOT / relative).read_text()
         assert rows
@@ -54,7 +55,7 @@ def test_reference_audit_preserves_unavailable_paths_and_scope():
     originals = Path(os.environ["VLLM_HUST_BENCHMARK_ORIGINALS"])
     config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
     audit = config["document_reference_audit"]
-    assert audit["scope_manifest_urls"] == [c["manifest_url"] for c in config["capsules"][:-1]]
+    assert audit["scope_manifest_urls"] == [c["manifest_url"] for c in config["capsules"][:6]]
     assert len(audit["scope_manifest_urls"]) == 6
     assert len(audit["documents"]) == 6
     assert sum(len(rows) for rows in audit["documents"].values()) == 23
@@ -76,3 +77,27 @@ def test_reference_audit_preserves_unavailable_paths_and_scope():
                     assert not (originals / row["path"]).exists()
     assert output_examples == ["benchmark_results/draft_b16_recovery_20260914/resume_n50"]
     assert "## 256K 正确性" in (ROOT / "docs/qwen35_frontier_mtp2.md").read_text()
+
+
+def test_legacy_followup_keeps_partial_original_coverage_explicit():
+    originals = Path(os.environ["VLLM_HUST_BENCHMARK_ORIGINALS"])
+    config = json.loads((ROOT / "BENCHMARK_ORIGINALS.json").read_text())
+    audit = config["legacy_followup_reference_audit"]
+    assert audit["scope_manifest_urls"] == [c["manifest_url"] for c in config["capsules"][:7]]
+    assert len(audit["documents"]) == 2
+    assert sum(len(rows) for rows in audit["documents"].values()) == 12
+    for relative, rows in audit["documents"].items():
+        text = (ROOT / relative).read_text()
+        for path in rows:
+            assert path in text
+            assert not (originals / path).exists()
+    binding = audit["school_summary"]
+    assert binding["url"].startswith(
+        "https://raw.githubusercontent.com/vLLM-HUST/vllm-hust-benchmark/"
+        "9ab6413d1ea47587953f037d42fea568f4a5a201/"
+    )
+    assert binding["url"] in (ROOT / "docs/school028_local_argmax.md").read_text()
+    with urllib.request.urlopen(binding["url"], timeout=60) as response:
+        raw = response.read()
+    assert len(raw) == binding["bytes"]
+    assert hashlib.sha256(raw).hexdigest() == binding["sha256"]
