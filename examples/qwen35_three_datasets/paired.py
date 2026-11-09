@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -159,9 +160,9 @@ def aligned_configs(
         cfg.update(model=model, host="127.0.0.1", port=port, served_model_name=alias)
         cfg["speculative_config"]["num_speculative_tokens"] = capacity
         worker = (
-            native_worker
+            native_worker or "native_static_worker.NativeEvaluationWorker"
             if arm == "native"
-            else ("vllm_hust_vspec._vendor.runtime.campaign_candidate_worker.CandidateWorker")
+            else "dynamic_worker.DynamicEvaluationWorker"
         )
         if worker:
             cfg["worker_extension_cls"] = worker
@@ -188,6 +189,8 @@ def prepare(args: argparse.Namespace) -> None:
     dynamic_env_file = existing_path(args.dynamic_env, "dynamic environment/proof map")
     common_env = read_env(common_env_file, dynamic=False)
     dynamic_env = read_env(dynamic_env_file, dynamic=True)
+    if set(common_env) & set(dynamic_env):
+        raise ValueError("Dynamic environment must not override a common setting")
     paths = {
         key: str(existing_path(getattr(args, key), key))
         for key in (
@@ -204,6 +207,22 @@ def prepare(args: argparse.Namespace) -> None:
     if args.port < 1 or args.port > 65535 or not args.served_model:
         raise ValueError("A valid loopback port and served model name are required")
     pair = aligned_configs(common, str(model), args.served_model, args.port, args.native_worker)
+    for arm in ("native", "dynamic"):
+        directory = Path(paths[f"{arm}_backend_package"]) / "vllm_hust_vspec" / "evaluation"
+        for name in (
+            "evaluation_endpoint.py",
+            "evaluation_worker_common.py",
+            "dynamic_worker.py",
+        ):
+            if not (directory / name).is_file():
+                raise FileNotFoundError(f"Installed evaluation asset missing: {directory / name}")
+        paths[f"{arm}_evaluation_dir"] = str(directory)
+    native_static_dir = (
+        Path(paths["native_backend_package"]) / "vllm_hust_vspec" / "evaluation_static"
+    )
+    if not (native_static_dir / "native_static_worker.py").is_file():
+        raise FileNotFoundError(f"Installed native static worker missing: {native_static_dir}")
+    paths["native_evaluation_static_dir"] = str(native_static_dir)
     root.mkdir(parents=True, mode=0o700)
     config_dir = root / "server-config"
     config_dir.mkdir(mode=0o700)
@@ -228,7 +247,8 @@ def prepare(args: argparse.Namespace) -> None:
             "speculative_config.num_speculative_tokens",
             "worker_extension_cls",
         ],
-        "native_worker": args.native_worker,
+        "native_worker": pair["native"]["worker_extension_cls"],
+        "evaluation_token": secrets.token_urlsafe(48),
         "runtime_worker_observation_required": True,
     }
     write_new(root / "setup.json", setup)
@@ -253,8 +273,11 @@ def _load_setup(path: Path) -> dict[str, Any]:
 
 
 def _client_env(source: str | None) -> dict[str, str]:
-    env = dict(os.environ)
-    env.pop("PYTHONPATH", None)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("VSPEC_", "HUST_", "VLLM_")) and key != "PYTHONPATH"
+    }
     if source:
         env["PYTHONPATH"] = str(existing_path(source, "client source directory"))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -273,12 +296,29 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
     if arm == "dynamic":
         env.update(setup["dynamic_env"])
     env.update(
-        VLLM_PLUGINS="ascend" if arm == "native" else "ascend,vspec",
+        VLLM_PLUGINS="ascend,vspec_eval" if arm == "native" else "ascend,vspec,vspec_eval",
         HUST_VSPEC_PRIVATE_COMPILER_ROOT=str(run_dir),
         PYTHONDONTWRITEBYTECODE="1",
         PYTHONUNBUFFERED="1",
         ASCEND_RT_VISIBLE_DEVICES="0,1",
+        VSPEC_EVAL_ARM=arm,
+        VSPEC_EVAL_TOKEN=setup["evaluation_token"],
+        PYTHONPATH=(
+            os.pathsep.join(
+                (
+                    setup["paths"]["native_evaluation_static_dir"],
+                    setup["paths"]["native_evaluation_dir"],
+                )
+            )
+            if arm == "native"
+            else setup["paths"]["dynamic_evaluation_dir"]
+        ),
     )
+    if (
+        env.get("HUST_VSPEC_CAPTURE_SAFE_STATIC") != "1"
+        or env.get("HUST_VSPEC_HOT_STATIC_SHAPES") != "14,42,70,98,126"
+    ):
+        raise ValueError("Matched static compiler settings are required in common-env.json")
     ipc = run_dir / "ipc"
     ipc.mkdir(parents=True, exist_ok=True, mode=0o700)
     env.update(TMPDIR=str(ipc), TMP=str(ipc), TEMP=str(ipc), VLLM_RPC_BASE_PATH=str(ipc))
@@ -381,6 +421,60 @@ def _wait_ready(process: subprocess.Popen[Any], port: int, alias: str, timeout: 
             pass
         time.sleep(2)
     raise TimeoutError("Server readiness deadline exceeded; generation was not timed")
+
+
+def _eval_request(setup: dict[str, Any], route: str, *, post: bool = False) -> Any:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{setup['port']}/{route}",
+        data=b"" if post else None,
+        method="POST" if post else "GET",
+        headers={"Authorization": "Bearer " + setup["evaluation_token"]},
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=180) as response:
+        return json.load(response)
+
+
+def _validate_runtime_metadata(arm: str, response: Any) -> dict[str, Any]:
+    rows = response.get("results") if isinstance(response, dict) else None
+    if not isinstance(rows, list) or len(rows) != 2:
+        raise RuntimeError("Evaluation metadata must cover both worker ranks")
+    ranks = set()
+    common_keys = (
+        "dtype",
+        "quantization",
+        "max_model_len",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "explicit_kv_bytes",
+        "prefix_cache",
+        "mamba_cache_mode",
+        "model_text_type",
+    )
+    for row in rows:
+        if row["arm"] != arm or row["configured_speculative_capacity"] != (
+            4 if arm == "native" else 8
+        ):
+            raise RuntimeError("Evaluation worker arm or capacity mismatch")
+        if row["vspec_module_loaded"] != (arm == "dynamic"):
+            raise RuntimeError("Evaluation worker plugin-loading state mismatch")
+        if row["quantization"] is not None or "bfloat16" not in row["dtype"]:
+            raise RuntimeError("Evaluation worker is not pure BF16")
+        if row["explicit_kv_bytes"] <= 0 or not row["prefix_cache"]:
+            raise RuntimeError("Evaluation worker KV/prefix-cache configuration differs")
+        if not row["compiler"]["actual_enable_static_kernel"]:
+            raise RuntimeError("Static compiler was not enabled in a worker")
+        state = row["static"]
+        install = state["static_install"] if arm == "native" else state["static"]
+        if not install["process_isolation"] or not install["actual_installed_device_binary_sha256"]:
+            raise RuntimeError("Installed static operator proof is incomplete")
+        ranks.add(install["rank"])
+    if ranks != {0, 1}:
+        raise RuntimeError("Evaluation metadata did not cover both worker ranks")
+    common = {key: rows[0][key] for key in common_keys}
+    if any({key: row[key] for key in common_keys} != common for row in rows[1:]):
+        raise RuntimeError("Worker ranks disagree on shared runtime configuration")
+    return common
 
 
 def _stop_owned_server(process: subprocess.Popen[Any]) -> None:
@@ -493,7 +587,7 @@ def run(args: argparse.Namespace) -> None:
             "plugin_enabled_for_server": arm == "dynamic",
             "qwen35_mtp_compat_enabled_for_both_arms": True,
             "no_saved_kv_or_answers_preloaded": True,
-            "actual_worker_metadata_not_verified_by_this_example": True,
+            "evaluation_metadata_and_cache_reset_required_before_timing": True,
             "physical_npus": physical_npus,
         },
     )
@@ -511,6 +605,16 @@ def run(args: argparse.Namespace) -> None:
             startup_seconds = _wait_ready(
                 process, setup["port"], setup["served_model"], args.startup_timeout
             )
+            before = _eval_request(setup, "vspec-evaluation-metadata")
+            runtime_common = _validate_runtime_metadata(arm, before)
+            write_new(run_dir / "worker-before.json", before)
+            reset = _eval_request(setup, "vspec-evaluation-reset-caches", post=True)
+            if not all(
+                reset.get(key) is True
+                for key in ("prefix_cache_cleared", "encoder_cache_cleared", "mm_cache_cleared")
+            ):
+                raise RuntimeError("Fresh-server cache reset was not fully acknowledged")
+            write_new(run_dir / "cache-reset.json", reset)
             started = time.monotonic()
             with (run_dir / "client.log").open("x", encoding="utf-8") as client_log:
                 result = subprocess.run(
@@ -522,6 +626,14 @@ def run(args: argparse.Namespace) -> None:
                 )
             wall = time.monotonic() - started
             usage = _record_usage(dataset, solver_out, case_ids)
+            after = _eval_request(setup, "vspec-evaluation-metadata")
+            if _validate_runtime_metadata(arm, after) != runtime_common:
+                raise RuntimeError("Shared runtime configuration changed during the run")
+            write_new(run_dir / "worker-after.json", after)
+            operator = _eval_request(setup, "vspec-evaluation-operator-proof")
+            if not isinstance(operator.get("results"), list) or len(operator["results"]) != 2:
+                raise RuntimeError("Operator proof did not cover both worker ranks")
+            write_new(run_dir / "operator-proof.json", operator)
             receipt = {
                 "schema_version": 1,
                 "dataset": dataset,
@@ -537,6 +649,11 @@ def run(args: argparse.Namespace) -> None:
                 "client_exit_code": result.returncode,
                 "native_worker": setup["native_worker"],
                 "physical_npus": physical_npus,
+                "worker_runtime_common": runtime_common,
+                "worker_before_sha256": sha256(run_dir / "worker-before.json"),
+                "worker_after_sha256": sha256(run_dir / "worker-after.json"),
+                "cache_reset_sha256": sha256(run_dir / "cache-reset.json"),
+                "operator_proof_sha256": sha256(run_dir / "operator-proof.json"),
                 "solver_output": str(solver_out),
                 "timing_includes_client_overhead": True,
                 "natural_output_lengths_may_differ_not_fixed_work": True,
@@ -685,6 +802,14 @@ def compare(args: argparse.Namespace) -> None:
             or score_result["selection_sha256"] != solver["selection_sha256"]
         ):
             raise ValueError("Score receipt differs from solver scope")
+        for name, key in (
+            ("worker-before.json", "worker_before_sha256"),
+            ("worker-after.json", "worker_after_sha256"),
+            ("cache-reset.json", "cache_reset_sha256"),
+            ("operator-proof.json", "operator_proof_sha256"),
+        ):
+            if solver.get(key) != sha256(directory / name):
+                raise ValueError(f"Missing or altered {arm} runtime proof: {name}")
         runs[arm] = (solver, score_result)
     native, native_score = runs["native"]
     dynamic, dynamic_score = runs["dynamic"]
@@ -695,6 +820,7 @@ def compare(args: argparse.Namespace) -> None:
         "selection_sha256",
         "common_config_sha256",
         "physical_npus",
+        "worker_runtime_common",
     ):
         if native[key] != dynamic[key]:
             raise ValueError(f"Paired runs disagree on {key}")

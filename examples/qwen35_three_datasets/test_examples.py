@@ -41,7 +41,7 @@ class PublicExampleTests(unittest.TestCase):
         self.assertEqual(pair["native"]["speculative_config"]["num_speculative_tokens"], 4)
         self.assertEqual(pair["dynamic"]["speculative_config"]["num_speculative_tokens"], 8)
         self.assertEqual(pair["native"]["worker_extension_cls"], "native.Observer")
-        self.assertIn("CandidateWorker", pair["dynamic"]["worker_extension_cls"])
+        self.assertIn("DynamicEvaluationWorker", pair["dynamic"]["worker_extension_cls"])
         for arm in pair:
             pair[arm].pop("worker_extension_cls")
             pair[arm]["speculative_config"].pop("num_speculative_tokens")
@@ -119,11 +119,29 @@ class PublicExampleTests(unittest.TestCase):
             backend = root / "backend"
             model.mkdir()
             backend.mkdir()
+            evaluation = backend / "vllm_hust_vspec" / "evaluation"
+            evaluation.mkdir(parents=True)
+            for name in (
+                "evaluation_endpoint.py",
+                "evaluation_worker_common.py",
+                "dynamic_worker.py",
+            ):
+                (evaluation / name).touch()
+            static = backend / "vllm_hust_vspec" / "evaluation_static"
+            static.mkdir()
+            (static / "native_static_worker.py").touch()
             common = root / "common.json"
             common_env = root / "common-env.json"
             dynamic_env = root / "dynamic-env.json"
             dump(common, common_config())
-            dump(common_env, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+            dump(
+                common_env,
+                {
+                    "ASCEND_RT_VISIBLE_DEVICES": "0,1",
+                    "HUST_VSPEC_CAPTURE_SAFE_STATIC": "1",
+                    "HUST_VSPEC_HOT_STATIC_SHAPES": "14,42,70,98,126",
+                },
+            )
             dump(dynamic_env, {})
             work = root / "private-run"
             setup_args = Namespace(
@@ -170,6 +188,15 @@ class PublicExampleTests(unittest.TestCase):
             root = Path(temp)
             for arm in ("native", "dynamic"):
                 directory = root / arm
+                hashes = {}
+                for name, key in (
+                    ("worker-before.json", "worker_before_sha256"),
+                    ("worker-after.json", "worker_after_sha256"),
+                    ("cache-reset.json", "cache_reset_sha256"),
+                    ("operator-proof.json", "operator_proof_sha256"),
+                ):
+                    dump(directory / name, {"arm": arm})
+                    hashes[key] = paired.sha256(directory / name)
                 dump(
                     directory / "solver-receipt.json",
                     {
@@ -180,10 +207,12 @@ class PublicExampleTests(unittest.TestCase):
                         "selection_sha256": "selection",
                         "common_config_sha256": "common",
                         "physical_npus": [0, 1],
+                        "worker_runtime_common": {"dtype": "torch.bfloat16"},
                         "client_exit_code": 0,
                         "transport_or_response_failures": 0,
                         "output_tokens_per_second": 100,
                         "native_worker": None,
+                        **hashes,
                     },
                 )
                 dump(
