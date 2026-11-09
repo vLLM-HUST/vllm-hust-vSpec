@@ -19,10 +19,13 @@ def validate(root: Path, backend_package: Path) -> None:
     if spec is None or spec.origin is None or not Path(spec.origin).resolve().is_relative_to(backend_package):
         raise RuntimeError('Active vllm_ascend is not the explicitly selected new backend')
     paths = [root / 'micro.py', root / 'kernel.cpp', root / 'adapter.cpp', root / 'CMakeLists.txt',
+             root / 'native-kernel/causal_conv1d.h',
              root / 'build-r1/lib/libvspec_g6_tail_v2_adapter.so',
              root / 'build-r1/lib/libvspec_g6_tail_v2_kernel.so']
     if not all(p.is_file() for p in paths):
         raise FileNotFoundError('Built component or its validation source is missing')
+    paths.extend(sorted((root / 'native-kernel').rglob('*.h')))
+    hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     output = root / 'runs'
     if output.exists():
         raise FileExistsError('Component test output already exists; use a fresh build directory')
@@ -70,8 +73,9 @@ def validate(root: Path, backend_package: Path) -> None:
         for filename, digest in rank['sha256'].items():
             if hashlib.sha256(Path(filename).read_bytes()).hexdigest() != digest:
                 raise RuntimeError('A convolution test input changed during validation')
-    proof.update(passed=True, exact=True, ranks=ranks,
-                 sha256={str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},
+    if any(hashlib.sha256(Path(filename).read_bytes()).hexdigest() != digest for filename, digest in hashes.items()):
+        raise RuntimeError('A convolution source changed during validation')
+    proof.update(passed=True, exact=True, ranks=ranks, sha256=hashes,
                  component_only_NOT_model_quality_or_end_to_end_speed_admission=True)
     with name.with_suffix('.primitive-audit.json').open('x') as stream:
         json.dump(proof, stream, indent=2)

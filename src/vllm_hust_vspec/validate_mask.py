@@ -34,6 +34,8 @@ def validate(backend: Path, destination: Path) -> None:
     destination.mkdir(mode=0o700, parents=True)
     for name in ('micro.py', 'kernel.py'):
         shutil.copy2(source / name, destination / name)
+    inputs = (destination / 'micro.py', destination / 'kernel.py', old)
+    hashes = {str(path): sha(path) for path in inputs}
     env = dict(os.environ)
     for key in ('XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'VLLM_CACHE_ROOT',
                 'TRITON_CACHE_DIR', 'TORCHINDUCTOR_CACHE_DIR', 'TORCH_HOME',
@@ -74,8 +76,9 @@ def validate(backend: Path, destination: Path) -> None:
         for name, digest in rank['sha256'].items():
             if sha(Path(name)) != digest:
                 raise RuntimeError('A component input changed during validation')
-    proof.update(passed=True, exact=True, ranks=ranks,
-                 sha256={str(p): sha(p) for p in (destination / 'micro.py', destination / 'kernel.py', old)},
+    if any(sha(Path(name)) != digest for name, digest in hashes.items()):
+        raise RuntimeError('A component input changed during validation')
+    proof.update(passed=True, exact=True, ranks=ranks, sha256=hashes,
                  component_only_NOT_model_speed_quality_or_goal_admission=True,
                  only_post_native_top8_consumer_no_router_change=True)
     with (destination / 'primitive-audit.json').open('x') as stream:
