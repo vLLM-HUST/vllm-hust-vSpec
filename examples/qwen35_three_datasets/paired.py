@@ -18,6 +18,7 @@ import signal
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from collections import Counter
 from datetime import UTC, datetime
@@ -176,6 +177,16 @@ def existing_path(value: str, kind: str) -> Path:
     return path
 
 
+def existing_executable(value: str, kind: str) -> Path:
+    # Keep the venv/bin/python pathname: resolving its symlink selects the base
+    # interpreter and silently drops the virtual environment's site-packages.
+    existing_path(value, kind)
+    path = Path(os.path.abspath(value))
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError(f"{kind} must be an executable file")
+    return path
+
+
 def _active_evaluation_dir(python: str) -> Path:
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     command = [
@@ -284,20 +295,20 @@ def prepare(args: argparse.Namespace) -> None:
     if set(common_env) & set(dynamic_env):
         raise ValueError("Dynamic environment must not override a common setting")
     paths = {
-        key: str(existing_path(getattr(args, key), key))
-        for key in (
-            "native_python",
-            "dynamic_python",
-            "client_python",
-            "native_backend_package",
-            "dynamic_backend_package",
-            "native_evaluation_dir",
-            "dynamic_evaluation_dir",
-        )
+        key: str(existing_executable(getattr(args, key), key))
+        for key in ("native_python", "dynamic_python", "client_python")
     }
-    for key in ("native_python", "dynamic_python", "client_python"):
-        if not os.access(paths[key], os.X_OK):
-            raise ValueError(f"{key} is not executable")
+    paths.update(
+        {
+            key: str(existing_path(getattr(args, key), key))
+            for key in (
+                "native_backend_package",
+                "dynamic_backend_package",
+                "native_evaluation_dir",
+                "dynamic_evaluation_dir",
+            )
+        }
+    )
     for arm in ("native", "dynamic"):
         backend_init = Path(paths[f"{arm}_backend_package"]) / "vllm_ascend" / "__init__.py"
         if not backend_init.is_file():
@@ -490,12 +501,54 @@ def _read_ids(dataset: str, plan: Path, selection: Path | None) -> tuple[list[st
     return ids, selection_hash
 
 
+def _read_warmup_ids(
+    dataset: str, plan: Path, selection: Path | None, timed_ids: list[str]
+) -> tuple[list[str], str | None]:
+    if selection is None:
+        return [], None
+    if selection.is_relative_to(REPO_ROOT):
+        raise ValueError("Warmup selection must remain outside the source repository")
+    manifest = read_json(selection)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("dataset") != dataset
+        or manifest.get("source_plan_contract_sha256") != sha256(plan / "contract.json")
+    ):
+        raise ValueError("Warmup selection does not belong to this frozen client plan")
+    ids = manifest.get("case_ids")
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or not all(isinstance(case_id, str) and case_id for case_id in ids)
+        or len(ids) != len(set(ids))
+        or type(manifest.get("count")) is not int
+        or manifest["count"] != len(ids)
+        or manifest.get("case_ids_sha256") != canonical_sha256(ids)
+    ):
+        raise ValueError("Warmup case IDs failed integrity check")
+    if dataset == "mmlu-pro":
+        if ids != timed_ids[: len(ids)]:
+            raise ValueError("MMLU-Pro warmup must use the first N frozen timed cases")
+    else:
+        task_ids = {row["case_id"] for row in read_json(plan / "tasks.json")}
+        if not set(ids) <= task_ids:
+            raise ValueError("Warmup case IDs must belong to the frozen client plan")
+    return ids, sha256(selection)
+
+
 def _client_command(
-    setup: dict[str, Any], dataset: str, plan: Path, output: Path, case_ids: list[str]
+    setup: dict[str, Any],
+    dataset: str,
+    plan: Path,
+    output: Path,
+    case_ids: list[str],
+    *,
+    warmup: bool = False,
 ) -> list[str]:
     command = [setup["paths"]["client_python"], "-B", "-m", MODULES[dataset]]
     if dataset == "mmlu-pro":
-        return command + [
+        result = command + [
             "mmlu-pro",
             "run",
             "--plan",
@@ -509,6 +562,7 @@ def _client_command(
             "--concurrency",
             "16",
         ]
+        return result + (["--limit", str(len(case_ids))] if warmup else [])
     return (
         command
         + ["run", "--plan", str(plan), "--output", str(output)]
@@ -727,6 +781,8 @@ def _stop_owned_server(process: subprocess.Popen[Any]) -> None:
 def _record_usage(dataset: str, output: Path, expected_ids: list[str]) -> dict[str, Any]:
     files = sorted((output / "requests").glob("*.json"))
     records = [read_json(path) for path in files]
+    if any(path.stem != row.get("case_id") for path, row in zip(files, records, strict=True)):
+        raise RuntimeError("Client request filename does not match its case ID")
     if len(records) != len(expected_ids) or {row.get("case_id") for row in records} != set(
         expected_ids
     ):
@@ -758,6 +814,83 @@ def _record_usage(dataset: str, output: Path, expected_ids: list[str]) -> dict[s
     }
 
 
+def _run_untimed_warmup(
+    dataset: str,
+    run_dir: Path,
+    command: list[str],
+    case_ids: list[str],
+    client_source: str | None,
+) -> dict[str, Any]:
+    output = run_dir / "warmup"
+    if output.exists():
+        raise FileExistsError("Warmup output already exists; no answers may be reused")
+    with (run_dir / "warmup.log").open("x", encoding="utf-8") as log:
+        result = subprocess.run(
+            command,
+            env=_client_env(client_source),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    usage = _record_usage(dataset, output, case_ids)
+    receipt = {
+        "schema_version": 1,
+        "dataset": dataset,
+        "case_count": len(case_ids),
+        "case_ids_sha256": canonical_sha256(case_ids),
+        "client_exit_code": result.returncode,
+        "warmup_output": str(output),
+        "untimed": True,
+        **usage,
+    }
+    write_new(run_dir / "warmup-receipt.json", receipt)
+    if result.returncode or usage["transport_or_response_failures"]:
+        raise RuntimeError("Warmup failed; timed solver run was not started")
+    return receipt
+
+
+def _reset_caches(setup: dict[str, Any]) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    for _ in range(10):
+        try:
+            reset = _eval_request(setup, "vspec-evaluation-reset-caches", post=True)
+        except urllib.error.HTTPError as error:
+            if error.code != 409:
+                raise
+            attempts.append({"status": 409, "body": error.read().decode(errors="replace")})
+            time.sleep(0.5)
+            continue
+        if not all(
+            reset.get(key) is True
+            for key in ("prefix_cache_cleared", "encoder_cache_cleared", "mm_cache_cleared")
+        ):
+            raise RuntimeError("Pre-timing cache reset was not fully acknowledged")
+        return {**reset, "idle_retry_attempts": attempts}
+    raise RuntimeError("Idle pre-timing cache reset was not acknowledged")
+
+
+def _prepare_timing(
+    setup: dict[str, Any],
+    arm: str,
+    dataset: str,
+    run_dir: Path,
+    warmup_cmd: list[str] | None,
+    warmup_ids: list[str],
+    client_source: str | None,
+) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
+    warmup_receipt = (
+        _run_untimed_warmup(dataset, run_dir, warmup_cmd, warmup_ids, client_source)
+        if warmup_cmd is not None
+        else None
+    )
+    before = _eval_request(setup, "vspec-evaluation-metadata")
+    runtime_common = _validate_runtime_metadata(arm, before)
+    write_new(run_dir / "worker-before.json", before)
+    reset = _reset_caches(setup)
+    write_new(run_dir / "cache-reset.json", reset)
+    return before, runtime_common, warmup_receipt
+
+
 def _verify_record_hashes(run_dir: Path, receipt: dict[str, Any]) -> None:
     output = (run_dir / "solver").resolve(strict=True)
     if Path(receipt["solver_output"]).resolve(strict=True) != output:
@@ -774,6 +907,45 @@ def _verify_record_hashes(run_dir: Path, receipt: dict[str, Any]) -> None:
         raise ValueError("Timed request records changed after generation")
 
 
+def _verify_warmup_record_hashes(run_dir: Path, receipt: dict[str, Any]) -> None:
+    count = receipt.get("warmup_case_count", 0)
+    if count == 0:
+        if (
+            receipt.get("warmup_manifest_sha256") is not None
+            or receipt.get("warmup_case_ids_sha256") is not None
+            or receipt.get("warmup_receipt_sha256") is not None
+            or (run_dir / "warmup-receipt.json").exists()
+        ):
+            raise ValueError("Unreported warmup receipt exists")
+        return
+    if (
+        type(count) is not int
+        or count < 1
+        or not receipt.get("warmup_manifest_sha256")
+        or receipt.get("cache_reset_after_warmup") is not True
+    ):
+        raise ValueError("Warmup manifest or post-warmup cache reset is missing")
+    path = run_dir / "warmup-receipt.json"
+    if receipt.get("warmup_receipt_sha256") != sha256(path):
+        raise ValueError("Warmup receipt is missing or changed")
+    warmup = read_json(path)
+    output = (run_dir / "warmup").resolve(strict=True)
+    if (
+        Path(warmup["warmup_output"]).resolve(strict=True) != output
+        or output == (run_dir / "solver").resolve(strict=True)
+        or warmup.get("case_count") != count
+        or warmup.get("case_ids_sha256") != receipt.get("warmup_case_ids_sha256")
+        or warmup.get("client_exit_code") != 0
+        or warmup.get("transport_or_response_failures") != 0
+        or warmup.get("untimed") is not True
+    ):
+        raise ValueError("Warmup proof is incomplete or differs from the timed run")
+    hashes = warmup.get("record_hashes")
+    actual = {path.name: sha256(path) for path in (output / "requests").glob("*.json")}
+    if not isinstance(hashes, dict) or len(hashes) != count or actual != hashes:
+        raise ValueError("Warmup request records changed after generation")
+
+
 def run(args: argparse.Namespace) -> None:
     setup = _load_setup(existing_path(args.setup, "setup file"))
     arm, dataset = args.arm, args.dataset
@@ -787,6 +959,10 @@ def run(args: argparse.Namespace) -> None:
         and read_json(plan / "contract.json").get("tasks_sha256") != inventory_sha256
     ):
         raise ValueError("Frozen client task inventory changed")
+    warmup_selection = (
+        existing_path(args.warmup_selection, "warmup selection") if args.warmup_selection else None
+    )
+    warmup_ids, warmup_manifest_sha256 = _read_warmup_ids(dataset, plan, warmup_selection, case_ids)
     selected_tracks = None
     frontier_full_split = None
     if dataset == "frontierscience":
@@ -826,10 +1002,23 @@ def run(args: argparse.Namespace) -> None:
     ]
     solver_out = run_dir / "solver"
     client_cmd = _client_command(setup, dataset, plan, solver_out, case_ids)
+    warmup_cmd = (
+        _client_command(setup, dataset, plan, run_dir / "warmup", warmup_ids, warmup=True)
+        if warmup_ids
+        else None
+    )
     if not args.execute:
         print(
             json.dumps(
-                {"server": server_cmd, "client": client_cmd, "case_count": len(case_ids)}, indent=2
+                {
+                    "server": server_cmd,
+                    "warmup": warmup_cmd,
+                    "warmup_case_count": len(warmup_ids),
+                    "warmup_manifest_sha256": warmup_manifest_sha256,
+                    "client": client_cmd,
+                    "case_count": len(case_ids),
+                },
+                indent=2,
             )
         )
         return
@@ -843,6 +1032,7 @@ def run(args: argparse.Namespace) -> None:
         run_dir / "launch.json",
         {
             "server_command": server_cmd,
+            "warmup_command": warmup_cmd,
             "client_command": client_cmd,
             "server_config_sha256": sha256(config),
             "common_config_sha256": setup["common_config_sha256"],
@@ -850,6 +1040,9 @@ def run(args: argparse.Namespace) -> None:
             "plan_contract_sha256": sha256(plan / "contract.json"),
             "plan_inventory_sha256": inventory_sha256,
             "selection_sha256": selection_hash,
+            "warmup_manifest_sha256": warmup_manifest_sha256,
+            "warmup_case_ids_sha256": (canonical_sha256(warmup_ids) if warmup_ids else None),
+            "warmup_case_count": len(warmup_ids),
             "plugin_enabled_for_server": arm == "dynamic",
             "qwen35_mtp_compat_enabled_for_both_arms": True,
             "no_saved_kv_or_answers_preloaded": True,
@@ -871,16 +1064,9 @@ def run(args: argparse.Namespace) -> None:
             startup_seconds = _wait_ready(
                 process, setup["port"], setup["served_model"], args.startup_timeout
             )
-            before = _eval_request(setup, "vspec-evaluation-metadata")
-            runtime_common = _validate_runtime_metadata(arm, before)
-            write_new(run_dir / "worker-before.json", before)
-            reset = _eval_request(setup, "vspec-evaluation-reset-caches", post=True)
-            if not all(
-                reset.get(key) is True
-                for key in ("prefix_cache_cleared", "encoder_cache_cleared", "mm_cache_cleared")
-            ):
-                raise RuntimeError("Fresh-server cache reset was not fully acknowledged")
-            write_new(run_dir / "cache-reset.json", reset)
+            before, runtime_common, warmup_receipt = _prepare_timing(
+                setup, arm, dataset, run_dir, warmup_cmd, warmup_ids, args.client_source
+            )
             timing_started_utc = datetime.now(UTC).isoformat()
             started = time.monotonic()
             with (run_dir / "client.log").open("x", encoding="utf-8") as client_log:
@@ -911,6 +1097,13 @@ def run(args: argparse.Namespace) -> None:
                 "plan_contract_sha256": sha256(plan / "contract.json"),
                 "plan_inventory_sha256": inventory_sha256,
                 "selection_sha256": selection_hash,
+                "warmup_manifest_sha256": warmup_manifest_sha256,
+                "warmup_case_ids_sha256": (canonical_sha256(warmup_ids) if warmup_ids else None),
+                "warmup_case_count": len(warmup_ids),
+                "warmup_receipt_sha256": (
+                    sha256(run_dir / "warmup-receipt.json") if warmup_receipt else None
+                ),
+                "cache_reset_after_warmup": bool(warmup_ids),
                 "common_config_sha256": setup["common_config_sha256"],
                 "setup_sha256": sha256(root / "setup.json"),
                 "server_config_sha256": sha256(config),
@@ -971,6 +1164,7 @@ def score(args: argparse.Namespace) -> None:
     if receipt["setup_sha256"] != sha256(Path(setup["private_root"]) / "setup.json"):
         raise ValueError("Score setup differs from solver setup")
     _verify_record_hashes(run_dir, receipt)
+    _verify_warmup_record_hashes(run_dir, receipt)
     if (run_dir / "score-receipt.json").exists():
         raise FileExistsError("This solver run has already been scored")
     prefix = [setup["paths"]["client_python"], "-B", "-m", MODULES[dataset]]
@@ -1084,6 +1278,7 @@ def compare(args: argparse.Namespace) -> None:
         if solver["client_exit_code"] or solver["transport_or_response_failures"]:
             raise ValueError("Cannot compare a failed solver run")
         _verify_record_hashes(directory, solver)
+        _verify_warmup_record_hashes(directory, solver)
         if (
             score_result["dataset"] != solver["dataset"]
             or score_result["plan_inventory_sha256"] != solver["plan_inventory_sha256"]
@@ -1115,6 +1310,13 @@ def compare(args: argparse.Namespace) -> None:
         "frontier_full_split",
     ):
         if native[key] != dynamic[key]:
+            raise ValueError(f"Paired runs disagree on {key}")
+    for key in (
+        "warmup_manifest_sha256",
+        "warmup_case_ids_sha256",
+        "warmup_case_count",
+    ):
+        if native.get(key) != dynamic.get(key):
             raise ValueError(f"Paired runs disagree on {key}")
     if native_score["plan_contract_sha256"] != dynamic_score["plan_contract_sha256"]:
         raise ValueError("Scoring plans differ")
@@ -1206,6 +1408,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset", choices=tuple(MODULES), required=True)
     p.add_argument("--plan", required=True)
     p.add_argument("--selection", help="required for HLE-Verified and FrontierScience")
+    p.add_argument(
+        "--warmup-selection",
+        help="optional private frozen smoke manifest; runs before cache reset and timing",
+    )
     p.add_argument("--tag", required=True)
     p.add_argument(
         "--client-source", help="fresh installed client source; do not use an old experiment SOURCE"

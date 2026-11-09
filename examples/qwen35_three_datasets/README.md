@@ -62,6 +62,10 @@ PRIVATE_ROOT=/path/to/private/evaluation
 
 HLE-Verified 与 FrontierScience 需分别执行一次 `prepare`，各自使用本数据集冻结的配置及 judge/solver plan。两个客户端的 `contract.json` 中 solver URL/模型名必须和上述 loopback 地址/别名一致，否则 `run` 会拒绝。判断服务可在不同端口运行，但应由操作者按客户端冻结的 judge 配置单独管理。若计划由不同客户端版本生成，应先重新冻结并记录版本/哈希。
 
+可选的 `--warmup-selection` 在同一个新启动的服务上先运行**非计时** smoke，再获取计时前 worker 元数据、清理 prefix/encoder/多模态缓存，最后执行正式计时。未提供该选项时不运行 smoke；两臂应显式使用同一份私有 manifest，`compare` 会核对其文件哈希及题目哈希。smoke 写入独立的 `warmup/`、`warmup.log` 和 `warmup-receipt.json`，正式请求只写入 `solver/`；客户端不使用 `--resume`，smoke 失败或缓存清理未获完整确认时正式计时不会开始。warmup 时间、请求与 token 均不计入正式吞吐，答案和 KV 不从先前输出恢复。
+
+私有 warmup manifest 是 JSON 对象，包含 `schema_version: 1`、`dataset`、`source_plan_contract_sha256`（本次 `plan/contract.json` 的文件 SHA-256）、`count`、`case_ids` 和 `case_ids_sha256`（按本脚本 `canonical_sha256` 计算）。入口核验题目唯一性、数量、哈希和同一冻结 plan 的归属。MMLU-Pro 客户端只支持 `--limit N`，因此 warmup 必须是正式 200 题计划的前 N 题；HLE/FrontierScience 使用逐题 `--case-id`，其 warmup 题可以不在正式评分选单内，但必须属于同一冻结 plan 的完整任务清单。manifest 与题目 ID 只保存在操作者私有目录，不提交到公开仓库。
+
 ## 顺序运行、评分与对比
 
 下面展示一个数据集的命令形状。先不带 `--execute` 检查命令与题数，再加上它执行；每一臂使用新 tag 与全新输出目录。两臂不同时启动服务，避免争用同卡。入口先通过私有令牌从两个 worker 收集只读元数据并清理 prefix/encoder/多模态缓存，计时后再取 worker 和算子证据；任何一步失败都不生成有效对照。计时从客户端开始到结束，**不包含模型启动/编译、证据读取与 judge**，但包含客户端开销。输出吞吐是实际生成 `completion_tokens / wall_seconds`；自然输出长度可能不同，它不是固定工作量加速比。
@@ -70,11 +74,14 @@ HLE-Verified 与 FrontierScience 需分别执行一次 `prepare`，各自使用�
 SETUP="$PRIVATE_ROOT/pair-mmlu/setup.json"
 PLAN="$PRIVATE_ROOT/mmlu/plan200"
 "$CLIENT_PYTHON" "$EXAMPLE_DIR/paired.py" run --setup "$SETUP" \
-  --arm native --dataset mmlu-pro --plan "$PLAN" --tag run1
+  --arm native --dataset mmlu-pro --plan "$PLAN" \
+  --warmup-selection "$PRIVATE_ROOT/mmlu/warmup.json" --tag run1
 "$CLIENT_PYTHON" "$EXAMPLE_DIR/paired.py" run --setup "$SETUP" \
-  --arm native --dataset mmlu-pro --plan "$PLAN" --tag run1 --execute
+  --arm native --dataset mmlu-pro --plan "$PLAN" \
+  --warmup-selection "$PRIVATE_ROOT/mmlu/warmup.json" --tag run1 --execute
 "$CLIENT_PYTHON" "$EXAMPLE_DIR/paired.py" run --setup "$SETUP" \
-  --arm dynamic --dataset mmlu-pro --plan "$PLAN" --tag run1 --execute
+  --arm dynamic --dataset mmlu-pro --plan "$PLAN" \
+  --warmup-selection "$PRIVATE_ROOT/mmlu/warmup.json" --tag run1 --execute
 
 "$CLIENT_PYTHON" "$EXAMPLE_DIR/paired.py" score --setup "$SETUP" \
   --plan "$PLAN" --run-dir "$PRIVATE_ROOT/pair-mmlu/runs/mmlu-pro/native/run1"
