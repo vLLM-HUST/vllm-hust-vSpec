@@ -57,6 +57,14 @@ def consume(runner,marker,previous_gamma,gamma,pid):
                     or not r.get('next_slots_allocated') or r.get('mamba_block_size')!=size
                     or r.get('actual_previous_width')!=g['old_width'] for r in groups)):
             raise RuntimeError('All physical cache groups must prove canonical accepted state')
+    # TP workers may enumerate the same cohort in a different order. Compare
+    # physical checkpoints by request identity, not by their list position.
+    checkpoints = [
+        dict(zip(row['roster'], zip(row['accepted_counts'], row['old_end_seq_lens'])))
+        for row in workers
+    ]
+    if checkpoints[0] != checkpoints[1]:
+        raise RuntimeError('TP workers disagree on per-request accepted counts or sequence lengths')
     if len({r['mamba_block_size'] for r in workers})!=1:
         raise RuntimeError('TP workers disagree on Mamba block geometry')
     if runner.prev_num_spec_tokens!=g['previous_draft'] or tuple(runner._draft_token_ids.shape)!=(n,g['previous_draft']):
