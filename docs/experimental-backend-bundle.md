@@ -28,31 +28,33 @@ experimental runtime-hook source snapshots are included under
 enabled and retain fail-closed validation requirements. The historical
 experimental worker dependencies are included under `_vendor/runtime`; they
 are not enabled by default. Their component proofs are checked before worker
-hook installation, but the migrated worker has not been integration-tested or
-established as equivalent to the historical serving setup. Experimental
-Ascend convolution and recurrent operator sources and a build entry point are included:
+hook installation. These checks alone do not establish model-level equivalence
+to the historical serving setup. Experimental Ascend convolution, recurrent,
+and FIA host operator sources and a build entry point are included:
 
 `vllm-hust-vspec-build-operator --cann-root /path/to/CANN --destination /new/private/build-dir`
 
-This builds the convolution component by default, using the installed SDK and
-current Python's PyTorch and torch_npu. The `--operator` option can also select
-`gamma6-rgdr`, `gamma6-rgdr-reference`, `gamma6-rgdr-packed-reference`, or
-`gamma8-rgdr`, as well as `conv-reference`, `conv-stride`, and `conv-edge`.
-Building does not validate or enable a component. To validate the
-convolution's
-fresh build against the selected installed backend, run:
+This builds `gamma6-tail` by default, using the installed SDK and current
+Python's PyTorch and torch_npu. The `--operator` option also selects
+`gamma6-rgdr`, `gamma6-rgdr-reference`, `gamma6-rgdr-packed-reference`,
+`gamma8-rgdr`, `rgdr-state-pipeline`, `conv-reference`, `conv-stride`,
+`conv-edge`, or `fia-host`. Building does not validate or enable a component.
+To validate a fresh `gamma6-tail` build against the selected installed backend,
+run:
 
 `vllm-hust-vspec-validate-tail-conv --component-dir <NEW_BUILD_DIR> --backend-package <VENV_SITE_PACKAGES>`
 
 This test requires idle devices and writes only local component evidence. Its CANN-derived
 headers retain their original notices and the adjacent `CANN-LICENSE` applies
 to those files; it restricts usage and redistribution to the specified Huawei
-AI processor/Software purposes. Other components still need their source and
-appropriate licenses. Current experimental paths still depend on additional
-host-side backend integration, build tooling and locally generated validation
-artifacts. Packaging
-the remaining dependencies and providing safe automatic build, installation,
-validation and version matching remain required before a formal release.
+AI processor/Software purposes. The wheel includes the source and validation
+entry points for the components in the v0.15.1 reproduction guide. They still
+require the pinned host sources, compatible CANN toolchain, and locally generated
+validation artifacts. The default-off `HUST_ISSUE18_Q35_NATIVE_CONV_TILE`
+direct-stride experiment is outside that profile: its kernel build source and
+proof generator are not packaged, and the `conv-reference` build is not a
+substitute. Model-level correctness and performance acceptance remain required
+before a formal release.
 
 The prototype proof checks now bind a proof to the two physical devices
 reported by `npu-smi` in logical order instead of requiring historical device
@@ -102,8 +104,8 @@ correctness or performance evidence.
 No model, dataset, private benchmark configuration, logs, results or proof
 artifacts are distributed in this bundle. Hardware and driver, CANN SDK,
 compatible Python/PyTorch/torch_npu and build tools must be available on the
-host. Since the full build and NPU correctness/performance checks have not
-been performed on this packaged variant, do not use it as a production backend.
+host. Local component validation alone does not establish full-model
+correctness or performance; do not treat it as a production backend on that basis.
 
 For an installed backend, run commands through
 `vllm-hust-vspec-run-with-backend --backend-package <VENV_SITE_PACKAGES> -- <command> ...`

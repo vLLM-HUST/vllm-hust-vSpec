@@ -1,10 +1,10 @@
 # vllm-hust-vSpec
 
-> **v0.15.1 开发分支：尚未完成发布验证。** Qwen3.5 实验性执行路径的后端补丁、算子源码与组件验证命令已随包提供，仍需匹配的 Ascend 驱动、CANN、已编译后端和本机验证材料。完整模型级正确性与性能复现尚待验证，不能据此宣称正式版本已通过验收。
+> **v0.15.1 开发分支：尚未完成模型级发布验收。** Qwen3.5 实验性复现路径所需的后端补丁、算子源码与组件验证命令已随包提供，仍需匹配的 Ascend 驱动、CANN、已编译后端和本机验证材料。完整模型级正确性与性能复现尚待验证，不能据此宣称正式版本已通过验收。
 
-实验性组件通过 `VSPEC_FUSED_PROPOSAL_VOTE_DIR`、`VSPEC_OWNER_MID_TWIN_DIR`、`VSPEC_OWNER_TAIL_TWIN_DIR`、`VSPEC_PREFIX_CLIP_BRIDGE_DIR`、`VSPEC_NATIVE_CONV_TILE_DIR`、`VSPEC_TWO_BANK_EMBEDDING_DIR`、`VSPEC_INPLACE_HEAD_NZ_DIR` 指定其本地验证材料目录；相关影子校验还使用 `VSPEC_ASCEND_SOURCE_ROOT` 和 `VSPEC_VLLM_SOURCE_ROOT`。路径未配置或校验不通过时，相应实验性功能应拒绝启用；设置路径不会跳过既有校验。不得把私人评测结果、模型权重或验证材料上传到此仓库。
+复现路径所需的本地验证材料目录见 [v0.15.1 复现准备指南](docs/v0.15.1-reproduction.md)。路径未配置或校验不通过时，相应实验性功能应拒绝启用；设置路径不会跳过既有校验。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不属于该复现路径，其 `VSPEC_NATIVE_CONV_TILE_DIR` 不能用卷积参考组件的目录替代。不得把私人评测结果、模型权重或验证材料上传到此仓库。
 
-开发包包含基于 vLLM-Ascend-HUST 固定提交 `4e57439e58ed3d78e675f9fd7b4614fb183c5394` 的实验性后端补丁、附加源码与部分算子源码。可使用 `vllm-hust-vspec-prepare-backend --source <本地后端Git目录> --destination <新的私有目录>` 在不修改原后端的情况下准备源码副本。**该命令目前不会编译或安装后端，也不会生成算子的验证材料**；它不是一键安装或复现流程。用户仍需具备兼容的 Ascend 驱动、CANN 及工具链；完整安装流程和设备端验证尚待完成。
+开发包包含基于 vLLM-Ascend-HUST 固定提交 `4e57439e58ed3d78e675f9fd7b4614fb183c5394` 的实验性后端补丁、附加源码与本次复现路径所需的算子源码。可使用 `vllm-hust-vspec-prepare-backend --source <本地后端Git目录> --destination <新的私有目录>` 在不修改原后端的情况下准备源码副本。**该命令不会编译或安装后端，也不会生成算子的验证材料**；后端构建和组件验证须按指南在目标机器上执行。用户仍需具备兼容的 Ascend 驱动、CANN 及工具链。
 
 固定源码版本、后端构建、组件验证和发布验收步骤见 [v0.15.1 复现准备指南](docs/v0.15.1-reproduction.md)。
 
