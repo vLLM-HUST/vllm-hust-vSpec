@@ -57,6 +57,7 @@ vllm_hust_vspec = [
     "_vendor/ascend_hust/overlay/vllm_ascend/*/*/*.py",
     "_vendor/operators/*/*.py",
     "_vendor/experimental_hooks/*.py",
+    "_vendor/runtime/*.py",
     "_vendor/native/gamma6_tail/*",
     "_vendor/native/gamma6_tail/native-kernel/*",
     "_vendor/native/gamma6_tail/native-kernel/arch35/*",

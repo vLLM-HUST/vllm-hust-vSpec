@@ -195,9 +195,9 @@ class TailConv:
 def install():
     proof_hashes=verify()
     import torch
-    import native_stride_conv
-    from gamma8_rgdr_hook import eligible as g8_eligible,Gamma8RGDR
-    from gamma8_input_domain import real_weight_admission as g8_input_weights
+    from . import native_stride_conv
+    from .gamma8_rgdr_hook import eligible as g8_eligible,Gamma8RGDR
+    from .gamma8_input_domain import real_weight_admission as g8_input_weights
     from vllm_ascend.ops import gdn_input_fusion
     from vllm_ascend.ops.q35_cached_conv import CachedConvWeights
     from vllm_ascend.ops.q35_rgdr_reuse import RGDRReuse

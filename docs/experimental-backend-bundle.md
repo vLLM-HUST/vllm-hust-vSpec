@@ -22,7 +22,11 @@ The wheel also includes selected standalone Triton kernel sources under
 selected or registered by this staging operation. The corresponding
 experimental runtime-hook source snapshots are included under
 `vllm_hust_vspec/_vendor/experimental_hooks`; they are not automatically
-enabled and retain fail-closed validation requirements. A single experimental
+enabled and retain fail-closed validation requirements. The historical
+experimental worker dependencies are included under `_vendor/runtime`; they
+are not enabled by default. Their component proofs are checked before worker
+hook installation, but the migrated worker has not been integration-tested or
+established as equivalent to the historical serving setup. A single experimental
 Ascend convolution's sources and build entry point are included:
 
 `vllm-hust-vspec-build-operator --cann-root /path/to/CANN --destination /new/private/build-dir`
