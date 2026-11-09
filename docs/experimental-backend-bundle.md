@@ -34,7 +34,8 @@ Ascend convolution and recurrent operator sources and a build entry point are in
 This builds the convolution component by default, using the installed SDK and
 current Python's PyTorch and torch_npu. The `--operator` option can also select
 `gamma6-rgdr`, `gamma6-rgdr-reference`, `gamma6-rgdr-packed-reference`, or
-`gamma8-rgdr`. Building does not validate or enable a component. To validate the
+`gamma8-rgdr`, as well as `conv-reference`, `conv-stride`, and `conv-edge`.
+Building does not validate or enable a component. To validate the
 convolution's
 fresh build against the selected installed backend, run:
 
@@ -74,8 +75,15 @@ recurrent builds have a separate local proof command:
 `vllm-hust-vspec-validate-rgdr --component gamma8 --component-dir /new/private/build-dir --backend-package /path/to/installed/backend/package`
 
 The gamma-six reference uses `--component gamma6-reference`. The packed
-gamma-six variants require additional chained proofs which this command does
-not yet provide. Other components also need their own proofs.
+reference uses `--component gamma6-packed-reference --reference-dir <validated-reference>`;
+the tagged variant uses `--component gamma6-packed --reference-dir <validated-reference>
+--prior-dir <validated-packed-reference>`. These tests require the preceding
+local proofs and check the admitted source transformations. Other components
+also need their own proofs. The reference, stride and edge convolution
+components use `vllm-hust-vspec-validate-conv`; the stride test requires
+`--reference-dir` pointing to the independently validated reference build.
+The prefix bridge has a separate local component test,
+`vllm-hust-vspec-validate-prefix-clip --backend /path/to/installed/site-packages --destination /new/private/proof-dir`.
 
 No model, dataset, private benchmark configuration, logs, results or proof
 artifacts are distributed in this bundle. Hardware and driver, CANN SDK,

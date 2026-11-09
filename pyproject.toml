@@ -9,7 +9,7 @@ description = "Out-of-tree speculative decoding plugin for vLLM-HUST on Ascend"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0 AND LicenseRef-CANN-OSL-2.0"
-license-files = ["LICENSE", "src/vllm_hust_vspec/_vendor/native/gamma6_tail/CANN-LICENSE", "src/vllm_hust_vspec/_vendor/native/gamma6_rgdr/CANN-LICENSE", "src/vllm_hust_vspec/_vendor/native/gamma6_rgdr_reference/CANN-LICENSE", "src/vllm_hust_vspec/_vendor/native/gamma6_rgdr_packed_reference/CANN-LICENSE", "src/vllm_hust_vspec/_vendor/native/gamma8_rgdr/CANN-LICENSE"]
+license-files = ["LICENSE", "src/vllm_hust_vspec/_vendor/native/*/CANN-LICENSE"]
 authors = [{name = "vLLM-HUST"}]
 dependencies = []
 
@@ -43,6 +43,8 @@ vllm-hust-vspec-validate-mask = "vllm_hust_vspec.validate_mask:main"
 vllm-hust-vspec-validate-tail-conv = "vllm_hust_vspec.validate_tail_conv:main"
 vllm-hust-vspec-validate-gdn-input = "vllm_hust_vspec.validate_gdn_input:main"
 vllm-hust-vspec-validate-rgdr = "vllm_hust_vspec.validate_rgdr:main"
+vllm-hust-vspec-validate-conv = "vllm_hust_vspec.validate_conv:main"
+vllm-hust-vspec-validate-prefix-clip = "vllm_hust_vspec.validate_prefix_clip:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -67,6 +69,15 @@ vllm_hust_vspec = [
     "_vendor/native/gamma6_rgdr_reference/*",
     "_vendor/native/gamma6_rgdr_packed_reference/*",
     "_vendor/native/gamma8_rgdr/*",
+    "_vendor/native/conv_reference/*",
+    "_vendor/native/conv_reference/native-kernel/*",
+    "_vendor/native/conv_reference/native-kernel/arch35/*",
+    "_vendor/native/conv_stride/*",
+    "_vendor/native/conv_stride/native-kernel/*",
+    "_vendor/native/conv_stride/native-kernel/arch35/*",
+    "_vendor/native/conv_edge/*",
+    "_vendor/native/conv_edge/native-kernel/*",
+    "_vendor/native/conv_edge/native-kernel/arch35/*",
 ]
 
 [tool.pytest.ini_options]

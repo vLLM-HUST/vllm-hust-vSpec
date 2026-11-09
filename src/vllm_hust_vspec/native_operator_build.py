@@ -44,7 +44,8 @@ def main() -> None:
                         help='New private directory for source and build output')
     parser.add_argument('--cann-root', required=True, type=Path, help='Installed CANN SDK root')
     parser.add_argument('--operator', choices=('gamma6-tail', 'gamma6-rgdr', 'gamma6-rgdr-reference',
-                                               'gamma6-rgdr-packed-reference', 'gamma8-rgdr'),
+                                               'gamma6-rgdr-packed-reference', 'gamma8-rgdr',
+                                               'conv-reference', 'conv-stride', 'conv-edge'),
                         default='gamma6-tail')
     parser.add_argument('--jobs', type=int, default=2)
     args = parser.parse_args()
