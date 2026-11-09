@@ -173,6 +173,8 @@ class PublicExampleTests(unittest.TestCase):
             backend = root / "backend"
             model.mkdir()
             backend.mkdir()
+            (backend / "vllm_ascend").mkdir()
+            (backend / "vllm_ascend" / "__init__.py").touch()
             evaluation = backend / "vllm_hust_vspec" / "evaluation"
             evaluation.mkdir(parents=True)
             for name in (
@@ -248,6 +250,13 @@ class PublicExampleTests(unittest.TestCase):
             self.assertIn("--qwen35-mtp-compat", command["server"])
             self.assertEqual(command["case_count"], 1)
             self.assertFalse((work / "runs").exists())
+            server_env = paired._server_env(
+                paired._load_setup(work / "setup.json"), "native", root / "native-server"
+            )
+            self.assertEqual(
+                server_env["PYTHONPATH"].split(":"), [str(backend), str(static), str(evaluation)]
+            )
+            self.assertEqual(server_env["VLLM_PLUGINS"], "ascend,vspec_eval")
 
     def test_compare_rejects_unproven_native_worker(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -218,6 +218,10 @@ def prepare(args: argparse.Namespace) -> None:
     for key in ("native_python", "dynamic_python", "client_python"):
         if not os.access(paths[key], os.X_OK):
             raise ValueError(f"{key} is not executable")
+    for arm in ("native", "dynamic"):
+        backend_init = Path(paths[f"{arm}_backend_package"]) / "vllm_ascend" / "__init__.py"
+        if not backend_init.is_file():
+            raise FileNotFoundError(f"Selected backend package missing: {backend_init}")
     if args.port < 1 or args.port > 65535 or not args.served_model:
         raise ValueError("A valid loopback port and served model name are required")
     pair = aligned_configs(common, str(model), args.served_model, args.port)
@@ -333,12 +337,18 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         PYTHONPATH=(
             os.pathsep.join(
                 (
+                    setup["paths"]["native_backend_package"],
                     setup["paths"]["native_evaluation_static_dir"],
                     setup["paths"]["native_evaluation_dir"],
                 )
             )
             if arm == "native"
-            else setup["paths"]["dynamic_evaluation_dir"]
+            else os.pathsep.join(
+                (
+                    setup["paths"]["dynamic_backend_package"],
+                    setup["paths"]["dynamic_evaluation_dir"],
+                )
+            )
         ),
     )
     if (
