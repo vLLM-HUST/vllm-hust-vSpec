@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from argparse import Namespace
@@ -35,6 +36,83 @@ def common_config() -> dict:
 
 
 class PublicExampleTests(unittest.TestCase):
+    def test_common_vllm_flags_are_frozen_and_private_caches_are_isolated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env_file = root / "common-env.json"
+            common = {
+                **paired.COMMON_VLLM_FLAGS,
+                "HUST_VSPEC_CAPTURE_SAFE_STATIC": "1",
+                "HUST_VSPEC_HOT_STATIC_SHAPES": "14,42,70,98,126",
+            }
+            dump(env_file, common)
+            self.assertEqual(paired.read_env(env_file, dynamic=False), common)
+            setup = {
+                "common_env": common,
+                "dynamic_env": {},
+                "evaluation_token": "test-only-private-token",
+                "paths": {
+                    "native_backend_package": "/private/native-backend",
+                    "native_evaluation_static_dir": "/private/evaluation-static",
+                    "native_evaluation_dir": "/private/evaluation",
+                    "dynamic_backend_package": "/private/dynamic-backend",
+                    "dynamic_evaluation_dir": "/private/evaluation",
+                },
+            }
+            with patch.dict(
+                os.environ,
+                {
+                    "ASCEND_API_KEY": "must-not-be-inherited",
+                    "VLLM_WORKER_MULTIPROC_METHOD": "fork",
+                },
+                clear=True,
+            ):
+                for arm in ("native", "dynamic"):
+                    run_dir = root / arm
+                    env = paired._server_env(setup, arm, run_dir)
+                    self.assertNotIn("ASCEND_API_KEY", env)
+                    self.assertEqual(env["VLLM_ALLOW_INSECURE_SERIALIZATION"], "0")
+                    for key, value in paired.COMMON_VLLM_FLAGS.items():
+                        self.assertEqual(env[key], value)
+                    for key, suffix in paired.CACHE_DIRS.items():
+                        self.assertEqual(env[key], str(run_dir / "cache" / suffix))
+                        self.assertTrue(Path(env[key]).is_dir())
+            dump(env_file, {"VLLM_WORKER_MULTIPROC_METHOD": "fork"})
+            with self.assertRaisesRegex(ValueError, "differs from the matched profile"):
+                paired.read_env(env_file, dynamic=False)
+            dump(env_file, {"VLLM_UNREVIEWED_FLAG": "1"})
+            with self.assertRaisesRegex(ValueError, "cannot set plugin/runtime policy"):
+                paired.read_env(env_file, dynamic=False)
+
+    def test_dynamic_backend_flags_are_explicitly_allowlisted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "dynamic-env.json"
+            dump(path, {"VLLM_ASCEND_Q35_GDN_INPUT_FUSION": "on"})
+            self.assertEqual(
+                paired.read_env(path, dynamic=True),
+                {"VLLM_ASCEND_Q35_GDN_INPUT_FUSION": "on"},
+            )
+            dump(path, {"VLLM_ASCEND_Q35_UNREVIEWED_FLAG": "on"})
+            with self.assertRaisesRegex(ValueError, "unexpected name"):
+                paired.read_env(path, dynamic=True)
+
+    def test_tokenizer_settings_are_not_mistaken_for_credentials(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "env.json"
+            dump(path, {"TOKENIZERS_PARALLELISM": "false"})
+            self.assertEqual(
+                paired.read_env(path, dynamic=False), {"TOKENIZERS_PARALLELISM": "false"}
+            )
+            dump(path, {"HUST_VSPEC_SHARED_TOKENIZER_PADDING": "1"})
+            self.assertEqual(
+                paired.read_env(path, dynamic=True),
+                {"HUST_VSPEC_SHARED_TOKENIZER_PADDING": "1"},
+            )
+            for secret_name in ("HF_TOKEN", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY"):
+                dump(path, {secret_name: "secret-value"})
+                with self.assertRaisesRegex(ValueError, "credentials"):
+                    paired.read_env(path, dynamic=True)
+
     def test_configs_share_everything_except_depth_and_worker(self):
         pair = paired.aligned_configs(common_config(), "/models/qwen", "test-solver", 18080)
         self.assertEqual(pair["native"]["speculative_config"]["num_speculative_tokens"], 4)
@@ -197,9 +275,7 @@ class PublicExampleTests(unittest.TestCase):
         def proof_row(rank, active):
             stride = [
                 {"actual_replay_counts_by_gamma_and_requests": {"4x1": 1} if active else {}}
-            ] + [
-                {"actual_replay_counts_by_gamma_and_requests": {}} for _ in range(29)
-            ]
+            ] + [{"actual_replay_counts_by_gamma_and_requests": {}} for _ in range(29)]
             edge = [{"actual_replay_counts_by_gamma_and_requests": {}} for _ in range(30)]
             rgdr = [{"actual_same_kernel_folded_replay_counter_cells": [0]} for _ in range(30)]
             return {

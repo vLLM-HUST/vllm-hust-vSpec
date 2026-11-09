@@ -48,17 +48,28 @@ CACHE_DIRS = {
     "XDG_RUNTIME_DIR": "xdg-runtime",
     "VLLM_CACHE_ROOT": "vllm",
     "VLLM_CONFIG_ROOT": "vllm-config",
+    "VLLM_ASSETS_CACHE": "vllm/assets",
+    "VLLM_XLA_CACHE_PATH": "vllm/xla",
     "TRITON_CACHE_DIR": "triton",
     "TORCHINDUCTOR_CACHE_DIR": "inductor",
     "TORCH_HOME": "torch",
     "TORCH_EXTENSIONS_DIR": "torch-extensions",
     "HF_HOME": "huggingface",
     "HF_HUB_CACHE": "huggingface/hub",
+    "HF_XET_CACHE": "huggingface/xet",
+    "HF_ASSETS_CACHE": "huggingface/assets",
+    "HUGGINGFACE_HUB_CACHE": "huggingface/hub",
+    "HUGGINGFACE_ASSETS_CACHE": "huggingface/assets",
     "HF_DATASETS_CACHE": "huggingface/datasets",
+    "TRANSFORMERS_CACHE": "huggingface/transformers",
     "ASCEND_WORK_PATH": "ascend-work",
     "ASCEND_PROCESS_LOG_PATH": "ascend-logs",
     "ASCEND_CACHE_PATH": "ascend-cache",
     "ACL_OP_COMPILER_CACHE_DIR": "acl-op",
+    "TE_PARALLEL_COMPILER_CACHE_PATH": "te-compiler",
+    "NUMBA_CACHE_DIR": "numba",
+    "CUPY_CACHE_DIR": "cupy",
+    "MPLCONFIGDIR": "matplotlib",
 }
 SERVER_INHERITED_KEYS = {
     "PATH",
@@ -83,20 +94,45 @@ SERVER_INHERITED_PREFIXES = (
     "ATB_",
 )
 CREDENTIAL_MARKERS = (
-    "token",
-    "secret",
-    "password",
     "api_key",
-    "credential",
+    "apikey",
     "access_key",
+    "accesskey",
     "private_key",
+    "privatekey",
     "auth_sock",
+    "authsock",
     "askpass",
 )
+ALLOWED_DYNAMIC_BACKEND_FLAGS = {
+    "VLLM_ASCEND_Q35_GDN_FUSED_REFRESH",
+    "VLLM_ASCEND_Q35_PREPARE_OPTIMIZATIONS",
+    "VLLM_ASCEND_Q35_RUNTIME_POSITION_LENGTH",
+    "VLLM_ASCEND_Q35_GDN_INPUT_FUSION",
+    "VLLM_ASCEND_Q35_QUIESCENT_GROWTH",
+    "VLLM_ASCEND_Q35_SINGLE_STREAM_MOE_EVENTS",
+    "VLLM_ASCEND_Q35_REPLAY_TAIL",
+    "VLLM_ASCEND_Q35_TWIN_GRAPH",
+    "VLLM_ASCEND_Q35_NATIVE_LOOKUP",
+    "VLLM_ASCEND_Q35_CACHED_CONV",
+    "VLLM_ASCEND_Q35_RGDR_REUSE",
+}
+COMMON_VLLM_FLAGS = {
+    "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "1",
+    "VLLM_NO_USAGE_STATS": "1",
+    "VLLM_SERVER_DEV_MODE": "0",
+    "VLLM_USE_AOT_COMPILE": "0",
+    "VLLM_USE_BREAKABLE_CUDAGRAPH": "0",
+    "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+}
 
 
 def _credential_key(key: str) -> bool:
-    return any(marker in key.lower() for marker in CREDENTIAL_MARKERS)
+    lowered = key.lower()
+    parts = set(re.split(r"[^a-z0-9]+", lowered))
+    if parts & {"token", "secret", "password", "credential", "credentials", "passwd"}:
+        return True
+    return any(marker in lowered for marker in CREDENTIAL_MARKERS)
 
 
 def read_json(path: Path) -> Any:
@@ -165,7 +201,11 @@ def read_env(path: Path, *, dynamic: bool) -> dict[str, str]:
             raise ValueError(
                 f"Do not put credentials or launcher-reserved keys in environment file: {key}"
             )
-        if dynamic and not key.startswith(("VSPEC_", "HUST_VSPEC_", "HUST_ISSUE18_")):
+        if (
+            dynamic
+            and not key.startswith(("VSPEC_", "HUST_VSPEC_", "HUST_ISSUE18_"))
+            and key not in ALLOWED_DYNAMIC_BACKEND_FLAGS
+        ):
             raise ValueError(f"Dynamic-only setting has an unexpected name: {key}")
         common_static_keys = {
             "HUST_VSPEC_CAPTURE_SAFE_STATIC",
@@ -175,8 +215,11 @@ def read_env(path: Path, *, dynamic: bool) -> dict[str, str]:
             not dynamic
             and key.startswith(("VSPEC_", "HUST_", "VLLM_"))
             and key not in common_static_keys
+            and key not in COMMON_VLLM_FLAGS
         ):
             raise ValueError(f"Common environment cannot set plugin/runtime policy: {key}")
+        if not dynamic and key in COMMON_VLLM_FLAGS and value != COMMON_VLLM_FLAGS[key]:
+            raise ValueError(f"Common VLLM setting differs from the matched profile: {key}")
         if dynamic and key.endswith(("_DIR", "_ROOT", "_PATH")):
             existing_path(value, f"{key} proof/dependency path")
     return values
@@ -371,6 +414,7 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         HUST_VSPEC_PRIVATE_COMPILER_ROOT=str(run_dir),
         PYTHONDONTWRITEBYTECODE="1",
         PYTHONUNBUFFERED="1",
+        VLLM_ALLOW_INSECURE_SERIALIZATION="0",
         ASCEND_RT_VISIBLE_DEVICES="0,1",
         VSPEC_EVAL_ARM=arm,
         VSPEC_EVAL_TOKEN=setup["evaluation_token"],
@@ -612,10 +656,7 @@ def _validate_operator_proof(arm: str, response: Any, before: Any, after: Any) -
     identities = []
     for metadata in (before, after):
         identities.append(
-            {
-                row["static"][install_key]["rank"]: row["pid"]
-                for row in metadata["results"]
-            }
+            {row["static"][install_key]["rank"]: row["pid"] for row in metadata["results"]}
         )
     if identities[0] != identities[1] or len(identities[0]) != 2:
         raise RuntimeError("Evaluation worker identity changed during timing")
