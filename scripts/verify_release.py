@@ -21,6 +21,7 @@ MANIFEST_DIR = PACKAGE / "manifests"
 MANIFEST_NAME = "vllm-hust-extension-v0.3.json"
 MANIFEST = MANIFEST_DIR / MANIFEST_NAME
 EXTENSION_ID = "org.vllm-hust.vspec"
+EVALUATION_ENDPOINT = "evaluation_endpoint:EvaluationEndpointPlugin"
 PROJECT_NAME = "vllm-hust-vspec"
 WHEEL_NAME = "vllm_hust_vspec"
 HOST_VERSION_RANGE = ">=0.17.2rc1.dev5871,<0.26"
@@ -31,7 +32,9 @@ REQUIRED_TOOLS = {
     "vllm-hust-vspec-validate-conv": "vllm_hust_vspec.validate_conv:main",
     "vllm-hust-vspec-validate-tail-conv": "vllm_hust_vspec.validate_tail_conv:main",
     "vllm-hust-vspec-validate-rgdr": "vllm_hust_vspec.validate_rgdr:main",
-    "vllm-hust-vspec-validate-rgdr-state-pipeline": "vllm_hust_vspec.validate_rgdr_state_pipeline:main",
+    "vllm-hust-vspec-validate-rgdr-state-pipeline": (
+        "vllm_hust_vspec.validate_rgdr_state_pipeline:main"
+    ),
     "vllm-hust-vspec-validate-gdn-input": "vllm_hust_vspec.validate_gdn_input:main",
     "vllm-hust-vspec-validate-mask": "vllm_hust_vspec.validate_mask:main",
     "vllm-hust-vspec-validate-prefix-clip": "vllm_hust_vspec.validate_prefix_clip:main",
@@ -95,6 +98,11 @@ def verify_source() -> str:
         registrations.get(EXTENSION_ID) == "vllm_hust_vspec.manifests",
         "Bundle entry point does not target the manifests package",
     )
+    require(
+        metadata["entry-points"].get("vllm.endpoint_plugins", {}).get("vspec_eval")
+        == EVALUATION_ENDPOINT,
+        "evaluation endpoint is not registered",
+    )
     scripts = metadata["scripts"]
     require(
         "vllm-hust-vspec-models" not in scripts,
@@ -105,6 +113,23 @@ def verify_source() -> str:
     for asset in REQUIRED_VENDOR:
         require((PACKAGE / asset).is_file(), f"required vendor source missing: {asset}")
     require((ROOT / "docs/v0.15.1-reproduction.md").is_file(), "reproduction guide is missing")
+    for relative in (
+        "evaluation/evaluation_endpoint.py",
+        "evaluation/evaluation_worker_common.py",
+        "evaluation/dynamic_worker.py",
+        "evaluation_static/native_static_worker.py",
+        "evaluation_static/capture_safe_static.py",
+        "evaluation_static/hot_static_options.py",
+        "evaluation_static/static_install_metadata.py",
+        "evaluation_static/vspec_readonly_observer.py",
+        "evaluation_static/vspec_readonly_compiler.py",
+        "evaluation_static/vspec_readonly_nge_worker.py",
+        "evaluation_static/vspec_readonly_static_worker.py",
+    ):
+        require(
+            (PACKAGE / relative).is_file(),
+            f"model-level evaluation source missing: {relative}",
+        )
     require(
         (ROOT / "scripts/verify_model_acceptance.py").is_file(),
         "model-level release gate is missing",
@@ -161,6 +186,17 @@ def verify_wheel(path: Path, version: str) -> None:
         "vllm_hust_vspec/native_operator_build.py",
         "vllm_hust_vspec/validate_rgdr_state_pipeline.py",
         "vllm_hust_vspec/run_with_backend.py",
+        "vllm_hust_vspec/evaluation/evaluation_endpoint.py",
+        "vllm_hust_vspec/evaluation/evaluation_worker_common.py",
+        "vllm_hust_vspec/evaluation/dynamic_worker.py",
+        "vllm_hust_vspec/evaluation_static/native_static_worker.py",
+        "vllm_hust_vspec/evaluation_static/capture_safe_static.py",
+        "vllm_hust_vspec/evaluation_static/hot_static_options.py",
+        "vllm_hust_vspec/evaluation_static/static_install_metadata.py",
+        "vllm_hust_vspec/evaluation_static/vspec_readonly_observer.py",
+        "vllm_hust_vspec/evaluation_static/vspec_readonly_compiler.py",
+        "vllm_hust_vspec/evaluation_static/vspec_readonly_nge_worker.py",
+        "vllm_hust_vspec/evaluation_static/vspec_readonly_static_worker.py",
         "vllm_hust_vspec/manifests/__init__.py",
         f"vllm_hust_vspec/manifests/{MANIFEST_NAME}",
         f"{dist_info}/METADATA",
@@ -184,6 +220,10 @@ def verify_wheel(path: Path, version: str) -> None:
             entry_points["vllm_hust.extension_bundles"][EXTENSION_ID]
             == "vllm_hust_vspec.manifests",
             "wheel Bundle entry point mismatch",
+        )
+        require(
+            entry_points["vllm.endpoint_plugins"]["vspec_eval"] == EVALUATION_ENDPOINT,
+            "wheel evaluation endpoint entry point mismatch",
         )
         require(
             entry_points["console_scripts"]["vllm-hust-vspec-bench"]
@@ -210,12 +250,26 @@ def verify_sdist(path: Path, version: str) -> None:
         f"{prefix}/docs/arc_easy_regression.md",
         f"{prefix}/docs/agentx_256k_benchmark.md",
         f"{prefix}/docs/v0.15.1-reproduction.md",
+        f"{prefix}/examples/qwen35_three_datasets/README.md",
+        f"{prefix}/examples/qwen35_three_datasets/select_cases.py",
+        f"{prefix}/examples/qwen35_three_datasets/paired.py",
         f"{prefix}/docs/qwen35_frontier_mtp2.md",
         f"{prefix}/docs/qwen35_mtp2_b16_graph_benchmark_commands.md",
         f"{prefix}/scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh",
         f"{prefix}/scripts/verify_release.py",
         f"{prefix}/scripts/verify_model_acceptance.py",
         f"{prefix}/src/vllm_hust_vspec/_version.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation/evaluation_endpoint.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation/evaluation_worker_common.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation/dynamic_worker.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/native_static_worker.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/capture_safe_static.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/hot_static_options.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/static_install_metadata.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/vspec_readonly_observer.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/vspec_readonly_compiler.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/vspec_readonly_nge_worker.py",
+        f"{prefix}/src/vllm_hust_vspec/evaluation_static/vspec_readonly_static_worker.py",
         f"{prefix}/src/vllm_hust_vspec/manifests/__init__.py",
         f"{prefix}/src/vllm_hust_vspec/manifests/{MANIFEST_NAME}",
     }

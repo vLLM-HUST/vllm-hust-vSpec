@@ -27,6 +27,9 @@ test = [
 vspec = "vllm_hust_vspec:register"
 vspec_school028_argmax = "vllm_hust_vspec.school028:register"
 
+[project.entry-points."vllm.endpoint_plugins"]
+vspec_eval = "evaluation_endpoint:EvaluationEndpointPlugin"
+
 [project.entry-points."vllm_hust.extension_bundles"]
 "org.vllm-hust.vspec" = "vllm_hust_vspec.manifests"
 "org.vllm-hust.vspec-school028-argmax" = "vllm_hust_vspec.school028"
