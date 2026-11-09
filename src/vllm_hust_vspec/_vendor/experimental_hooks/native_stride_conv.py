@@ -18,7 +18,7 @@ from types import FunctionType
 import torch
 
 SOURCE_SHA = '1ac11d07b5883c3d8ec68ca0382411cdd1f26ad2bb7e23621648fd73a9601890'
-from vllm_hust_vspec.backends.experimental_paths import artifact_dir
+from vllm_hust_vspec.backends.experimental_paths import artifact_dir, require_current_npu_proof
 
 PRIMITIVE = artifact_dir('VSPEC_NATIVE_STRIDE_CONV_DIR')
 PROOF = PRIMITIVE / 'native-stride-original-and-copy-controls-r1-primitive-audit.json'
@@ -44,7 +44,8 @@ def verify_primitive():
 
 def verify_edge_primitive():
     data = json.loads(EDGE_PROOF.read_text())
-    assert data['passed'] and data['exact'] and data['physical_npus'] == [4, 6]
+    require_current_npu_proof(data)
+    assert data['passed'] and data['exact']
     assert {r['rank'] for r in data['ranks']} == {0, 1}
     for proof in (data, *data['ranks']):
         assert all(hashlib.sha256(Path(p).read_bytes()).hexdigest() == h for p, h in proof['sha256'].items())

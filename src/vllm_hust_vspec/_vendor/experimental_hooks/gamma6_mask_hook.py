@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import sys
 
-from vllm_hust_vspec.backends.experimental_paths import artifact_dir
+from vllm_hust_vspec.backends.experimental_paths import artifact_dir, require_current_npu_proof
 
 COMPONENT=artifact_dir('VSPEC_GAMMA6_MASK_DIR')
 PROOF=COMPONENT/'primitive-audit.json'
@@ -24,7 +24,8 @@ def version_of(tensor):
 
 def verify():
     proof=read(PROOF)
-    assert proof['passed'] and proof['exact'] and proof['physical_npus']==[4,6]
+    require_current_npu_proof(proof)
+    assert proof['passed'] and proof['exact']
     assert proof['only_post_native_top8_consumer_no_router_change']
     assert {rank['rank'] for rank in proof['ranks']}=={0,1}
     for rank in proof['ranks']:

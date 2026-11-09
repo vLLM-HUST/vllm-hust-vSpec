@@ -10,14 +10,15 @@ import json
 from pathlib import Path
 import sys
 
-from .experimental_paths import artifact_dir
+from .experimental_paths import artifact_dir, require_current_npu_proof
 
 COMPONENT=artifact_dir('VSPEC_PREFIX_CLIP_BRIDGE_DIR')
 PROOF=COMPONENT/'prefix-bridge-component-audit-r1.json'
 
 def verify():
     p=json.loads(PROOF.read_text())
-    assert p['passed'] and p['physical_npus']==[4,6]
+    require_current_npu_proof(p)
+    assert p['passed']
     assert p['component_only_NOT_live_async_bridge_state_or_quality_or_speed_admission']
     for part in (p,*p['ranks']):
         for filename,digest in part['sha256'].items():

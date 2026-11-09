@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from functools import wraps
 
-from vllm_hust_vspec.backends.experimental_paths import artifact_dir
+from vllm_hust_vspec.backends.experimental_paths import artifact_dir, require_current_npu_proof
 
 COMPONENT=artifact_dir('VSPEC_GAMMA8_RGDR_DIR')
 PROOF=COMPONENT/'runs/gamma8-allb-c46-r1.primitive-audit.json'
@@ -12,7 +12,8 @@ LIBRARY=COMPONENT/'build-r1/lib/libvspec_rgdr_edge8_adapter.so'
 
 def verify():
     proof=json.loads(PROOF.read_text())
-    assert proof['passed'] and proof['exact'] and proof['physical_npus']==[4,6]
+    require_current_npu_proof(proof)
+    assert proof['passed'] and proof['exact']
     assert {r['rank'] for r in proof['ranks']}=={0,1}
     for part in (proof,*proof['ranks']):
         for filename,digest in part['sha256'].items():

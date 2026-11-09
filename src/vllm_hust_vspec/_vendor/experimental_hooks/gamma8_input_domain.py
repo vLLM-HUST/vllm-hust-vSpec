@@ -6,7 +6,7 @@ import inspect
 import json
 from pathlib import Path
 from textwrap import dedent
-from vllm_hust_vspec.backends.experimental_paths import artifact_dir
+from vllm_hust_vspec.backends.experimental_paths import artifact_dir, require_current_npu_proof
 
 COMPONENT=artifact_dir('VSPEC_GAMMA8_INPUT_DIR')
 PROOF=COMPONENT/'gamma8-input-fusion-c46-primitive-audit-r1.json'
@@ -15,7 +15,8 @@ KERNEL=ASCEND/'ops/triton/q35_fused_gdn_inputs.py'
 def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 def verify():
-    p=json.loads(PROOF.read_text());assert p['completed'] and p['component_only'] and p['physical_npus']==[4,6]
+    p=json.loads(PROOF.read_text());require_current_npu_proof(p)
+    assert p['completed'] and p['component_only']
     assert p['eligible_tokens']==[n*9 for n in range(1,17)] and p['only_gamma8_all16_batches']
     for part in (p,json.loads((COMPONENT/'launch.json').read_text())):
         assert all(sha(name)==digest for name,digest in part['sha256'].items())

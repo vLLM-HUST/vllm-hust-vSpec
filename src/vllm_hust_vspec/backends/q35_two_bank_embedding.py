@@ -8,7 +8,7 @@ import sys
 from types import MethodType
 
 from ..config import q35_two_bank_embedding_enabled,q35_replicated_inputs
-from .experimental_paths import artifact_dir
+from .experimental_paths import artifact_dir, require_current_npu_proof
 
 PRIMITIVE=artifact_dir('VSPEC_TWO_BANK_EMBEDDING_DIR')
 HALF=124160
@@ -21,7 +21,8 @@ def verify_primitive():
     paths=[PRIMITIVE/'split-embedding-r1-primitive-audit.json',PRIMITIVE/'opaque-r1-audit.json']
     for path in paths:
         d=json.loads(path.read_text())
-        assert d['passed'] and d['physical_npus']==[1,2]
+        require_current_npu_proof(d)
+        assert d['passed']
         assert all(hashlib.sha256(Path(p).read_bytes()).hexdigest()==h for p,h in d['sha256'].items()),path
         for row in d.get('records',[]):
             if isinstance(row,dict) and 'sha256' in row:

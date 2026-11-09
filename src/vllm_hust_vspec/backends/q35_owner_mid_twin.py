@@ -12,7 +12,7 @@ from pathlib import Path
 import textwrap
 from ..config import q35_owner_mid_twin_enabled,q35_two_bank_embedding_enabled,q35_replicated_inputs
 
-from .experimental_paths import artifact_dir
+from .experimental_paths import artifact_dir, require_current_npu_proof
 
 PRIMITIVE=artifact_dir('VSPEC_OWNER_MID_TWIN_DIR')
 OLD_PRIMITIVE=artifact_dir('VSPEC_OWNER_TAIL_TWIN_DIR')
@@ -25,7 +25,8 @@ def verify_primitive():
     paths=[OLD_PRIMITIVE/'primitive-native-audit-r1.json',PRIMITIVE/'primitive-native-audit-r1.json']
     for path,count in zip(paths,(2160,3024)):
         p=json.loads(path.read_text())
-        assert p['passed'] and p['physical_npus']==[1,2] and p['scope']=='target-draft'
+        require_current_npu_proof(p)
+        assert p['passed'] and p['scope']=='target-draft'
         assert p['numerical_comparisons']==count and p['all_consumed_output_rows_finite_and_bitwise_exact']
         assert p['original_per_group_update_and_ExternalEvent_order_preserved']
         assert all(hashlib.sha256(Path(n).read_bytes()).hexdigest()==h for n,h in p['sha256'].items()),path

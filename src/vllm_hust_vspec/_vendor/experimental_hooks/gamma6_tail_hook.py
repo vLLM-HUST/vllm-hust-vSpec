@@ -12,7 +12,7 @@ from pathlib import Path
 from textwrap import dedent
 from types import CodeType
 
-from vllm_hust_vspec.backends.experimental_paths import artifact_dir
+from vllm_hust_vspec.backends.experimental_paths import artifact_dir, require_current_npu_proof
 
 CONV=artifact_dir('VSPEC_GAMMA6_CONV_DIR')
 RGDR=artifact_dir('VSPEC_GAMMA6_RGDR_DIR')
@@ -59,7 +59,7 @@ def verify():
     receipts={}
     for kind,path in PROOFS.items():
         proof=read(path)
-        assert proof['physical_npus']==[4,6]
+        require_current_npu_proof(proof)
         if kind=='input':
             assert proof['completed'] and proof['component_only']
             assert proof['eligible_tokens']==[7*n for n in range(1,17)]

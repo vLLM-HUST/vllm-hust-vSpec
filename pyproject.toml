@@ -38,6 +38,9 @@ vllm-hust-vspec-fit-profile = "vllm_hust_vspec.adaptive.fitting:main"
 vllm-hust-vspec-profile = "vllm_hust_vspec.adaptive.profiling:main"
 vllm-hust-vspec-bench = "vllm_hust_vspec.online_benchmark:main"
 vllm-hust-vspec-prepare-backend = "vllm_hust_vspec.backend_bundle:main"
+vllm-hust-vspec-build-operator = "vllm_hust_vspec.native_operator_build:main"
+vllm-hust-vspec-validate-mask = "vllm_hust_vspec.validate_mask:main"
+vllm-hust-vspec-validate-tail-conv = "vllm_hust_vspec.validate_tail_conv:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -54,6 +57,9 @@ vllm_hust_vspec = [
     "_vendor/ascend_hust/overlay/vllm_ascend/*/*/*.py",
     "_vendor/operators/*/*.py",
     "_vendor/experimental_hooks/*.py",
+    "_vendor/native/gamma6_tail/*",
+    "_vendor/native/gamma6_tail/native-kernel/*",
+    "_vendor/native/gamma6_tail/native-kernel/arch35/*",
 ]
 
 [tool.pytest.ini_options]

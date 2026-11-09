@@ -22,12 +22,38 @@ The wheel also includes selected standalone Triton kernel sources under
 selected or registered by this staging operation. The corresponding
 experimental runtime-hook source snapshots are included under
 `vllm_hust_vspec/_vendor/experimental_hooks`; they are not automatically
-installed or enabled and retain fail-closed validation requirements. Current experimental paths
-still depend on additional host-side backend integration, build tooling and
-locally generated validation artifacts. Some CANN-derived headers and build
-modules use their own license and are not included in this bundle. Packaging
+enabled and retain fail-closed validation requirements. A single experimental
+Ascend convolution's sources and build entry point are included:
+
+`vllm-hust-vspec-build-operator --cann-root /path/to/CANN --destination /new/private/build-dir`
+
+This builds only that component, using the installed SDK and current Python's
+PyTorch and torch_npu. It neither validates nor enables it. To validate its
+fresh build against the selected installed backend, run:
+
+`vllm-hust-vspec-validate-tail-conv --component-dir /new/private/build-dir --backend-package /path/to/installed/backend/package`
+
+This test requires idle devices and writes only local component evidence. Its CANN-derived
+headers retain their original notices and the adjacent `CANN-LICENSE` applies
+to those files; it restricts usage and redistribution to the specified Huawei
+AI processor/Software purposes. Other components still need their source and
+appropriate licenses. Current experimental paths still depend on additional
+host-side backend integration, build tooling and locally generated validation
+artifacts. Packaging
 the remaining dependencies and providing safe automatic build, installation,
 validation and version matching remain required before a formal release.
+
+The prototype proof checks now bind a proof to the two physical devices
+reported by `npu-smi` in logical order instead of requiring historical device
+numbers. They reject a different allocation and ambiguous device remapping;
+they do not themselves replace independent component tests. The experimental
+mask component can create its own local proof with:
+
+`vllm-hust-vspec-validate-mask --backend /path/to/prepared/backend --destination /new/private/proof-dir`
+
+This runs a two-device test and writes a private proof only after the numerical,
+source-integrity and per-case speed gates pass. It is not a model, task-quality
+or end-to-end performance validation. Other components need their own proofs.
 
 No model, dataset, private benchmark configuration, logs, results or proof
 artifacts are distributed in this bundle. Hardware and driver, CANN SDK,
