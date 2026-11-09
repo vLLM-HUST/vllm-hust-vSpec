@@ -26,6 +26,7 @@ PROJECT_NAME = "vllm-hust-vspec"
 WHEEL_NAME = "vllm_hust_vspec"
 HOST_VERSION_RANGE = ">=0.17.2rc1.dev5871,<0.26"
 REQUIRED_TOOLS = {
+    "vllm-hust-vspec-install-runtime": "vllm_hust_vspec.runtime_installer:main",
     "vllm-hust-vspec-prepare-backend": "vllm_hust_vspec.backend_bundle:main",
     "vllm-hust-vspec-build-operator": "vllm_hust_vspec.native_operator_build:main",
     "vllm-hust-vspec-run-with-backend": "vllm_hust_vspec.run_with_backend:main",
@@ -198,6 +199,7 @@ def verify_wheel(path: Path, version: str) -> None:
         "vllm_hust_vspec/online_benchmark.py",
         "vllm_hust_vspec/backend_bundle.py",
         "vllm_hust_vspec/native_operator_build.py",
+        "vllm_hust_vspec/runtime_installer.py",
         "vllm_hust_vspec/validate_rgdr_state_pipeline.py",
         "vllm_hust_vspec/run_with_backend.py",
         "vllm_hust_vspec/evaluation/evaluation_endpoint.py",
@@ -264,6 +266,7 @@ def verify_sdist(path: Path, version: str) -> None:
     required = {
         f"{prefix}/release.sh",
         f"{prefix}/manage.sh",
+        f"{prefix}/install.sh",
         f"{prefix}/configs/agentx-qwen35-frontier-mtp2.example.json",
         f"{prefix}/configs/agentx-qwen35-frontier-target-only.example.json",
         f"{prefix}/configs/qwen25-14b-05b-arc-easy.toml",
@@ -281,6 +284,7 @@ def verify_sdist(path: Path, version: str) -> None:
         f"{prefix}/scripts/verify_release.py",
         f"{prefix}/scripts/verify_model_acceptance.py",
         f"{prefix}/src/vllm_hust_vspec/_version.py",
+        f"{prefix}/src/vllm_hust_vspec/runtime_installer.py",
         f"{prefix}/src/vllm_hust_vspec/evaluation/evaluation_endpoint.py",
         f"{prefix}/src/vllm_hust_vspec/evaluation/evaluation_worker_common.py",
         f"{prefix}/src/vllm_hust_vspec/evaluation/dynamic_worker.py",
@@ -299,6 +303,11 @@ def verify_sdist(path: Path, version: str) -> None:
         names = set(archive.getnames())
         required.update({f"{prefix}/src/{asset}" for asset in vendor_payload()})
         require(required <= names, f"sdist is missing {sorted(required - names)}")
+        installer = archive.extractfile(f"{prefix}/install.sh")
+        require(
+            installer is not None and installer.read() == (ROOT / "install.sh").read_bytes(),
+            "sdist install.sh differs from source",
+        )
         package_prefix = f"{prefix}/src/{WHEEL_NAME}/"
         for member in archive.getmembers():
             if not member.name.startswith(package_prefix) or member.isdir():

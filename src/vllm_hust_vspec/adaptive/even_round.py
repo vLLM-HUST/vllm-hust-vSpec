@@ -6,9 +6,19 @@ devices. Requests are proposals only, committed after the runtime's own proof.
 from collections import deque, OrderedDict
 from dataclasses import dataclass
 import math
+import os
 import statistics
 
 _POST_RPC_STEADY_OBSERVATIONS = 2
+
+
+def initial_even_gamma_from_env(environ=None):
+    """Use the widest arm by default; retain an explicit legacy start arm."""
+    values = os.environ if environ is None else environ
+    value = values.get('HUST_VSPEC_EVEN_INITIAL_GAMMA', '8')
+    if value not in ('2', '4', '6', '8'):
+        raise ValueError('HUST_VSPEC_EVEN_INITIAL_GAMMA must be 2, 4, 6, or 8')
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -21,13 +31,16 @@ class Transition:
 
 class EvenRoundSelector:
     def __init__(self, *, maximum=8, window=16, hysteresis=0.03,
-                 change_trigger=0.15, amortization_rounds=64):
+                 change_trigger=0.15, amortization_rounds=64, initial_gamma=2):
         if maximum < 2 or maximum > 8 or maximum % 2 or window < 2:
             raise ValueError('Require even maximum in [2,8] and window>=2')
         if not 0 <= hysteresis < 1 or not 0 < change_trigger < 1 or amortization_rounds < window:
             raise ValueError('Invalid stability/cost contract')
         self.candidates = tuple(range(2, maximum + 1, 2))
-        self.current_gamma = self.incumbent = 2
+        if initial_gamma not in self.candidates:
+            raise ValueError('Initial gamma must be an even candidate')
+        self.initial_gamma = initial_gamma
+        self.current_gamma = self.incumbent = initial_gamma
         self.window, self.hysteresis = window, hysteresis
         self.change_trigger, self.amortization_rounds = change_trigger, amortization_rounds
         self.samples = {g: deque(maxlen=window) for g in self.candidates}
@@ -58,7 +71,7 @@ class EvenRoundSelector:
         self.steady_feedback_excluded = 0
         self.steady_settling_observations = _POST_RPC_STEADY_OBSERVATIONS
         self.unmeasured_probe_cancellations = 0
-        self.bootstrap_committed_widths = {2}
+        self.bootstrap_committed_widths = {initial_gamma}
         self.bootstrap_unmeasured_higher_proposals = 0
         # Fresh-engine integer prefix observations only; never imported
         # latency tables, task labels, model values or a winning gamma.
@@ -448,7 +461,7 @@ class EvenRoundSelector:
         return None
 
     def summary(self):
-        return dict(candidates=list(self.candidates),initial_gamma=2,current_gamma=self.current_gamma,
+        return dict(candidates=list(self.candidates),initial_gamma=self.initial_gamma,current_gamma=self.current_gamma,
                     incumbent=self.incumbent,rounds=self.rounds,window=self.window,
                     pending=None if self.pending is None else self.pending.__dict__,
                     decisions=[d.__dict__ for d in self.decisions],

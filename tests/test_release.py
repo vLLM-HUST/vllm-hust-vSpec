@@ -53,9 +53,7 @@ def _write_test_artifacts(dist_dir: Path, stale_artifact: str | None = None) -> 
             relative = source.relative_to(PACKAGE).as_posix()
             content = _package_content(source, relative, stale_artifact == "wheel")
             archive.writestr(f"vllm_hust_vspec/{relative}", content)
-        archive.writestr(
-            f"{dist_info}/METADATA", f"Name: vllm-hust-vspec\nVersion: {VERSION}\n"
-        )
+        archive.writestr(f"{dist_info}/METADATA", f"Name: vllm-hust-vspec\nVersion: {VERSION}\n")
         archive.writestr(f"{dist_info}/RECORD", "")
         archive.writestr(f"{dist_info}/entry_points.txt", entry_points_text.getvalue())
 
@@ -65,6 +63,7 @@ def _write_test_artifacts(dist_dir: Path, stale_artifact: str | None = None) -> 
         for relative in (
             "release.sh",
             "manage.sh",
+            "install.sh",
             "configs",
             "docs",
             "examples/qwen35_three_datasets",
@@ -113,9 +112,7 @@ def test_release_accepts_matching_runtime_package_bytes(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("stale_artifact", ["wheel", "sdist"])
-def test_release_rejects_stale_runtime_package_bytes(
-    tmp_path: Path, stale_artifact: str
-) -> None:
+def test_release_rejects_stale_runtime_package_bytes(tmp_path: Path, stale_artifact: str) -> None:
     dist_dir = tmp_path / "dist"
     _write_test_artifacts(dist_dir, stale_artifact)
 

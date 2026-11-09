@@ -61,11 +61,12 @@ def test_manage_uninstall_cleans_intent_and_only_removes_vspec() -> None:
 
 
 def test_shortcut_scripts_delegate_to_manager() -> None:
-    install = run_script("install.sh", "--enable")
+    install = run_script("install.sh", "--help")
     uninstall = run_script("uninstall.sh")
 
-    assert "pip install --no-deps --editable" in install.stdout
-    assert "extension enable org.vllm-hust.vspec" in install.stdout
+    assert "--ascend-source" in install.stdout
+    assert "--cann-root" in install.stdout
+    assert "--private-dir" in install.stdout
     assert "pip uninstall -y vllm-hust-vspec" in uninstall.stdout
 
 

@@ -11,7 +11,8 @@ def basic_ready(s,ticket,controller):
         and requests and len(requests)<=16 and not s.waiting and not s.skipped_waiting
         and not s.num_waiting_for_streaming_input and controller.current_gamma==ticket.old
         and all(not r.use_structured_output and r.num_computed_tokens>=r.num_prompt_tokens
-            and r.max_tokens-r.num_output_tokens>=max(ticket.old,ticket.new)+1 for r in requests))
+            and r.max_tokens-r.num_output_tokens>=max(ticket.old,ticket.new)+1
+            and len(r.spec_token_ids)==ticket.old for r in requests))
 
 def install_core_step():
     from vllm.v1.engine.core import EngineCore
@@ -66,8 +67,16 @@ def install_core_step():
                     queue_depth=0,placeholders_zero=True,original_physical_fence_still_required=True,
                     actual_arm_RPC_wall_ms=arm_rpc_ms,
                     original_count_producer_still_required=True,all_costs_in_measured_wall=True)),flush=True)
+        # While a prefix-clip ticket is armed, the current cohort must remain
+        # closed. New requests may arrive between the arm RPC and the next
+        # scheduler invocation even if the waiting queue was empty at arm time.
+        previous_max=s.max_num_running_reqs
+        if getattr(phase,'_private_prefix_clip_ticket',None) is not None:
+            s.max_num_running_reqs=len(s.running)
         try:return original(core)
-        finally:finish_committed(phase,c)
+        finally:
+            s.max_num_running_reqs=previous_max
+            finish_committed(phase,c)
     step._private_prefix_bridge=True
     EngineCore.step_with_batch_queue=step
 

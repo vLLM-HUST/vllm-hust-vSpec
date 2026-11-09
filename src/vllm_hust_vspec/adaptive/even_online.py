@@ -2,21 +2,20 @@
 import os
 from .online import OnlineGammaController
 from .cpu_memo import MemoizedEvenRoundSelector as EvenRoundSelector
+from .even_round import initial_even_gamma_from_env
 from .even_probe_budget import probe_budget
 from .even_empty_return import measured_empty_return
 
 class EvenRoundOnlineController(OnlineGammaController):
     def __init__(self,**options):
         self.fixed4_ablation=os.environ.get('HUST_ISSUE18_B16_ARM')=='fixed4'
-        initial=4 if self.fixed4_ablation else 2
+        initial=4 if self.fixed4_ablation else initial_even_gamma_from_env()
         if (options['min_gamma'],options['max_gamma'],options['candidate_stride'],options['initial_gamma'])!=(2,8,2,initial):
-            raise RuntimeError('Even-round controller requires start2, stride2, max8')
+            raise RuntimeError('Even-round controller initial gamma does not match the runtime anchor')
         super().__init__(**options)
         self.even=EvenRoundSelector(window=options['window_size'],hysteresis=options['hysteresis'],
-                                    amortization_rounds=max(64,options['window_size']))
-        if self.fixed4_ablation:
-            self.even.current_gamma=self.even.incumbent=4
-            self.even.bootstrap_committed_widths={4}
+                                    amortization_rounds=max(64,options['window_size']),
+                                    initial_gamma=initial)
         self.even_refs={};self.even_acceptance={}
         self.even_last_accepted={};self.even_last_feedback_gamma=None
         self.even_last_logged_sequence=0

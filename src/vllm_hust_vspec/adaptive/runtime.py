@@ -1339,7 +1339,8 @@ def _online_initial_gamma(
                 raise RuntimeError('Even-round MTP requires [2,8]')
             if os.environ.get('HUST_ISSUE18_B16_ARM')=='fixed4':
                 return 4
-            return 2
+            from .even_round import initial_even_gamma_from_env
+            return initial_even_gamma_from_env()
         # MTP2 rolls the two-layer head repeatedly. Gamma 4 is the measured
         # B16 knee while the configured even-width arms remain candidates.
         anchor = min(max_gamma, max(min_gamma, 4))

@@ -126,7 +126,7 @@ def install(settings):
             or settings.adaptive_policy!='online' or (settings.adaptive_min_gamma,settings.adaptive_max_gamma)!=(2,8)
             or os.environ.get('VLLM_ASCEND_Q35_QUIESCENT_GROWTH')!='off'
             or os.environ.get('HUST_VSPEC_MTP_ASYNC_RUNTIME_SWITCH','0')=='1'):
-        raise RuntimeError('Even rounds require dedicated start2/max8 async lane, old4to6 growth OFF')
+        raise RuntimeError('Even rounds require dedicated even-gamma/max8 async lane, old4to6 growth OFF')
     from . import runtime
     from .even_online import EvenRoundOnlineController
     runtime.OnlineGammaController=EvenRoundOnlineController
