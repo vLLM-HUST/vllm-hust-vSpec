@@ -1,2 +1,4 @@
 benchmark_results/*.log -diff
 benchmark_results/**/*.log -diff
+# Patch context lines intentionally contain a single leading space.
+src/vllm_hust_vspec/_vendor/ascend_hust/*.patch whitespace=-blank-at-eol,-blank-at-eof

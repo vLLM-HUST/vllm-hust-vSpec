@@ -37,6 +37,7 @@ vllm-hust-vspec-doctor = "vllm_hust_vspec.compatibility:main"
 vllm-hust-vspec-fit-profile = "vllm_hust_vspec.adaptive.fitting:main"
 vllm-hust-vspec-profile = "vllm_hust_vspec.adaptive.profiling:main"
 vllm-hust-vspec-bench = "vllm_hust_vspec.online_benchmark:main"
+vllm-hust-vspec-prepare-backend = "vllm_hust_vspec.backend_bundle:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -45,7 +46,14 @@ where = ["src"]
 version = {attr = "vllm_hust_vspec._version.__version__"}
 
 [tool.setuptools.package-data]
-vllm_hust_vspec = ["manifests/*.json", "school028/*.json"]
+vllm_hust_vspec = [
+    "manifests/*.json",
+    "school028/*.json",
+    "_vendor/ascend_hust/*.patch",
+    "_vendor/ascend_hust/overlay/vllm_ascend/*/*.py",
+    "_vendor/ascend_hust/overlay/vllm_ascend/*/*/*.py",
+    "_vendor/operators/*/*.py",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -4,6 +4,8 @@
 
 实验性组件通过 `VSPEC_FUSED_PROPOSAL_VOTE_DIR`、`VSPEC_OWNER_MID_TWIN_DIR`、`VSPEC_OWNER_TAIL_TWIN_DIR`、`VSPEC_PREFIX_CLIP_BRIDGE_DIR`、`VSPEC_NATIVE_CONV_TILE_DIR`、`VSPEC_TWO_BANK_EMBEDDING_DIR`、`VSPEC_INPLACE_HEAD_NZ_DIR` 指定其本地验证材料目录；相关影子校验还使用 `VSPEC_ASCEND_SOURCE_ROOT` 和 `VSPEC_VLLM_SOURCE_ROOT`。路径未配置或校验不通过时，相应实验性功能应拒绝启用；设置路径不会跳过既有校验。不得把私人评测结果、模型权重或验证材料上传到此仓库。
 
+开发包包含基于 vLLM-Ascend-HUST 固定提交 `4e57439e58ed3d78e675f9fd7b4614fb183c5394` 的实验性后端补丁、附加源码与部分算子源码。可使用 `vllm-hust-vspec-prepare-backend --source <本地后端Git目录> --destination <新的私有目录>` 在不修改原后端的情况下准备源码副本。**该命令目前不会编译或安装后端，也不会生成算子的验证材料**；它不是一键安装或复现流程。用户仍需具备兼容的 Ascend 驱动、CANN 及工具链；完整安装流程和设备端验证尚待完成。
+
 历史原件下载与校验见 [benchmark custody guide](docs/benchmark-originals.md)。
 
 `vllm-hust-vSpec` 是面向 vLLM-HUST + vLLM-Ascend-HUST 的独立
