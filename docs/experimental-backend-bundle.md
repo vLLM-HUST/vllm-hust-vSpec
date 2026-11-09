@@ -26,13 +26,16 @@ enabled and retain fail-closed validation requirements. The historical
 experimental worker dependencies are included under `_vendor/runtime`; they
 are not enabled by default. Their component proofs are checked before worker
 hook installation, but the migrated worker has not been integration-tested or
-established as equivalent to the historical serving setup. A single experimental
-Ascend convolution's sources and build entry point are included:
+established as equivalent to the historical serving setup. Experimental
+Ascend convolution and recurrent operator sources and a build entry point are included:
 
 `vllm-hust-vspec-build-operator --cann-root /path/to/CANN --destination /new/private/build-dir`
 
-This builds only that component, using the installed SDK and current Python's
-PyTorch and torch_npu. It neither validates nor enables it. To validate its
+This builds the convolution component by default, using the installed SDK and
+current Python's PyTorch and torch_npu. The `--operator` option can also select
+`gamma6-rgdr`, `gamma6-rgdr-reference`, `gamma6-rgdr-packed-reference`, or
+`gamma8-rgdr`. Building does not validate or enable a component. To validate the
+convolution's
 fresh build against the selected installed backend, run:
 
 `vllm-hust-vspec-validate-tail-conv --component-dir /new/private/build-dir --backend-package /path/to/installed/backend/package`
@@ -57,7 +60,22 @@ mask component can create its own local proof with:
 
 This runs a two-device test and writes a private proof only after the numerical,
 source-integrity and per-case speed gates pass. It is not a model, task-quality
-or end-to-end performance validation. Other components need their own proofs.
+or end-to-end performance validation. The two GDN-input components have an
+experimental local test command:
+
+`vllm-hust-vspec-validate-gdn-input --width 6 --backend /path/to/installed/site-packages --vllm-source /path/to/vllm --destination /new/private/proof-dir`
+
+Run it separately with width `8` and a different destination for the second
+component. It rejects an active backend or vLLM source that differs from the
+selected paths, and validates the packaged kernel against that backend. These
+commands do not validate the full model. The gamma-six reference and gamma-eight
+recurrent builds have a separate local proof command:
+
+`vllm-hust-vspec-validate-rgdr --component gamma8 --component-dir /new/private/build-dir --backend-package /path/to/installed/backend/package`
+
+The gamma-six reference uses `--component gamma6-reference`. The packed
+gamma-six variants require additional chained proofs which this command does
+not yet provide. Other components also need their own proofs.
 
 No model, dataset, private benchmark configuration, logs, results or proof
 artifacts are distributed in this bundle. Hardware and driver, CANN SDK,

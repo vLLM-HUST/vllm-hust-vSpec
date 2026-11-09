@@ -23,6 +23,7 @@ def test_stages_source_and_invokes_build_without_overwriting(tmp_path, monkeypat
     destination = tmp_path / 'private-build'
     build_operator(source, destination, cann, python, torch, 3)
     assert (destination / 'CMakeLists.txt').read_text() == 'project(test)'
+    assert destination.stat().st_mode & 0o777 == 0o700
     assert len(calls) == 2 and calls[0][1]['env']['ASCEND_HOME_PATH'] == str(cann)
     assert f'-DPython3_EXECUTABLE={python}' in calls[0][0]
     assert calls[1][0][-2:] == ['--parallel', '3']
