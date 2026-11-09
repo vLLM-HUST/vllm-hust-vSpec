@@ -133,6 +133,16 @@ class PublicExampleTests(unittest.TestCase):
                     for key, suffix in paired.CACHE_DIRS.items():
                         self.assertEqual(env[key], str(run_dir / "cache" / suffix))
                         self.assertTrue(Path(env[key]).is_dir())
+                    if arm == "dynamic":
+                        self.assertEqual(
+                            env["PYTHONPATH"].split(os.pathsep),
+                            [
+                                "/private/evaluation",
+                                str(cann_site),
+                                str(opp / "built-in" / "op_impl" / "ai_core" / "tbe"),
+                            ],
+                        )
+                        self.assertNotIn("/private/dynamic-backend", env["PYTHONPATH"])
             dump(env_file, {"VLLM_WORKER_MULTIPROC_METHOD": "fork"})
             with self.assertRaisesRegex(ValueError, "differs from the matched profile"):
                 paired.read_env(env_file, dynamic=False)

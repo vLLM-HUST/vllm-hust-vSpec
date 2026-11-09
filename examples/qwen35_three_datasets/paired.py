@@ -478,6 +478,16 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         raise ValueError("Both arms require unambiguous logical NPU visibility 0,1")
     if arm == "dynamic":
         env.update(setup["dynamic_env"])
+    if arm == "native":
+        import_paths = (
+            setup["paths"]["native_backend_package"],
+            setup["paths"]["native_evaluation_static_dir"],
+            setup["paths"]["native_evaluation_dir"],
+        )
+    else:
+        # The dynamic backend is already in dynamic_python's site-packages.
+        # Do not expose Python 3.11 packages to CANN's Python 3.12 compiler.
+        import_paths = (setup["paths"]["dynamic_evaluation_dir"],)
     env.update(
         VLLM_PLUGINS="ascend,vspec_eval" if arm == "native" else "ascend,vspec,vspec_eval",
         HUST_VSPEC_PRIVATE_COMPILER_ROOT=str(run_dir),
@@ -487,22 +497,7 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         ASCEND_RT_VISIBLE_DEVICES="0,1",
         VSPEC_EVAL_ARM=arm,
         VSPEC_EVAL_TOKEN=setup["evaluation_token"],
-        PYTHONPATH=(
-            os.pathsep.join(
-                (
-                    setup["paths"]["native_backend_package"],
-                    setup["paths"]["native_evaluation_static_dir"],
-                    setup["paths"]["native_evaluation_dir"],
-                )
-            )
-            if arm == "native"
-            else os.pathsep.join(
-                (
-                    setup["paths"]["dynamic_backend_package"],
-                    setup["paths"]["dynamic_evaluation_dir"],
-                )
-            )
-        ),
+        PYTHONPATH=os.pathsep.join(import_paths),
     )
     if (
         env.get("HUST_VSPEC_CAPTURE_SAFE_STATIC") != "1"
