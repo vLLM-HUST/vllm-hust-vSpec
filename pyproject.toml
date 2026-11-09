@@ -43,6 +43,7 @@ vllm-hust-vspec-validate-mask = "vllm_hust_vspec.validate_mask:main"
 vllm-hust-vspec-validate-tail-conv = "vllm_hust_vspec.validate_tail_conv:main"
 vllm-hust-vspec-validate-gdn-input = "vllm_hust_vspec.validate_gdn_input:main"
 vllm-hust-vspec-validate-rgdr = "vllm_hust_vspec.validate_rgdr:main"
+vllm-hust-vspec-validate-rgdr-state-pipeline = "vllm_hust_vspec.validate_rgdr_state_pipeline:main"
 vllm-hust-vspec-validate-conv = "vllm_hust_vspec.validate_conv:main"
 vllm-hust-vspec-validate-prefix-clip = "vllm_hust_vspec.validate_prefix_clip:main"
 vllm-hust-vspec-validate-two-bank = "vllm_hust_vspec.validate_two_bank:main"
@@ -74,6 +75,7 @@ vllm_hust_vspec = [
     "_vendor/native/gamma6_rgdr_reference/*",
     "_vendor/native/gamma6_rgdr_packed_reference/*",
     "_vendor/native/gamma8_rgdr/*",
+    "_vendor/native/rgdr_state_pipeline/*",
     "_vendor/native/fia_host/*",
     "_vendor/native/conv_reference/*",
     "_vendor/native/conv_reference/native-kernel/*",
