@@ -50,6 +50,38 @@ def warmup_manifest(dataset: str, plan: Path, case_ids: list[str]) -> dict:
 
 
 class PublicExampleTests(unittest.TestCase):
+    def test_native_operator_preflight_does_not_claim_dynamic_counter_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            before = {"results": [{"pid": 10}, {"pid": 11}]}
+            proof = {"results": [{"arm": "native"}]}
+            with (
+                patch.object(paired, "_eval_request", return_value=proof),
+                patch.object(paired, "_validate_operator_proof") as validate,
+            ):
+                self.assertIsNone(
+                    paired._preflight_operator_proof({}, "native", run_dir, before)
+                )
+            validate.assert_called_once_with("native", proof, before, before)
+            self.assertFalse((run_dir / "operator-before.json").exists())
+
+    def test_dynamic_operator_preflight_saves_counter_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            proof = {"results": [{"arm": "dynamic"}]}
+            with (
+                patch.object(paired, "_eval_request", return_value=proof),
+                patch.object(
+                    paired, "_static_install_signature", return_value={0: {"pid": 10}, 1: {"pid": 11}}
+                ),
+                patch.object(paired, "_dynamic_counter_inventory") as inventory,
+            ):
+                self.assertIs(
+                    paired._preflight_operator_proof({}, "dynamic", run_dir, {}), proof
+                )
+            inventory.assert_called_once_with(proof, {0: 10, 1: 11})
+            self.assertEqual(paired.read_json(run_dir / "operator-before.json"), proof)
+
     def test_common_vllm_flags_are_frozen_and_private_caches_are_isolated(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

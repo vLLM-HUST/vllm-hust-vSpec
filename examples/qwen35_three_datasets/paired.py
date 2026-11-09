@@ -1005,6 +1005,22 @@ def _prepare_timing(
     return before, runtime_common, warmup_receipt
 
 
+def _preflight_operator_proof(
+    setup: dict[str, Any], arm: str, run_dir: Path, before: Any
+) -> Any | None:
+    preflight = _eval_request(setup, "vspec-evaluation-operator-proof")
+    if arm == "native":
+        _validate_operator_proof(arm, preflight, before, before)
+        return None
+    identities = {
+        rank: install["pid"]
+        for rank, install in _static_install_signature(arm, before).items()
+    }
+    _dynamic_counter_inventory(preflight, identities)
+    write_new(run_dir / "operator-before.json", preflight)
+    return preflight
+
+
 def _verify_record_hashes(run_dir: Path, receipt: dict[str, Any]) -> None:
     output = (run_dir / "solver").resolve(strict=True)
     if Path(receipt["solver_output"]).resolve(strict=True) != output:
@@ -1182,16 +1198,7 @@ def run(args: argparse.Namespace) -> None:
             before, runtime_common, warmup_receipt = _prepare_timing(
                 setup, arm, dataset, run_dir, warmup_cmd, warmup_ids, args.client_source
             )
-            operator_before = _eval_request(setup, "vspec-evaluation-operator-proof")
-            if arm == "dynamic":
-                identities = {
-                    rank: install["pid"]
-                    for rank, install in _static_install_signature(arm, before).items()
-                }
-                _dynamic_counter_inventory(operator_before, identities)
-                write_new(run_dir / "operator-before.json", operator_before)
-            else:
-                _validate_operator_proof(arm, operator_before, before, before)
+            operator_before = _preflight_operator_proof(setup, arm, run_dir, before)
             timing_started_utc = datetime.now(UTC).isoformat()
             started = time.monotonic()
             with (run_dir / "client.log").open("x", encoding="utf-8") as client_log:
