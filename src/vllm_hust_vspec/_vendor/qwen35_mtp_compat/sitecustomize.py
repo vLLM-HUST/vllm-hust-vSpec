@@ -13,11 +13,18 @@ _CANN_COMPILER_ENTRYPOINTS = {
     ("op_compile_tool", "op_compiler_tool.py"),
     ("opc_tool", "opc.py"),
 }
-_entrypoint = (os.path.basename(os.path.dirname(sys.argv[0])), os.path.basename(sys.argv[0]))
-if _entrypoint in _CANN_COMPILER_ENTRYPOINTS:
+_script = os.path.normpath(sys.argv[0])
+_entrypoint = (os.path.basename(os.path.dirname(_script)), os.path.basename(_script))
+_static_installer = (
+    _entrypoint == ("scripts", "install.py")
+    and ("static_kernel", "ai_core") in zip(
+        _script.split(os.sep), _script.split(os.sep)[1:]
+    )
+)
+if _entrypoint in _CANN_COMPILER_ENTRYPOINTS or _static_installer:
     # The compiler starts further Python tools with its environment. Neither
-    # it nor its children are vLLM workers, so do not install the KV/Mamba
-    # compatibility bridge there. The parent worker remains unchanged.
+    # it, its children, nor the generated static-kernel package installer are
+    # vLLM workers. Keep the parent worker's bridge and fail-closed behavior.
     os.environ.pop("QWEN35_MTP_COMPAT", None)
 
 if os.environ.get("QWEN35_MTP_COMPAT") == "1":

@@ -142,15 +142,18 @@ def test_unflagged_sitecustomize_does_not_import_runtime_modules():
 
 
 @pytest.mark.parametrize(
-    ("directory", "filename"),
-    (("op_compile_tool", "op_compiler_tool.py"), ("opc_tool", "opc.py")),
+    "relative_path",
+    (
+        "op_compile_tool/op_compiler_tool.py",
+        "opc_tool/opc.py",
+        "static_kernel/ai_core/generated/scripts/install.py",
+    ),
 )
 def test_cann_compiler_subprocess_does_not_load_bridge_or_pass_flag(
-    tmp_path, directory, filename
+    tmp_path, relative_path
 ):
-    compiler_dir = tmp_path / directory
-    compiler_dir.mkdir()
-    entrypoint = compiler_dir / filename
+    entrypoint = tmp_path / relative_path
+    entrypoint.parent.mkdir(parents=True)
     entrypoint.write_text(
         "import os, subprocess, sys\n"
         "assert 'QWEN35_MTP_COMPAT' not in os.environ\n"
