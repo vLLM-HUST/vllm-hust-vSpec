@@ -8,7 +8,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -113,6 +113,53 @@ def test_static_install_snapshot_proves_coordinator_and_receiver(tmp_path):
     info.unlink()
     with pytest.raises(RuntimeError, match="incomplete"):
         metadata.snapshot(static, tmp_path, 1, 5678)
+
+
+def test_native_software_path_observer_accepts_absent_q35_only_attributes(monkeypatch):
+    def module(name, package=False):
+        result = ModuleType(name)
+        if package:
+            result.__path__ = []
+        monkeypatch.setitem(sys.modules, name, result)
+        return result
+
+    bf16 = object()
+    none = object()
+    module("torch").bfloat16 = bf16
+    module("vllm_ascend", package=True)
+    module("vllm_ascend.ops", package=True)
+    module("vllm_ascend.ops.fused_moe", package=True)
+    fused_moe = module("vllm_ascend.ops.fused_moe.fused_moe")
+    module("vllm_ascend.quantization", package=True)
+    quant_type = module("vllm_ascend.quantization.quant_type")
+    quant_type.QuantType = SimpleNamespace(NONE=none)
+
+    class AscendMoERunner:
+        def __init__(self, name):
+            self.layer_name = name
+            self.ascend_shared_experts = SimpleNamespace(
+                multistream_overlap=False, weights_replicated=False
+            )
+            self.quant_type = none
+            self.gate = SimpleNamespace(weight=SimpleNamespace(dtype=bf16))
+
+    fused_moe.AscendMoERunner = AscendMoERunner
+    target = [AscendMoERunner(str(index)) for index in range(40)]
+    draft = [AscendMoERunner("draft")]
+    model = lambda owners: SimpleNamespace(
+        named_modules=lambda: iter((str(index), owner) for index, owner in enumerate(owners))
+    )
+    observer = _load("vspec_readonly_observer").ReadOnlyVSpecWorkerObserver()
+    observer.model_runner = SimpleNamespace(
+        model=model(target), drafter=SimpleNamespace(model=model(draft))
+    )
+    proof = observer.get_vspec_readonly_software_paths()
+    assert len(proof["rows"]) == 41
+    assert all(row["original_same_and_cross_stream_events_restored"] for row in proof["rows"])
+    target[0]._q35_single_stream_events = True
+    assert not observer.get_vspec_readonly_software_paths()["rows"][0][
+        "original_same_and_cross_stream_events_restored"
+    ]
 
 
 def test_native_worker_loads_without_plugin_or_npu(tmp_path):

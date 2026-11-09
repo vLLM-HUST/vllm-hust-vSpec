@@ -25,8 +25,8 @@ class ReadOnlyVSpecWorkerObserver:
                         "actual_multistream_overlap": bool(shared.multistream_overlap),
                         "shared_weights_replicated": bool(shared.weights_replicated),
                         "original_same_and_cross_stream_events_restored": (
-                            not owner._q35_single_stream_events
-                            and not shared._q35_single_stream_events
+                            not getattr(owner, "_q35_single_stream_events", False)
+                            and not getattr(shared, "_q35_single_stream_events", False)
                         ),
                         "incompatible_serial_cache_absent": (
                             not hasattr(owner, "_q35_immutable_cache")
