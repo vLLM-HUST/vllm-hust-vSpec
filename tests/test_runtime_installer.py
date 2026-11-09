@@ -21,6 +21,7 @@ def test_full_install_plan_builds_and_validates_each_operator(tmp_path: Path) ->
     labels = [label for label, _ in plan]
 
     assert labels[:3] == ["plugin", "backend-source", "backend-wheel"]
+    assert "--force-reinstall" in plan[0][1]
     for operator, _, _ in OPERATORS:
         build = labels.index(f"build-{operator}")
         assert labels[build + 1] == f"validate-{operator}"

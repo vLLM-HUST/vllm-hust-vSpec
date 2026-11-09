@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import importlib.resources
 import json
@@ -10,12 +11,20 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 from .backends.experimental_paths import current_npu_allocation
 
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@contextmanager
+def short_socket_tmpdir():
+    """Keep multiprocessing manager sockets below the AF_UNIX path limit."""
+    with tempfile.TemporaryDirectory(prefix='vspec-head-', dir='/tmp') as path:
+        yield Path(path)
 
 
 def validate(model: Path, destination: Path) -> None:
@@ -39,15 +48,17 @@ def validate(model: Path, destination: Path) -> None:
                VLLM_PLUGINS='', OMP_NUM_THREADS='1', TORCH_DEVICE_BACKEND_AUTOLOAD='0')
     for key in ('XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'VLLM_CACHE_ROOT', 'TRITON_CACHE_DIR',
                 'TORCHINDUCTOR_CACHE_DIR', 'TORCH_HOME', 'TORCH_EXTENSIONS_DIR', 'HF_HOME',
-                'ASCEND_WORK_PATH', 'ASCEND_PROCESS_LOG_PATH', 'ASCEND_CACHE_PATH', 'ACL_OP_COMPILER_CACHE_DIR', 'TMPDIR'):
+                'ASCEND_WORK_PATH', 'ASCEND_PROCESS_LOG_PATH', 'ASCEND_CACHE_PATH', 'ACL_OP_COMPILER_CACHE_DIR'):
         path = destination / 'cache' / key.lower()
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         env[key] = str(path)
     out = destination / 'real-head-runtime-true-r1.json'
     cmd = [sys.executable, '-B', '-m', 'torch.distributed.run', '--standalone', '--nproc-per-node=2',
            str(destination / 'micro.py'), '--output', str(out)]
-    with (destination / 'run.log').open('x') as log:
-        subprocess.run(cmd, cwd=destination, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+    with short_socket_tmpdir() as socket_tmp:
+        env['TMPDIR'] = str(socket_tmp)
+        with (destination / 'run.log').open('x') as log:
+            subprocess.run(cmd, cwd=destination, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     if current_npu_allocation() != physical:
         raise RuntimeError('Device allocation changed during validation')
     ranks = [json.loads((destination / f'real-head-runtime-true-r1-rank{rank}.json').read_text()) for rank in (0, 1)]

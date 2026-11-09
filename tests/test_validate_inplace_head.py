@@ -16,3 +16,10 @@ def test_rejects_output_inside_checkpoint(tmp_path):
     (model / 'model.safetensors.index.json').write_text('{}')
     with pytest.raises(ValueError):
         validate_inplace_head.validate(model, model / 'proof')
+
+
+def test_manager_socket_tmpdir_is_short_and_cleaned():
+    with validate_inplace_head.short_socket_tmpdir() as path:
+        assert path.is_dir()
+        assert len(str(path)) < 60
+    assert not path.exists()

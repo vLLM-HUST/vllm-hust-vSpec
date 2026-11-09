@@ -146,7 +146,7 @@ def commands(args: argparse.Namespace, backend_site: Path) -> list[tuple[str, li
         steps.append((name, command))
 
     if args.wheel is not None:
-        add("plugin", [sys.executable, "-m", "pip", "install", "--no-deps", str(args.wheel)])
+        add("plugin", [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", str(args.wheel)])
     elif args.plugin_source is not None:
         add(
             "plugin",
@@ -296,7 +296,7 @@ def run(args: argparse.Namespace) -> Path:
     if len(wheels) != 1:
         raise RuntimeError(f"Expected one built backend wheel, found {len(wheels)}")
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-deps", str(wheels[0])],
+        [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheels[0])],
         check=True,
         env=environment,
     )
