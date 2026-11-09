@@ -102,6 +102,20 @@ def existing_path(value: str, kind: str) -> Path:
     return path
 
 
+def _active_evaluation_dir(python: str) -> Path:
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    command = [
+        python,
+        "-c",
+        "import importlib.util; spec=importlib.util.find_spec('vllm_hust_vspec'); "
+        "print(spec.origin if spec is not None else '')",
+    ]
+    origin = subprocess.check_output(command, text=True, env=env, timeout=20).strip()
+    if not origin or not Path(origin).is_absolute():
+        raise RuntimeError("Selected Python does not have an installed vSpec package")
+    return Path(origin).resolve(strict=True).parent / "evaluation"
+
+
 def read_env(path: Path, *, dynamic: bool) -> dict[str, str]:
     values = read_json(path)
     if not isinstance(values, dict):
@@ -132,7 +146,7 @@ def read_env(path: Path, *, dynamic: bool) -> dict[str, str]:
 
 
 def aligned_configs(
-    common: dict[str, Any], model: str, alias: str, port: int, native_worker: str | None
+    common: dict[str, Any], model: str, alias: str, port: int
 ) -> dict[str, dict[str, Any]]:
     if REQUIRED_COMMON - set(common):
         raise ValueError(f"Shared server config is missing {sorted(REQUIRED_COMMON - set(common))}")
@@ -159,13 +173,11 @@ def aligned_configs(
         cfg = copy.deepcopy(common)
         cfg.update(model=model, host="127.0.0.1", port=port, served_model_name=alias)
         cfg["speculative_config"]["num_speculative_tokens"] = capacity
-        worker = (
-            native_worker or "native_static_worker.NativeEvaluationWorker"
+        cfg["worker_extension_cls"] = (
+            "native_static_worker.NativeEvaluationWorker"
             if arm == "native"
             else "dynamic_worker.DynamicEvaluationWorker"
         )
-        if worker:
-            cfg["worker_extension_cls"] = worker
         pair[arm] = cfg
     normalized = copy.deepcopy(pair)
     for cfg in normalized.values():
@@ -199,6 +211,8 @@ def prepare(args: argparse.Namespace) -> None:
             "client_python",
             "native_backend_package",
             "dynamic_backend_package",
+            "native_evaluation_dir",
+            "dynamic_evaluation_dir",
         )
     }
     for key in ("native_python", "dynamic_python", "client_python"):
@@ -206,9 +220,13 @@ def prepare(args: argparse.Namespace) -> None:
             raise ValueError(f"{key} is not executable")
     if args.port < 1 or args.port > 65535 or not args.served_model:
         raise ValueError("A valid loopback port and served model name are required")
-    pair = aligned_configs(common, str(model), args.served_model, args.port, args.native_worker)
+    pair = aligned_configs(common, str(model), args.served_model, args.port)
     for arm in ("native", "dynamic"):
-        directory = Path(paths[f"{arm}_backend_package"]) / "vllm_hust_vspec" / "evaluation"
+        directory = Path(paths[f"{arm}_evaluation_dir"])
+        if directory.name != "evaluation" or directory.parent.name != "vllm_hust_vspec":
+            raise ValueError("Evaluation assets must come from an installed vSpec package")
+        if directory != _active_evaluation_dir(paths[f"{arm}_python"]):
+            raise ValueError(f"{arm} evaluation assets differ from the active Python package")
         for name in (
             "evaluation_endpoint.py",
             "evaluation_worker_common.py",
@@ -216,12 +234,21 @@ def prepare(args: argparse.Namespace) -> None:
         ):
             if not (directory / name).is_file():
                 raise FileNotFoundError(f"Installed evaluation asset missing: {directory / name}")
-        paths[f"{arm}_evaluation_dir"] = str(directory)
-    native_static_dir = (
-        Path(paths["native_backend_package"]) / "vllm_hust_vspec" / "evaluation_static"
-    )
-    if not (native_static_dir / "native_static_worker.py").is_file():
-        raise FileNotFoundError(f"Installed native static worker missing: {native_static_dir}")
+    native_static_dir = Path(paths["native_evaluation_dir"]).parent / "evaluation_static"
+    for name in (
+        "native_static_worker.py",
+        "capture_safe_static.py",
+        "hot_static_options.py",
+        "static_install_metadata.py",
+        "vspec_readonly_observer.py",
+        "vspec_readonly_compiler.py",
+        "vspec_readonly_nge_worker.py",
+        "vspec_readonly_static_worker.py",
+    ):
+        if not (native_static_dir / name).is_file():
+            raise FileNotFoundError(
+                f"Installed native static asset missing: {native_static_dir / name}"
+            )
     paths["native_evaluation_static_dir"] = str(native_static_dir)
     root.mkdir(parents=True, mode=0o700)
     config_dir = root / "server-config"
@@ -477,6 +504,25 @@ def _validate_runtime_metadata(arm: str, response: Any) -> dict[str, Any]:
     return common
 
 
+def _validate_operator_proof(arm: str, response: Any) -> None:
+    rows = response.get("results") if isinstance(response, dict) else None
+    if not isinstance(rows, list) or len(rows) != 2 or any(row.get("arm") != arm for row in rows):
+        raise RuntimeError("Operator proof did not cover the selected two-arm worker ranks")
+    if arm == "native":
+        if not all(
+            row.get("static_runtime", {}).get("vspec_plugin_absent")
+            and row.get("static_runtime", {}).get("static_install")
+            for row in rows
+        ):
+            raise RuntimeError("Native operator proof is incomplete")
+    elif not all(
+        len(row.get("native_edge_convolution", ())) == 30
+        and len(row.get("native_gamma8_RGDR", ())) == 30
+        for row in rows
+    ):
+        raise RuntimeError("Dynamic operator proof lacks the expected Qwen3.5 layers")
+
+
 def _stop_owned_server(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
@@ -631,8 +677,7 @@ def run(args: argparse.Namespace) -> None:
                 raise RuntimeError("Shared runtime configuration changed during the run")
             write_new(run_dir / "worker-after.json", after)
             operator = _eval_request(setup, "vspec-evaluation-operator-proof")
-            if not isinstance(operator.get("results"), list) or len(operator["results"]) != 2:
-                raise RuntimeError("Operator proof did not cover both worker ranks")
+            _validate_operator_proof(arm, operator)
             write_new(run_dir / "operator-proof.json", operator)
             receipt = {
                 "schema_version": 1,
@@ -885,12 +930,11 @@ def build_parser() -> argparse.ArgumentParser:
         "client-python",
         "native-backend-package",
         "dynamic-backend-package",
+        "native-evaluation-dir",
+        "dynamic-evaluation-dir",
         "served-model",
     ):
         p.add_argument("--" + name, required=True)
-    p.add_argument(
-        "--native-worker", help="installed native observer worker; omit for diagnostic only"
-    )
     p.add_argument("--port", type=int, required=True)
     p.set_defaults(fn=prepare)
     p = sub.add_parser("run", help="start one arm, time one frozen solver selection, then stop it")

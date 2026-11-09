@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 import paired
 import select_cases
@@ -35,12 +36,12 @@ def common_config() -> dict:
 
 class PublicExampleTests(unittest.TestCase):
     def test_configs_share_everything_except_depth_and_worker(self):
-        pair = paired.aligned_configs(
-            common_config(), "/models/qwen", "test-solver", 18080, "native.Observer"
-        )
+        pair = paired.aligned_configs(common_config(), "/models/qwen", "test-solver", 18080)
         self.assertEqual(pair["native"]["speculative_config"]["num_speculative_tokens"], 4)
         self.assertEqual(pair["dynamic"]["speculative_config"]["num_speculative_tokens"], 8)
-        self.assertEqual(pair["native"]["worker_extension_cls"], "native.Observer")
+        self.assertEqual(
+            pair["native"]["worker_extension_cls"], "native_static_worker.NativeEvaluationWorker"
+        )
         self.assertIn("DynamicEvaluationWorker", pair["dynamic"]["worker_extension_cls"])
         for arm in pair:
             pair[arm].pop("worker_extension_cls")
@@ -51,11 +52,11 @@ class PublicExampleTests(unittest.TestCase):
         config = common_config()
         config["dtype"] = "float16"
         with self.assertRaises(ValueError):
-            paired.aligned_configs(config, "/model", "solver", 1, None)
+            paired.aligned_configs(config, "/model", "solver", 1)
         config = common_config()
         config["kv_cache_memory_bytes"] = 0
         with self.assertRaises(ValueError):
-            paired.aligned_configs(config, "/model", "solver", 1, None)
+            paired.aligned_configs(config, "/model", "solver", 1)
         with self.assertRaises(ValueError):
             select_cases.private_output(Path("relative.json"))
 
@@ -105,6 +106,59 @@ class PublicExampleTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 paired._record_usage("hle-verified", output, ["one", "two"])
 
+    def test_runtime_and_operator_proof_cover_both_ranks(self):
+        def row(rank):
+            return {
+                "arm": "native",
+                "configured_speculative_capacity": 4,
+                "vspec_module_loaded": False,
+                "dtype": "torch.bfloat16",
+                "quantization": None,
+                "explicit_kv_bytes": 2_000_000_000,
+                "prefix_cache": True,
+                "compiler": {"actual_enable_static_kernel": True},
+                "static": {
+                    "static_install": {
+                        "rank": rank,
+                        "process_isolation": True,
+                        "actual_installed_device_binary_sha256": {"kernel.o": "hash"},
+                    }
+                },
+                "max_model_len": 32768,
+                "max_num_seqs": 16,
+                "max_num_batched_tokens": 4096,
+                "mamba_cache_mode": "align",
+                "model_text_type": "qwen3_5",
+            }
+
+        response = {"results": [row(0), row(1)]}
+        common = paired._validate_runtime_metadata("native", response)
+        self.assertEqual(common["max_model_len"], 32768)
+        paired._validate_operator_proof(
+            "native",
+            {
+                "results": [
+                    {
+                        "arm": "native",
+                        "static_runtime": {
+                            "vspec_plugin_absent": True,
+                            "static_install": {"rank": 0},
+                        },
+                    },
+                    {
+                        "arm": "native",
+                        "static_runtime": {
+                            "vspec_plugin_absent": True,
+                            "static_install": {"rank": 1},
+                        },
+                    },
+                ]
+            },
+        )
+        response["results"][1]["max_model_len"] = 65536
+        with self.assertRaisesRegex(RuntimeError, "disagree"):
+            paired._validate_runtime_metadata("native", response)
+
     def test_prepare_and_run_dry_run_without_npu(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -129,7 +183,17 @@ class PublicExampleTests(unittest.TestCase):
                 (evaluation / name).touch()
             static = backend / "vllm_hust_vspec" / "evaluation_static"
             static.mkdir()
-            (static / "native_static_worker.py").touch()
+            for name in (
+                "native_static_worker.py",
+                "capture_safe_static.py",
+                "hot_static_options.py",
+                "static_install_metadata.py",
+                "vspec_readonly_observer.py",
+                "vspec_readonly_compiler.py",
+                "vspec_readonly_nge_worker.py",
+                "vspec_readonly_static_worker.py",
+            ):
+                (static / name).touch()
             common = root / "common.json"
             common_env = root / "common-env.json"
             dynamic_env = root / "dynamic-env.json"
@@ -155,12 +219,14 @@ class PublicExampleTests(unittest.TestCase):
                 client_python=str(python),
                 native_backend_package=str(backend),
                 dynamic_backend_package=str(backend),
+                native_evaluation_dir=str(evaluation),
+                dynamic_evaluation_dir=str(evaluation),
                 served_model="test-solver",
                 port=18080,
-                native_worker="native.Observer",
             )
-            with contextlib.redirect_stdout(io.StringIO()):
-                paired.prepare(setup_args)
+            with patch.object(paired, "_active_evaluation_dir", return_value=evaluation):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    paired.prepare(setup_args)
             plan = root / "mmlu-plan"
             dump(plan / "contract.json", {"dataset": "mmlu-pro"})
             dump(plan / "cases.json", [{"case_id": "one"}])

@@ -51,8 +51,12 @@ PRIVATE_ROOT=/path/to/private/evaluation
   --client-python "$CLIENT_PYTHON" \
   --native-backend-package /path/to/fresh/native-venv/lib/pythonX.Y/site-packages \
   --dynamic-backend-package /path/to/fresh/dynamic-venv/lib/pythonX.Y/site-packages \
+  --native-evaluation-dir /path/to/fresh/native-venv/lib/pythonX.Y/site-packages/vllm_hust_vspec/evaluation \
+  --dynamic-evaluation-dir /path/to/fresh/dynamic-venv/lib/pythonX.Y/site-packages/vllm_hust_vspec/evaluation \
   --served-model paired-solver --port 18080
 ```
+
+若原生 `vllm_ascend` 是单独的后端覆盖层，`--native-backend-package` 指向该覆盖层，`--native-evaluation-dir` 仍指向**同一原生 Python 环境安装的插件 wheel**；两者不必是同一目录。原生静态 worker 位于该 evaluation 目录的同级 `evaluation_static`，由入口核验后加入子进程模块路径。
 
 HLE-Verified 与 FrontierScience 需分别执行一次 `prepare`，各自使用本数据集冻结的配置及 judge/solver plan。两个客户端的 `contract.json` 中 solver URL/模型名必须和上述 loopback 地址/别名一致，否则 `run` 会拒绝。判断服务可在不同端口运行，但应由操作者按客户端冻结的 judge 配置单独管理。若计划由不同客户端版本生成，应先重新冻结并记录版本/哈希。
 
