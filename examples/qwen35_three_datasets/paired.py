@@ -738,6 +738,52 @@ def _validate_runtime_metadata(arm: str, response: Any) -> dict[str, Any]:
     return common
 
 
+def _paired_runtime_common(runtime: dict[str, Any]) -> dict[str, Any]:
+    """Compare shared settings, not capacity-dependent compiled graph shapes."""
+    common = dict(runtime)
+    compiler = dict(common["compiler"])
+    compiler.pop("all_capture_keys")
+    common["compiler"] = compiler
+    return common
+
+
+def _verify_run_capture_keys(arm: str, directory: Path, runtime: dict[str, Any]) -> None:
+    """Keep each arm's captured keys tied to its own worker and operator proof."""
+    expected = runtime["compiler"]["all_capture_keys"]
+    if (
+        not isinstance(expected, list)
+        or not expected
+        or any(type(key) is not int or key <= 0 for key in expected)
+        or len(set(expected)) != len(expected)
+    ):
+        raise ValueError(f"Invalid {arm} captured compiler keys")
+    install_key = "static_install" if arm == "native" else "static"
+    for filename, state_key in (
+        ("worker-before.json", "static"),
+        ("worker-after.json", "static"),
+        ("operator-proof.json", "static_runtime"),
+    ):
+        rows = read_json(directory / filename).get("results")
+        if not isinstance(rows, list) or len(rows) != 2:
+            raise ValueError(f"Missing {arm} captured compiler proof in {filename}")
+        ranks = set()
+        for row in rows:
+            state = row.get(state_key, {})
+            install = state.get(install_key, {})
+            rank = install.get("rank")
+            keys = state.get("compiler", {}).get("all_capture_keys")
+            if rank in ranks or rank not in (0, 1) or keys != expected:
+                raise ValueError(f"{arm} captured compiler keys differ in {filename}")
+            if (
+                state_key == "static"
+                and row.get("compiler", {}).get("all_capture_keys") != expected
+            ):
+                raise ValueError(f"{arm} worker compiler keys differ in {filename}")
+            ranks.add(rank)
+        if ranks != {0, 1}:
+            raise ValueError(f"{arm} captured compiler proof lacks both ranks in {filename}")
+
+
 def _static_install_signature(arm: str, response: Any) -> dict[int, dict[str, Any]]:
     install_key = "static_install" if arm == "native" else "static"
     return {
@@ -1494,6 +1540,7 @@ def compare(args: argparse.Namespace) -> None:
         if arm == "dynamic":
             if solver.get("operator_before_sha256") != sha256(directory / "operator-before.json"):
                 raise ValueError("Missing or altered dynamic pre-timing operator proof")
+        _verify_run_capture_keys(arm, directory, solver["worker_runtime_common"])
         runs[arm] = (solver, score_result)
     native, native_score = runs["native"]
     dynamic, dynamic_score = runs["dynamic"]
@@ -1506,12 +1553,15 @@ def compare(args: argparse.Namespace) -> None:
         "common_config_sha256",
         "setup_sha256",
         "physical_npus",
-        "worker_runtime_common",
         "selected_tracks",
         "frontier_full_split",
     ):
         if native[key] != dynamic[key]:
             raise ValueError(f"Paired runs disagree on {key}")
+    if _paired_runtime_common(native["worker_runtime_common"]) != _paired_runtime_common(
+        dynamic["worker_runtime_common"]
+    ):
+        raise ValueError("Paired runs disagree on worker_runtime_common")
     for key in (
         "warmup_manifest_sha256",
         "warmup_case_ids_sha256",

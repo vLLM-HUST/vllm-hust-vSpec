@@ -817,6 +817,8 @@ class PublicExampleTests(unittest.TestCase):
             for arm in ("native", "dynamic"):
                 directory = root / arm
                 output = directory / "solver"
+                capture_keys = [5, 10] if arm == "native" else [1, 2, 3]
+                install_key = "static_install" if arm == "native" else "static"
                 for case_id in ("one", "two"):
                     dump(output / "requests" / f"{case_id}.json", {"case_id": case_id})
                 hashes = {}
@@ -826,7 +828,25 @@ class PublicExampleTests(unittest.TestCase):
                     ("cache-reset.json", "cache_reset_sha256"),
                     ("operator-proof.json", "operator_proof_sha256"),
                 ):
-                    dump(directory / name, {"arm": arm})
+                    proof = {"arm": arm}
+                    if name in ("worker-before.json", "worker-after.json", "operator-proof.json"):
+                        is_operator = name == "operator-proof.json"
+                        state_key = "static_runtime" if is_operator else "static"
+                        proof["results"] = [
+                            {
+                                **(
+                                    {}
+                                    if is_operator
+                                    else {"compiler": {"all_capture_keys": capture_keys}}
+                                ),
+                                state_key: {
+                                    "compiler": {"all_capture_keys": capture_keys},
+                                    install_key: {"rank": rank},
+                                },
+                            }
+                            for rank in (0, 1)
+                        ]
+                    dump(directory / name, proof)
                     hashes[key] = paired.sha256(directory / name)
                 if arm == "dynamic":
                     dump(directory / "operator-before.json", {"arm": arm, "phase": "before"})
@@ -850,7 +870,15 @@ class PublicExampleTests(unittest.TestCase):
                         "common_config_sha256": "common",
                         "setup_sha256": "setup",
                         "physical_npus": [0, 1],
-                        "worker_runtime_common": {"dtype": "torch.bfloat16"},
+                        "worker_runtime_common": {
+                            "dtype": "torch.bfloat16",
+                            "compiler": {
+                                "cudagraph_mode": "FULL",
+                                "actual_enable_npugraph_ex": True,
+                                "actual_enable_static_kernel": True,
+                                "all_capture_keys": capture_keys,
+                            },
+                        },
                         "client_exit_code": 0,
                         "transport_or_response_failures": 0,
                         "output_tokens_per_second": 100,
@@ -904,6 +932,30 @@ class PublicExampleTests(unittest.TestCase):
             self.assertFalse(result["performance_quality_scope_pass"])
             self.assertNotIn("acceptance_pass", result)
             self.assertIn("score_receipt_sha256", result["scoring_artifacts_sha256"]["native"])
+
+            # Native MTP4 and dynamic speculation compile different capture shapes;
+            # those keys need not match across arms, but must match each arm's proof.
+            dynamic_proof_path = root / "dynamic" / "operator-proof.json"
+            dynamic_proof = paired.read_json(dynamic_proof_path)
+            dynamic_proof["results"][0]["static_runtime"]["compiler"]["all_capture_keys"] = [99]
+            dump(dynamic_proof_path, dynamic_proof)
+            dynamic_receipt["operator_proof_sha256"] = paired.sha256(dynamic_proof_path)
+            dump(dynamic_receipt_path, dynamic_receipt)
+            with self.assertRaisesRegex(ValueError, "captured compiler keys differ"):
+                paired.compare(args)
+            dynamic_proof["results"][0]["static_runtime"]["compiler"][
+                "all_capture_keys"
+            ] = [1, 2, 3]
+            dump(dynamic_proof_path, dynamic_proof)
+            dynamic_receipt["operator_proof_sha256"] = paired.sha256(dynamic_proof_path)
+            dump(dynamic_receipt_path, dynamic_receipt)
+
+            dynamic_receipt["worker_runtime_common"]["compiler"]["cudagraph_mode"] = "NONE"
+            dump(dynamic_receipt_path, dynamic_receipt)
+            with self.assertRaisesRegex(ValueError, "worker_runtime_common"):
+                paired.compare(args)
+            dynamic_receipt["worker_runtime_common"]["compiler"]["cudagraph_mode"] = "FULL"
+            dump(dynamic_receipt_path, dynamic_receipt)
 
             native_summary = root / "native" / "mmlu-summary.json"
             dump(
