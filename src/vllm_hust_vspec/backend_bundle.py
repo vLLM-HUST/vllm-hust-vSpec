@@ -24,9 +24,10 @@ def prepare(source: Path, destination: Path) -> None:
     subprocess.run(['git', '-C', str(source), 'cat-file', '-e', f'{BASE_COMMIT}^{{commit}}'], check=True)
     subprocess.run(['git', 'clone', '--quiet', '--no-hardlinks', '--no-checkout', str(source), str(destination)], check=True)
     subprocess.run(['git', '-C', str(destination), 'checkout', '--quiet', '--detach', BASE_COMMIT], check=True)
-    patch = BUNDLE / 'tracked-changes.patch'
-    subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(patch)], check=True)
-    subprocess.run(['git', '-C', str(destination), 'apply', str(patch)], check=True)
+    for name in ('tracked-changes.patch', 'build-python.patch'):
+        patch = BUNDLE / name
+        subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(patch)], check=True)
+        subprocess.run(['git', '-C', str(destination), 'apply', str(patch)], check=True)
     overlay = BUNDLE / 'overlay'
     for origin in sorted(overlay.rglob('*.py')):
         if origin.is_symlink():

@@ -16,7 +16,9 @@ def test_prepares_copy_without_changing_source(monkeypatch, tmp_path):
     git(source, 'init', '-q')
     tracked = source / 'tracked.txt'
     tracked.write_text('before\n')
-    git(source, 'add', 'tracked.txt')
+    build_file = source / 'setup.py'
+    build_file.write_text('original\n')
+    git(source, 'add', 'tracked.txt', 'setup.py')
     git(source, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base')
     commit = git(source, 'rev-parse', 'HEAD')
     tracked.write_text('after\n')
@@ -24,12 +26,15 @@ def test_prepares_copy_without_changing_source(monkeypatch, tmp_path):
     overlay = bundle / 'overlay' / 'vllm_ascend'
     overlay.mkdir(parents=True)
     (overlay / 'extra.py').write_text('value = 1\n')
-    (bundle / 'tracked-changes.patch').write_text(git(source, 'diff') + '\n')
+    (bundle / 'tracked-changes.patch').write_text(git(source, 'diff', '--', 'tracked.txt') + '\n')
+    build_file.write_text('using-build-python\n')
+    (bundle / 'build-python.patch').write_text(git(source, 'diff', '--', 'setup.py') + '\n')
     monkeypatch.setattr(backend_bundle, 'BASE_COMMIT', commit)
     monkeypatch.setattr(backend_bundle, 'BUNDLE', bundle)
     output = tmp_path / 'prepared'
     backend_bundle.prepare(source, output)
     assert (output / 'tracked.txt').read_text() == 'after\n'
+    assert (output / 'setup.py').read_text() == 'using-build-python\n'
     assert (output / 'vllm_ascend' / 'extra.py').read_text() == 'value = 1\n'
     assert tracked.read_text() == 'after\n'
     assert git(source, 'rev-parse', 'HEAD') == commit
