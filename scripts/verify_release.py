@@ -12,7 +12,7 @@ import tarfile
 import tomllib
 import zipfile
 from email.parser import Parser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "vllm_hust_vspec"
@@ -174,6 +174,20 @@ def vendor_payload() -> set[str]:
     }
 
 
+def verify_package_bytes(relative: str, content: bytes, artifact: str) -> None:
+    parts = PurePosixPath(relative).parts
+    require(
+        bool(parts) and parts[0] != "/" and ".." not in parts,
+        f"{artifact} has invalid package path: {relative}",
+    )
+    source = PACKAGE.joinpath(*parts)
+    require(source.is_file(), f"{artifact} package file is missing from source: {relative}")
+    require(
+        content == source.read_bytes(),
+        f"{artifact} package file differs from source: {relative}",
+    )
+
+
 def verify_wheel(path: Path, version: str) -> None:
     dist_info = f"{WHEEL_NAME}-{version}.dist-info"
     required = {
@@ -235,6 +249,14 @@ def verify_wheel(path: Path, version: str) -> None:
                 entry_points["console_scripts"].get(name) == entry,
                 f"wheel release tool entry point mismatch: {name}",
             )
+        package_prefix = f"{WHEEL_NAME}/"
+        for member in archive.infolist():
+            if member.filename.startswith(package_prefix) and not member.is_dir():
+                verify_package_bytes(
+                    member.filename.removeprefix(package_prefix),
+                    archive.read(member),
+                    "wheel",
+                )
 
 
 def verify_sdist(path: Path, version: str) -> None:
@@ -275,8 +297,19 @@ def verify_sdist(path: Path, version: str) -> None:
     }
     with tarfile.open(path, "r:gz") as archive:
         names = set(archive.getnames())
-    required.update({f"{prefix}/src/{asset}" for asset in vendor_payload()})
-    require(required <= names, f"sdist is missing {sorted(required - names)}")
+        required.update({f"{prefix}/src/{asset}" for asset in vendor_payload()})
+        require(required <= names, f"sdist is missing {sorted(required - names)}")
+        package_prefix = f"{prefix}/src/{WHEEL_NAME}/"
+        for member in archive.getmembers():
+            if not member.name.startswith(package_prefix) or member.isdir():
+                continue
+            require(member.isfile(), f"sdist has non-file package member: {member.name}")
+            stream = archive.extractfile(member)
+            require(stream is not None, f"sdist cannot read package file: {member.name}")
+            with stream:
+                verify_package_bytes(
+                    member.name.removeprefix(package_prefix), stream.read(), "sdist"
+                )
 
 
 def verify_artifacts(dist_dir: Path, version: str) -> list[Path]:
