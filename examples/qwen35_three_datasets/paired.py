@@ -239,7 +239,7 @@ def read_env(path: Path, *, dynamic: bool) -> dict[str, str]:
 
 
 def aligned_configs(
-    common: dict[str, Any], model: str, alias: str, port: int
+    common: dict[str, Any], model: str, alias: str, port: int, native_capacity: int = 4
 ) -> dict[str, dict[str, Any]]:
     if REQUIRED_COMMON - set(common):
         raise ValueError(f"Shared server config is missing {sorted(REQUIRED_COMMON - set(common))}")
@@ -247,8 +247,11 @@ def aligned_configs(
         raise ValueError("This matched example requires pure BF16 without quantization")
     if common["tensor_parallel_size"] != 2:
         raise ValueError("This Qwen3.5 example requires tensor parallel size 2")
-    if type(common["kv_cache_memory_bytes"]) is not int or common["kv_cache_memory_bytes"] <= 0:
-        raise ValueError("Set an explicit positive KV-cache byte budget for both arms")
+    kv_budget = common["kv_cache_memory_bytes"]
+    if kv_budget is not None and (type(kv_budget) is not int or kv_budget <= 0):
+        raise ValueError("Use null for automatic KV allocation or a positive byte budget")
+    if native_capacity not in (4, 6, 8):
+        raise ValueError("Native MTP candidate capacity must be 4, 6 or 8")
     if not isinstance(common["compilation_config"], dict):
         raise ValueError("compilation_config must be identical JSON for both arms")
     if (
@@ -262,7 +265,7 @@ def aligned_configs(
         if key in common:
             raise ValueError(f"{key} is supplied by this launcher, not the shared config")
     pair: dict[str, dict[str, Any]] = {}
-    for arm, capacity in (("native", 4), ("dynamic", 8)):
+    for arm, capacity in (("native", native_capacity), ("dynamic", 8)):
         cfg = copy.deepcopy(common)
         cfg.update(model=model, host="127.0.0.1", port=port, served_model_name=alias)
         cfg["speculative_config"]["num_speculative_tokens"] = capacity
@@ -317,7 +320,10 @@ def prepare(args: argparse.Namespace) -> None:
             raise FileNotFoundError(f"Selected backend package missing: {backend_init}")
     if args.port < 1 or args.port > 65535 or not args.served_model:
         raise ValueError("A valid loopback port and served model name are required")
-    pair = aligned_configs(common, str(model), args.served_model, args.port)
+    native_capacity = getattr(args, "native_capacity", 4)
+    pair = aligned_configs(
+        common, str(model), args.served_model, args.port, native_capacity
+    )
     for arm in ("native", "dynamic"):
         directory = Path(paths[f"{arm}_evaluation_dir"])
         if directory.name != "evaluation" or directory.parent.name != "vllm_hust_vspec":
@@ -367,6 +373,8 @@ def prepare(args: argparse.Namespace) -> None:
         "dynamic_env": dynamic_env,
         "common_config_sha256": canonical_sha256(common),
         "common_config_file_sha256": sha256(common_file),
+        "native_capacity": native_capacity,
+        "requested_kv_cache_memory_bytes": common["kv_cache_memory_bytes"],
         "allowed_config_differences": [
             "speculative_config.num_speculative_tokens",
             "worker_extension_cls",
@@ -665,7 +673,12 @@ def _eval_request(setup: dict[str, Any], route: str, *, post: bool = False) -> A
         return json.load(response)
 
 
-def _validate_runtime_metadata(arm: str, response: Any) -> dict[str, Any]:
+def _validate_runtime_metadata(
+    arm: str,
+    response: Any,
+    expected_capacity: int | None = None,
+    expected_kv_bytes: int | None | str = "unspecified",
+) -> dict[str, Any]:
     rows = response.get("results") if isinstance(response, dict) else None
     if not isinstance(rows, list) or len(rows) != 2:
         raise RuntimeError("Evaluation metadata must cover both worker ranks")
@@ -683,15 +696,19 @@ def _validate_runtime_metadata(arm: str, response: Any) -> dict[str, Any]:
         "model_text_type",
     )
     for row in rows:
-        if row["arm"] != arm or row["configured_speculative_capacity"] != (
-            4 if arm == "native" else 8
-        ):
+        capacity = expected_capacity if expected_capacity is not None else (4 if arm == "native" else 8)
+        if row["arm"] != arm or row["configured_speculative_capacity"] != capacity:
             raise RuntimeError("Evaluation worker arm or capacity mismatch")
         if row["vspec_module_loaded"] != (arm == "dynamic"):
             raise RuntimeError("Evaluation worker plugin-loading state mismatch")
         if row["quantization"] is not None or "bfloat16" not in row["dtype"]:
             raise RuntimeError("Evaluation worker is not pure BF16")
-        if row["explicit_kv_bytes"] <= 0 or not row["prefix_cache"]:
+        actual_kv = row["explicit_kv_bytes"]
+        if actual_kv is not None and (type(actual_kv) is not int or actual_kv <= 0):
+            raise RuntimeError("Evaluation worker KV configuration is invalid")
+        if expected_kv_bytes != "unspecified" and actual_kv != expected_kv_bytes:
+            raise RuntimeError("Evaluation worker KV allocation policy differs")
+        if not row["prefix_cache"]:
             raise RuntimeError("Evaluation worker KV/prefix-cache configuration differs")
         if not row["compiler"]["actual_enable_static_kernel"]:
             raise RuntimeError("Static compiler was not enabled in a worker")
@@ -1039,7 +1056,11 @@ def _prepare_timing(
         else None
     )
     before = _eval_request(setup, "vspec-evaluation-metadata")
-    runtime_common = _validate_runtime_metadata(arm, before)
+    runtime_common = _validate_runtime_metadata(
+        arm, before,
+        setup.get("native_capacity", 4) if arm == "native" else 8,
+        setup.get("requested_kv_cache_memory_bytes", "unspecified"),
+    )
     write_new(run_dir / "worker-before.json", before)
     reset = _reset_caches(setup)
     write_new(run_dir / "cache-reset.json", reset)
@@ -1254,7 +1275,11 @@ def run(args: argparse.Namespace) -> None:
             timing_ended_utc = datetime.now(UTC).isoformat()
             usage = _record_usage(dataset, solver_out, case_ids)
             after = _eval_request(setup, "vspec-evaluation-metadata")
-            if _validate_runtime_metadata(arm, after) != runtime_common:
+            if _validate_runtime_metadata(
+                arm, after,
+                setup.get("native_capacity", 4) if arm == "native" else 8,
+                setup.get("requested_kv_cache_memory_bytes", "unspecified"),
+            ) != runtime_common:
                 raise RuntimeError("Shared runtime configuration changed during the run")
             if _static_install_signature(arm, before) != _static_install_signature(arm, after):
                 raise RuntimeError("Static compiler install changed during the timed run")
@@ -1653,6 +1678,7 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         p.add_argument("--" + name, required=True)
     p.add_argument("--port", type=int, required=True)
+    p.add_argument("--native-capacity", type=int, choices=(4, 6, 8), default=4)
     p.set_defaults(fn=prepare)
     p = sub.add_parser("run", help="start one arm, time one frozen solver selection, then stop it")
     p.add_argument("--setup", required=True)

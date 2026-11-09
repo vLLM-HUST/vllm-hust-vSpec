@@ -192,6 +192,22 @@ class PublicExampleTests(unittest.TestCase):
             pair[arm]["speculative_config"].pop("num_speculative_tokens")
         self.assertEqual(pair["native"], pair["dynamic"])
 
+    def test_auto_kv_and_native_depth_variants(self):
+        config = common_config()
+        config["kv_cache_memory_bytes"] = None
+        for capacity in (4, 6, 8):
+            pair = paired.aligned_configs(
+                config, "/models/qwen", "test-solver", 18080, capacity
+            )
+            self.assertIsNone(pair["native"]["kv_cache_memory_bytes"])
+            self.assertIsNone(pair["dynamic"]["kv_cache_memory_bytes"])
+            self.assertEqual(
+                pair["native"]["speculative_config"]["num_speculative_tokens"], capacity
+            )
+            self.assertEqual(pair["dynamic"]["speculative_config"]["num_speculative_tokens"], 8)
+        with self.assertRaisesRegex(ValueError, "candidate capacity"):
+            paired.aligned_configs(config, "/models/qwen", "test-solver", 18080, 10)
+
     def test_rejects_non_bf16_missing_kv_and_relative_private_output(self):
         config = common_config()
         config["dtype"] = "float16"
@@ -472,6 +488,13 @@ class PublicExampleTests(unittest.TestCase):
         response = {"results": [row(0), row(1)]}
         common = paired._validate_runtime_metadata("native", response)
         self.assertEqual(common["max_model_len"], 32768)
+        auto_response = json.loads(json.dumps(response))
+        for worker in auto_response["results"]:
+            worker["configured_speculative_capacity"] = 6
+            worker["explicit_kv_bytes"] = None
+        paired._validate_runtime_metadata("native", auto_response, 6, None)
+        with self.assertRaisesRegex(RuntimeError, "KV allocation policy"):
+            paired._validate_runtime_metadata("native", auto_response, 6, 2_000_000_000)
         static_before = paired._static_install_signature("native", response)
         self.assertEqual(set(static_before), {0, 1})
         changed_install = json.loads(json.dumps(response))

@@ -1,6 +1,6 @@
 # Qwen3.5 三数据集配对评测入口
 
-这个目录提供可公开审计的**入口脚本**，不附带模型、数据集、私人配置、实验结果或历史环境的绝对路径。它生成同口径的原生 MTP4 与动态 vSpec 服务配置，顺序运行两臂，记录请求用时与输出 token，并把评分同吞吐分开记录。所有计划、日志和结果必须存到操作者的私有目录；模型与数据集资产可以由只读共享存储提供。
+这个目录提供可公开审计的**入口脚本**，不附带模型、数据集、私人配置、实验结果或历史环境的绝对路径。它生成同口径的原生 MTP 与动态 vSpec 服务配置，顺序运行两臂，记录请求用时与输出 token，并把评分同吞吐分开记录。原生候选上限可设为 4、6 或 8；四组对照分别建立同参数的原生 setup，并将 vSpec 结果与各原生结果并列汇总。所有计划、日志和结果必须存到操作者的私有目录；模型与数据集资产可以由只读共享存储提供。
 
 这不是“安装插件即复现报告数值”的保证。复现所需的底层版本、NPU、算子、judge 服务及证明资产必须另行核验。脚本不会构造算子证明资产，也不提供 HLE/FrontierScience 的评审模型服务。模型级端点能读取实际 worker、静态编译与算子状态，但这些观察值不能代替数值正确性、完整评分或独立审计。后测算子的折叠计数可能包含启动期 graph capture，只能证明同一 worker 进程观察到算子执行，不能单独证明计时窗口内发生了命中；正式声明需另外提供计时前后计数差或独立 profiler 证据。模型权重未逐字节哈希，setup 仅绑定模型目录路径，模型修订与权重哈希需由操作者另行记录。
 
@@ -14,7 +14,7 @@
 
 例如 RGDR state pipeline 应从**本次安装的 wheel**执行 `vllm-hust-vspec-build-operator --operator rgdr-state-pipeline --cann-root <CANN_ROOT> --destination <PRIVATE_RGDR_DIR>`，再执行 `vllm-hust-vspec-validate-rgdr-state-pipeline --component-dir <PRIVATE_RGDR_DIR> --backend-package <VENV_SITE_PACKAGES>`；其它算子按 [发布版复现文档](../../docs/v0.15.1-reproduction.md)构建/校验。这里的组件验证只证明安装资产符合约束，不能替代实际 Qwen3.5 三数据集的模型级运行证据。
 
-`common-config.json` 是用户自己冻结的 vLLM 顶层配置（JSON 对象，可包含其他所需参数），至少包含 `dtype`, `tensor_parallel_size`, `max_model_len`, `max_num_seqs`, `max_num_batched_tokens`, `enable_prefix_caching`, `kv_cache_memory_bytes`, `compilation_config`, `speculative_config`。这里要求 `dtype=bfloat16`、TP=2、显式正数 KV byte 预算、`speculative_config.method=mtp`；不要把 `model`、`host`、`port`、`served_model_name`、`worker_extension_cls` 或 `num_speculative_tokens` 塞进共享文件。服务配置生成器只允许两臂在投机深度（原生 4、动态容量 8）和 worker 类上不同；数据集可用各自的长度/多模态配置，但**同一数据集的两臂必须用同一共享配置**。动态容量 8 是上限，不代表每轮都固定选 8；实际选择仍需独立 worker 证据核验。
+`common-config.json` 是用户自己冻结的 vLLM 顶层配置（JSON 对象，可包含其他所需参数），至少包含 `dtype`, `tensor_parallel_size`, `max_model_len`, `max_num_seqs`, `max_num_batched_tokens`, `enable_prefix_caching`, `kv_cache_memory_bytes`, `compilation_config`, `speculative_config`。这里要求 `dtype=bfloat16`、TP=2、`kv_cache_memory_bytes` 为正整数或 `null`（自动分配）、`speculative_config.method=mtp`；不要把 `model`、`host`、`port`、`served_model_name`、`worker_extension_cls` 或 `num_speculative_tokens` 塞进共享文件。服务配置生成器只允许两臂在投机深度（原生可选 4/6/8、动态容量 8）和 worker 类上不同；数据集可用各自的长度/多模态配置，但**同一数据集的两臂必须用同一共享配置**。动态容量 8 是上限，不代表每轮都固定选 8；实际选择仍需独立 worker 证据核验。
 
 `common-env.json` 和 `dynamic-env.json` 都是私有 JSON 字符串映射。前者可放两臂共同的设备可见性、离线模型、静态编译设置，其中 `HUST_VSPEC_CAPTURE_SAFE_STATIC="1"` 与 `HUST_VSPEC_HOT_STATIC_SHAPES="14,42,70,98,126"` 是本配对入口要求的共同编译设置；还可放六个固定取值的 vLLM 共同开关：`VLLM_DISABLE_SHARED_EXPERTS_STREAM=1`、`VLLM_NO_USAGE_STATS=1`、`VLLM_SERVER_DEV_MODE=0`、`VLLM_USE_AOT_COMPILE=0`、`VLLM_USE_BREAKABLE_CUDAGRAPH=0`、`VLLM_WORKER_MULTIPROC_METHOD=spawn`。其他 `VLLM_*` 不能混入共同环境。后者放动态臂的 `VSPEC_`、`HUST_VSPEC_`、`HUST_ISSUE18_` 配置与 proof 路径，以及显式允许的 Qwen3.5 后端开关。不要在这两个文件中放密码、API token 或旧环境 `PYTHONPATH`。服务子进程只继承必要的系统/NPU 环境变量，并剔除常见凭据变量；需要的额外非敏感设置请显式写入 common-env。示例自行生成保存在私有 setup 中的随机端点令牌，为每臂新建隔离缓存目录，并在计时前调用受保护的缓存清理路由；不会预存答案或 KV。所有由评测入口设置的 vLLM、Hugging Face、Ascend、编译器及绘图库缓存路径都指向本次私有运行目录，不沿用旧实验或共享区缓存。
 
@@ -55,10 +55,12 @@ PRIVATE_ROOT=/path/to/private/evaluation
   --dynamic-backend-package /path/to/fresh/dynamic-venv/lib/pythonX.Y/site-packages \
   --native-evaluation-dir /path/to/fresh/native-venv/lib/pythonX.Y/site-packages/vllm_hust_vspec/evaluation \
   --dynamic-evaluation-dir /path/to/fresh/dynamic-venv/lib/pythonX.Y/site-packages/vllm_hust_vspec/evaluation \
-  --served-model paired-solver --port 18080
+  --served-model paired-solver --port 18080 --native-capacity 4
 ```
 
 若原生 `vllm_ascend` 是单独的后端覆盖层，`--native-backend-package` 指向该覆盖层，`--native-evaluation-dir` 仍指向**同一原生 Python 环境安装的插件 wheel**；两者不必是同一目录。原生静态 worker 位于该 evaluation 目录的同级 `evaluation_static`，由入口核验后加入子进程模块路径。
+
+需要 MTP6/MTP8 时，分别以 `--native-capacity 6` 或 `8` 创建新的私有 setup 和运行目录；若使用自动 KV，将共享配置中的 `kv_cache_memory_bytes` 设为 JSON `null`。四组均不预热时不要传 `--warmup-selection`。每个 setup 仍只运行一组原生配置与 vSpec；跨 setup 的四组表格由操作者依据冻结题单和评分汇总生成，不要把不同题单或不同 KV 策略合并。
 
 HLE-Verified 与 FrontierScience 需分别执行一次 `prepare`，各自使用本数据集冻结的配置及 judge/solver plan。两个客户端的 `contract.json` 中 solver URL/模型名必须和上述 loopback 地址/别名一致，否则 `run` 会拒绝。判断服务可在不同端口运行，但应由操作者按客户端冻结的 judge 配置单独管理。若计划由不同客户端版本生成，应先重新冻结并记录版本/哈希。
 
