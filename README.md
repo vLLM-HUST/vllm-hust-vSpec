@@ -4,7 +4,7 @@
 
 当前实验配置的服务冷启动较慢，首次编译与解码图捕获可能耗费数十分钟。启动时间不计入上述运行期输出吞吐；缩短冷启动是后续优化项，复测时应单独记录启动耗时和缓存使用情况。
 
-复现路径所需的本地验证材料目录见 [v0.15.1 复现准备指南](docs/v0.15.1-reproduction.md)。官方 `install.sh` 安装插件时会同时构建并安装匹配后端与所需算子、完成本机验证，生成私有目录下的 `runtime.env`。需要预先具备兼容的驱动、CANN、Python 依赖、只读模型和空闲 NPU；仅执行 `pip install` 无法触发设备编译。路径未配置或校验不通过时，相应实验性功能应拒绝启用。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不属于该复现路径，其 `VSPEC_NATIVE_CONV_TILE_DIR` 不能用卷积参考组件的目录替代。不得把私人评测结果、模型权重或验证材料上传到此仓库。
+复现路径所需的本地验证材料目录见 [v0.15.1 复现准备指南](docs/v0.15.1-reproduction.md)；实际测试参数、脱敏聚合结果及其适用范围见 [本地复测记录](docs/v0.15.1-local-retest.md)。官方 `install.sh` 安装插件时会同时构建并安装匹配后端与所需算子、完成本机验证，生成私有目录下的 `runtime.env`。需要预先具备兼容的驱动、CANN、Python 依赖、只读模型和空闲 NPU；仅执行 `pip install` 无法触发设备编译。路径未配置或校验不通过时，相应实验性功能应拒绝启用。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不属于该复现路径，其 `VSPEC_NATIVE_CONV_TILE_DIR` 不能用卷积参考组件的目录替代。原始评测记录、模型权重和验证材料不得上传到此仓库。
 
 开发包包含基于 vLLM-Ascend-HUST 固定提交 `4e57439e58ed3d78e675f9fd7b4614fb183c5394` 的实验性后端补丁、附加源码与本次复现路径所需的算子源码。可使用 `vllm-hust-vspec-prepare-backend --source <本地后端Git目录> --destination <新的私有目录>` 在不修改原后端的情况下准备源码副本。**该命令不会编译或安装后端，也不会生成算子的验证材料**；后端构建和组件验证须按指南在目标机器上执行。用户仍需具备兼容的 Ascend 驱动、CANN 及工具链。
 

@@ -8,6 +8,8 @@ include uninstall.sh
 recursive-include benchmarks *.py
 recursive-include configs *.json *.toml
 recursive-include docs *.md
+recursive-include docs *.csv
+recursive-include docs *.json
 recursive-include examples/qwen35_three_datasets *.py *.md
 recursive-include profiles *.json
 recursive-include scripts *.py *.sh

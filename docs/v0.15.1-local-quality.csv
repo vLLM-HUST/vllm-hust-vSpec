@@ -1,0 +1,13 @@
+dataset,arm,questions,successes,accuracy_percent,unresolved,scoring_scope
+MMLU-Pro,MTP4,200,167,83.50,0,standard_answer
+MMLU-Pro,MTP6,200,165,82.50,0,standard_answer
+MMLU-Pro,MTP8,200,163,81.50,0,standard_answer
+MMLU-Pro,vSpec,200,161,80.50,0,standard_answer
+FrontierScience Olympiad,MTP4,100,61,61.00,5,qwen_judge
+FrontierScience Olympiad,MTP6,100,61,61.00,4,qwen_judge
+FrontierScience Olympiad,MTP8,100,56,56.00,4,qwen_judge
+FrontierScience Olympiad,vSpec,100,66,66.00,2,qwen_judge
+HLE-Verified Gold,MTP4,200,57,28.50,7,strict_json_qwen_judge
+HLE-Verified Gold,MTP6,200,44,22.00,13,strict_json_qwen_judge
+HLE-Verified Gold,MTP8,200,54,27.00,8,strict_json_qwen_judge
+HLE-Verified Gold,vSpec,200,50,25.00,10,strict_json_qwen_judge
