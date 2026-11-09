@@ -53,6 +53,7 @@ vllm_hust_vspec = [
     "_vendor/ascend_hust/overlay/vllm_ascend/*/*.py",
     "_vendor/ascend_hust/overlay/vllm_ascend/*/*/*.py",
     "_vendor/operators/*/*.py",
+    "_vendor/experimental_hooks/*.py",
 ]
 
 [tool.pytest.ini_options]

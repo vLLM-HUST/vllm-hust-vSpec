@@ -19,7 +19,10 @@ the CANN SDK, or bypass any correctness checks.
 
 The wheel also includes selected standalone Triton kernel sources under
 `vllm_hust_vspec/_vendor/operators`. These sources are not automatically
-selected or registered by this staging operation. Current experimental paths
+selected or registered by this staging operation. The corresponding
+experimental runtime-hook source snapshots are included under
+`vllm_hust_vspec/_vendor/experimental_hooks`; they are not automatically
+installed or enabled and retain fail-closed validation requirements. Current experimental paths
 still depend on additional host-side backend integration, build tooling and
 locally generated validation artifacts. Some CANN-derived headers and build
 modules use their own license and are not included in this bundle. Packaging
