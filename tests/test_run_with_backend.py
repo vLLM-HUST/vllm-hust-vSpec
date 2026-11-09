@@ -43,6 +43,54 @@ def test_launch_uses_selected_installed_library(monkeypatch, tmp_path):
     assert observed["env"]["ASCEND_CUSTOM_OPP_PATH"] == str(vendor)
 
 
+def test_qwen35_mtp_bridge_is_explicit_and_reaches_children(monkeypatch, tmp_path):
+    _selected_backend(monkeypatch, tmp_path)
+    monkeypatch.setenv("PYTHONPATH", "/existing/pythonpath")
+    monkeypatch.delenv("QWEN35_MTP_COMPAT", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run-with-backend",
+            "--backend-package",
+            str(tmp_path),
+            "--qwen35-mtp-compat",
+            "--",
+            sys.executable,
+            "-V",
+        ],
+    )
+    observed = {}
+    monkeypatch.setattr(
+        run_with_backend.os,
+        "execvpe",
+        lambda executable, command, env: observed.update(env=env),
+    )
+    run_with_backend.main()
+    compat_dir, previous = observed["env"]["PYTHONPATH"].split(":", 1)
+    assert previous == "/existing/pythonpath"
+    assert Path(compat_dir, "sitecustomize.py").is_file()
+    assert observed["env"]["QWEN35_MTP_COMPAT"] == "1"
+
+
+def test_unflagged_launch_does_not_enable_qwen35_mtp_bridge(monkeypatch, tmp_path):
+    _selected_backend(monkeypatch, tmp_path)
+    monkeypatch.setenv("QWEN35_MTP_COMPAT", "1")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run-with-backend", "--backend-package", str(tmp_path), "--", sys.executable],
+    )
+    observed = {}
+    monkeypatch.setattr(
+        run_with_backend.os,
+        "execvpe",
+        lambda executable, command, env: observed.update(env=env),
+    )
+    run_with_backend.main()
+    assert "QWEN35_MTP_COMPAT" not in observed["env"]
+
+
 def test_launch_rejects_different_backend_import(monkeypatch, tmp_path):
     _selected_backend(monkeypatch, tmp_path)
     monkeypatch.setattr(

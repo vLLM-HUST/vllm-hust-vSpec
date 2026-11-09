@@ -52,6 +52,7 @@ def test_release_build_removes_uv_dist_gitignore(tmp_path: Path) -> None:
     fake_uv.chmod(0o755)
 
     environment = os.environ.copy()
+    environment.pop("BASH_ENV", None)
     environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
     environment["PYTHON_BIN"] = str(fake_python)
     subprocess.run(

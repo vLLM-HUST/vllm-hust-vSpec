@@ -10,6 +10,25 @@ from pathlib import Path
 
 from .backends.experimental_paths import configure_custom_opp
 
+QWEN35_MTP_COMPAT_ENV = "QWEN35_MTP_COMPAT"
+
+
+def _configure_qwen35_mtp_compat(env: dict[str, str]) -> None:
+    """Add a standalone startup hook without importing vSpec in the child."""
+    compat_dir = Path(__file__).resolve().parent / "_vendor/qwen35_mtp_compat"
+    if not all(
+        (compat_dir / name).is_file()
+        for name in (
+            "sitecustomize.py",
+            "qwen35_mtp_kv_compat.py",
+            "qwen35_mtp_mamba_compat.py",
+        )
+    ):
+        raise FileNotFoundError(f"Qwen3.5 MTP compatibility assets missing: {compat_dir}")
+    previous = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(compat_dir) + (os.pathsep + previous if previous else "")
+    env[QWEN35_MTP_COMPAT_ENV] = "1"
+
 
 def _same_python(executable: Path) -> bool:
     """A shared base interpreter is not enough: the virtual environment must match."""
@@ -52,6 +71,11 @@ def main() -> None:
         required=True,
         help="Site-packages directory containing the selected vllm_ascend",
     )
+    parser.add_argument(
+        "--qwen35-mtp-compat",
+        action="store_true",
+        help="Enable the packaged, narrow Qwen3.5 MTP KV/Mamba startup bridge",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -68,6 +92,10 @@ def main() -> None:
     _require_matching_command(command)
     env = dict(os.environ)
     configure_custom_opp(env, backend_package)
+    if args.qwen35_mtp_compat:
+        _configure_qwen35_mtp_compat(env)
+    else:
+        env.pop(QWEN35_MTP_COMPAT_ENV, None)
     os.execvpe(command[0], command, env)
 
 

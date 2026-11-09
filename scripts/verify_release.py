@@ -58,6 +58,9 @@ REQUIRED_VENDOR = {
     "_vendor/operators/prefix_clip/clip_kernel.py",
     "_vendor/operators/two_bank_embedding/kernel.py",
     "_vendor/operators/inplace_head_nz/real_weight.py",
+    "_vendor/qwen35_mtp_compat/sitecustomize.py",
+    "_vendor/qwen35_mtp_compat/qwen35_mtp_kv_compat.py",
+    "_vendor/qwen35_mtp_compat/qwen35_mtp_mamba_compat.py",
 }
 
 

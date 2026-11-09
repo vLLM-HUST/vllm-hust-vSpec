@@ -106,9 +106,12 @@ host. Since the full build and NPU correctness/performance checks have not
 been performed on this packaged variant, do not use it as a production backend.
 
 For an installed backend, run commands through
-`vllm-hust-vspec-run-with-backend --backend-package /path/to/site-packages -- <command> ...`
+`vllm-hust-vspec-run-with-backend --backend-package <VENV_SITE_PACKAGES> -- <command> ...`
 to select its bundled custom operator directory and library before process
 startup. The command must use the same Python environment that imports the
 selected `vllm_ascend` package; console scripts from a different environment
 are rejected. The CANN-generated `set_env.bash` can contain the original build path;
 do not rely on it after moving or installing the package elsewhere.
+
+For Qwen3.5 MTP native and dynamic runs, add `--qwen35-mtp-compat` before `--`
+in both commands; see [the v0.15.1 reproduction guide](v0.15.1-reproduction.md).

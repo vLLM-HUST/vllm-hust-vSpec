@@ -24,11 +24,11 @@ jobs:
           python -m pip install --no-deps --editable .
       - name: Verify source and release tag
         run: |
-          ruff check scripts/verify_release.py scripts/verify_model_acceptance.py src/vllm_hust_vspec/run_with_backend.py tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py
-          ruff format --check scripts/verify_release.py scripts/verify_model_acceptance.py src/vllm_hust_vspec/run_with_backend.py tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py
+          ruff check scripts/verify_release.py scripts/verify_model_acceptance.py src/vllm_hust_vspec/run_with_backend.py src/vllm_hust_vspec/_vendor/qwen35_mtp_compat tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py tests/test_qwen35_mtp_compat.py
+          ruff format --check scripts/verify_release.py scripts/verify_model_acceptance.py src/vllm_hust_vspec/run_with_backend.py src/vllm_hust_vspec/_vendor/qwen35_mtp_compat tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py tests/test_qwen35_mtp_compat.py
           bash -n install.sh manage.sh release.sh run.sh uninstall.sh
           python -m compileall -q src/vllm_hust_vspec
-          pytest -q tests/test_manifest.py tests/test_extension_lifecycle.py tests/test_management.py tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py
+          pytest -q tests/test_manifest.py tests/test_extension_lifecycle.py tests/test_management.py tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py tests/test_qwen35_mtp_compat.py
           VERSION=$(python -c 'from vllm_hust_vspec._version import __version__; print(__version__)')
           test "$GITHUB_REF_NAME" = "v${VERSION}"
       - name: Require private model-level acceptance receipt
