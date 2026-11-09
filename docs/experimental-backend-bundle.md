@@ -91,6 +91,8 @@ then checked on both allocated devices with
 `vllm-hust-vspec-validate-fia-host --directory /new/private/fia-build`.
 The two-bank embedding component uses
 `vllm-hust-vspec-validate-two-bank --model /path/to/checkpoint --destination /new/private/proof-dir`.
+The private draft-head layout has a separate real-checkpoint test:
+`vllm-hust-vspec-validate-inplace-head --model /path/to/checkpoint --destination /new/private/proof-dir`.
 These commands generate only local component evidence; they are not model-level
 correctness or performance evidence.
 

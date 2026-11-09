@@ -19,7 +19,7 @@ from types import MethodType
 import torch
 import torch.nn.functional as F
 
-from .experimental_paths import artifact_dir
+from .experimental_paths import artifact_dir, require_current_npu_proof
 
 PRIMITIVE = artifact_dir('VSPEC_INPLACE_HEAD_NZ_DIR')
 PROOF = PRIMITIVE / 'real-head-runtime-true-r1-primitive-audit.json'
@@ -27,6 +27,7 @@ PROOF = PRIMITIVE / 'real-head-runtime-true-r1-primitive-audit.json'
 
 def verify_primitive():
     data = json.loads(PROOF.read_text())
+    require_current_npu_proof(data)
     assert data['completed'] and data['actual_public_checkpoint_weights']
     assert data['eligible_shapes']['draft'] == list(range(1, 17))
     for proof in (data, *data['ranks']):

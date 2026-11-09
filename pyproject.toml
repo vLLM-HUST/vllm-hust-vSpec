@@ -48,6 +48,7 @@ vllm-hust-vspec-validate-prefix-clip = "vllm_hust_vspec.validate_prefix_clip:mai
 vllm-hust-vspec-validate-two-bank = "vllm_hust_vspec.validate_two_bank:main"
 vllm-hust-vspec-validate-fia-host = "vllm_hust_vspec.validate_fia_host:main"
 vllm-hust-vspec-run-with-backend = "vllm_hust_vspec.run_with_backend:main"
+vllm-hust-vspec-validate-inplace-head = "vllm_hust_vspec.validate_inplace_head:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
