@@ -20,6 +20,7 @@ import subprocess
 import time
 import urllib.request
 from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,43 @@ CACHE_DIRS = {
     "ASCEND_CACHE_PATH": "ascend-cache",
     "ACL_OP_COMPILER_CACHE_DIR": "acl-op",
 }
+SERVER_INHERITED_KEYS = {
+    "PATH",
+    "HOME",
+    "LD_LIBRARY_PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "PYTHONNOUSERSITE",
+}
+SERVER_INHERITED_PREFIXES = (
+    "ASCEND_",
+    "HCCL_",
+    "NPU_",
+    "TORCH_",
+    "PYTORCH_",
+    "OMP_",
+    "MKL_",
+    "CANN_",
+    "ACL_",
+    "ATB_",
+)
+CREDENTIAL_MARKERS = (
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "credential",
+    "access_key",
+    "private_key",
+    "auth_sock",
+    "askpass",
+)
+
+
+def _credential_key(key: str) -> bool:
+    return any(marker in key.lower() for marker in CREDENTIAL_MARKERS)
 
 
 def read_json(path: Path) -> Any:
@@ -120,11 +158,10 @@ def read_env(path: Path, *, dynamic: bool) -> dict[str, str]:
     values = read_json(path)
     if not isinstance(values, dict):
         raise ValueError("Environment file must be a JSON object")
-    forbidden = ("token", "secret", "password", "api_key", "credential")
     for key, value in values.items():
         if not isinstance(key, str) or not isinstance(value, str) or not value or "<" in value:
             raise ValueError("Environment contains a placeholder or non-string value")
-        if any(word in key.lower() for word in forbidden) or key in {"VLLM_PLUGINS", "PYTHONPATH"}:
+        if _credential_key(key) or key in {"VLLM_PLUGINS", "PYTHONPATH"}:
             raise ValueError(
                 f"Do not put credentials or launcher-reserved keys in environment file: {key}"
             )
@@ -319,8 +356,11 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("HUST_", "VSPEC_", "VLLM_")) and key != "PYTHONPATH"
+        if (key in SERVER_INHERITED_KEYS or key.startswith(SERVER_INHERITED_PREFIXES))
+        and not _credential_key(key)
     }
+    if any(_credential_key(key) for key in (*setup["common_env"], *setup["dynamic_env"])):
+        raise ValueError("Server environment cannot inherit credential variables")
     env.update(setup["common_env"])
     if env.get("ASCEND_VISIBLE_DEVICES") or env.get("ASCEND_RT_VISIBLE_DEVICES", "0,1") != "0,1":
         raise ValueError("Both arms require unambiguous logical NPU visibility 0,1")
@@ -477,6 +517,7 @@ def _validate_runtime_metadata(arm: str, response: Any) -> dict[str, Any]:
     if not isinstance(rows, list) or len(rows) != 2:
         raise RuntimeError("Evaluation metadata must cover both worker ranks")
     ranks = set()
+    installs = {}
     common_keys = (
         "dtype",
         "quantization",
@@ -505,19 +546,93 @@ def _validate_runtime_metadata(arm: str, response: Any) -> dict[str, Any]:
         install = state["static_install"] if arm == "native" else state["static"]
         if not install["process_isolation"] or not install["actual_installed_device_binary_sha256"]:
             raise RuntimeError("Installed static operator proof is incomplete")
+        if install["pid"] != row["pid"]:
+            raise RuntimeError("Worker PID differs from static installation proof")
         ranks.add(install["rank"])
+        installs[install["rank"]] = install
     if ranks != {0, 1}:
         raise RuntimeError("Evaluation metadata did not cover both worker ranks")
+    coordinator, receiver = installs[0], installs[1]
+    if (
+        coordinator["pid"] == receiver["pid"]
+        or coordinator["install_owner_pid"] != coordinator["pid"]
+        or receiver["install_owner_pid"] is not None
+        or not coordinator["installed_package_hashes"]
+        or receiver["installed_package_hashes"]
+        or coordinator["private_install_path"] != receiver["private_install_path"]
+        or coordinator["actual_installed_device_binary_sha256"]
+        != receiver["actual_installed_device_binary_sha256"]
+        or coordinator["actual_installed_binary_metadata_sha256"]
+        != receiver["actual_installed_binary_metadata_sha256"]
+        or coordinator["offline_compiler_jobs"] != receiver["offline_compiler_jobs"]
+    ):
+        raise RuntimeError("Static compiler coordinator/receiver installation proof differs")
     common = {key: rows[0][key] for key in common_keys}
     if any({key: row[key] for key in common_keys} != common for row in rows[1:]):
         raise RuntimeError("Worker ranks disagree on shared runtime configuration")
+    compiler_keys = (
+        "cudagraph_mode",
+        "actual_enable_npugraph_ex",
+        "actual_enable_static_kernel",
+        "all_capture_keys",
+    )
+    common["compiler"] = {key: rows[0]["compiler"][key] for key in compiler_keys}
+    if any(
+        {key: row["compiler"][key] for key in compiler_keys} != common["compiler"]
+        for row in rows[1:]
+    ):
+        raise RuntimeError("Worker ranks disagree on compiler runtime configuration")
     return common
 
 
-def _validate_operator_proof(arm: str, response: Any) -> None:
+def _static_install_signature(arm: str, response: Any) -> dict[int, dict[str, Any]]:
+    install_key = "static_install" if arm == "native" else "static"
+    return {
+        install["rank"]: {
+            key: install[key]
+            for key in (
+                "pid",
+                "private_install_path",
+                "install_owner_pid",
+                "installed_package_hashes",
+                "actual_installed_device_binary_sha256",
+                "actual_installed_binary_metadata_sha256",
+            )
+        }
+        for row in response["results"]
+        for install in (row["static"][install_key],)
+    }
+
+
+def _validate_operator_proof(arm: str, response: Any, before: Any, after: Any) -> None:
     rows = response.get("results") if isinstance(response, dict) else None
     if not isinstance(rows, list) or len(rows) != 2 or any(row.get("arm") != arm for row in rows):
         raise RuntimeError("Operator proof did not cover the selected two-arm worker ranks")
+    install_key = "static_install" if arm == "native" else "static"
+    identities = []
+    for metadata in (before, after):
+        identities.append(
+            {
+                row["static"][install_key]["rank"]: row["pid"]
+                for row in metadata["results"]
+            }
+        )
+    if identities[0] != identities[1] or len(identities[0]) != 2:
+        raise RuntimeError("Evaluation worker identity changed during timing")
+    proof_ranks = set()
+    for row in rows:
+        static = row["static_runtime"]
+        install = static[install_key]
+        rank, pid = install["rank"], install["pid"]
+        if rank in proof_ranks or identities[1].get(rank) != pid:
+            raise RuntimeError("Operator proof worker identity differs from timed workers")
+        if arm == "dynamic" and row.get("pid") != pid:
+            raise RuntimeError("Dynamic operator proof PID differs from its static runtime")
+        if arm == "native" and row["software_paths"]["pid"] != pid:
+            raise RuntimeError("Native operator proof PID differs from its software paths")
+        proof_ranks.add(rank)
+    if proof_ranks != {0, 1}:
+        raise RuntimeError("Operator proof did not cover both worker ranks")
     if arm == "native":
         if not all(
             row.get("static_runtime", {}).get("vspec_plugin_absent")
@@ -525,12 +640,32 @@ def _validate_operator_proof(arm: str, response: Any) -> None:
             for row in rows
         ):
             raise RuntimeError("Native operator proof is incomplete")
-    elif not all(
-        len(row.get("native_edge_convolution", ())) == 30
-        and len(row.get("native_gamma8_RGDR", ())) == 30
-        for row in rows
-    ):
-        raise RuntimeError("Dynamic operator proof lacks the expected Qwen3.5 layers")
+    else:
+        for row in rows:
+            if any(
+                len(row.get(key, ())) != 30
+                for key in (
+                    "native_stride_convolution",
+                    "native_edge_convolution",
+                    "native_gamma8_RGDR",
+                )
+            ):
+                raise RuntimeError("Dynamic operator proof lacks the expected Qwen3.5 layers")
+            counts = [
+                value
+                for key in ("native_stride_convolution", "native_edge_convolution")
+                for layer in row[key]
+                for value in layer["actual_replay_counts_by_gamma_and_requests"].values()
+            ]
+            counts.extend(
+                value
+                for layer in row["native_gamma8_RGDR"]
+                for value in layer["actual_same_kernel_folded_replay_counter_cells"]
+            )
+            if not counts or any(type(value) is not int or value < 0 for value in counts):
+                raise RuntimeError("Dynamic operator proof contains invalid dispatch counters")
+            if not any(counts):
+                raise RuntimeError("No dynamic native operator dispatch was observed")
 
 
 def _stop_owned_server(process: subprocess.Popen[Any]) -> None:
@@ -582,12 +717,44 @@ def _record_usage(dataset: str, output: Path, expected_ids: list[str]) -> dict[s
     }
 
 
+def _verify_record_hashes(run_dir: Path, receipt: dict[str, Any]) -> None:
+    output = (run_dir / "solver").resolve(strict=True)
+    if Path(receipt["solver_output"]).resolve(strict=True) != output:
+        raise ValueError("Solver output does not belong to this run")
+    expected = receipt.get("record_hashes")
+    if (
+        not isinstance(expected, dict)
+        or len(expected) != receipt.get("record_count")
+        or len(expected) != receipt.get("case_count")
+    ):
+        raise ValueError("Timed request hash inventory is incomplete")
+    actual = {path.name: sha256(path) for path in (output / "requests").glob("*.json")}
+    if actual != expected:
+        raise ValueError("Timed request records changed after generation")
+
+
 def run(args: argparse.Namespace) -> None:
     setup = _load_setup(existing_path(args.setup, "setup file"))
     arm, dataset = args.arm, args.dataset
     plan = existing_path(args.plan, "frozen client plan")
     selection = existing_path(args.selection, "case selection") if args.selection else None
     case_ids, selection_hash = _read_ids(dataset, plan, selection)
+    inventory_file = "cases.json" if dataset == "mmlu-pro" else "tasks.json"
+    inventory_sha256 = sha256(plan / inventory_file)
+    if (
+        dataset != "mmlu-pro"
+        and read_json(plan / "contract.json").get("tasks_sha256") != inventory_sha256
+    ):
+        raise ValueError("Frozen client task inventory changed")
+    selected_tracks = None
+    frontier_full_split = None
+    if dataset == "frontierscience":
+        tasks = read_json(plan / "tasks.json")
+        selected = set(case_ids)
+        selected_tracks = dict(Counter(row["track"] for row in tasks if row["case_id"] in selected))
+        if sum(selected_tracks.values()) != len(case_ids):
+            raise ValueError("FrontierScience track inventory differs from selected cases")
+        frontier_full_split = len(case_ids) == len(tasks)
     _verify_frozen_endpoint(setup, dataset, plan)
     if not args.tag.isascii() or not args.tag.replace("-", "").isalnum() or len(args.tag) > 40:
         raise ValueError("Tag must contain only ASCII letters, numbers or hyphens")
@@ -638,7 +805,9 @@ def run(args: argparse.Namespace) -> None:
             "client_command": client_cmd,
             "server_config_sha256": sha256(config),
             "common_config_sha256": setup["common_config_sha256"],
+            "setup_sha256": sha256(root / "setup.json"),
             "plan_contract_sha256": sha256(plan / "contract.json"),
+            "plan_inventory_sha256": inventory_sha256,
             "selection_sha256": selection_hash,
             "plugin_enabled_for_server": arm == "dynamic",
             "qwen35_mtp_compat_enabled_for_both_arms": True,
@@ -671,6 +840,7 @@ def run(args: argparse.Namespace) -> None:
             ):
                 raise RuntimeError("Fresh-server cache reset was not fully acknowledged")
             write_new(run_dir / "cache-reset.json", reset)
+            timing_started_utc = datetime.now(UTC).isoformat()
             started = time.monotonic()
             with (run_dir / "client.log").open("x", encoding="utf-8") as client_log:
                 result = subprocess.run(
@@ -681,13 +851,16 @@ def run(args: argparse.Namespace) -> None:
                     check=False,
                 )
             wall = time.monotonic() - started
+            timing_ended_utc = datetime.now(UTC).isoformat()
             usage = _record_usage(dataset, solver_out, case_ids)
             after = _eval_request(setup, "vspec-evaluation-metadata")
             if _validate_runtime_metadata(arm, after) != runtime_common:
                 raise RuntimeError("Shared runtime configuration changed during the run")
+            if _static_install_signature(arm, before) != _static_install_signature(arm, after):
+                raise RuntimeError("Static compiler install changed during the timed run")
             write_new(run_dir / "worker-after.json", after)
             operator = _eval_request(setup, "vspec-evaluation-operator-proof")
-            _validate_operator_proof(arm, operator)
+            _validate_operator_proof(arm, operator, before, after)
             write_new(run_dir / "operator-proof.json", operator)
             receipt = {
                 "schema_version": 1,
@@ -695,10 +868,16 @@ def run(args: argparse.Namespace) -> None:
                 "arm": arm,
                 "case_count": len(case_ids),
                 "plan_contract_sha256": sha256(plan / "contract.json"),
+                "plan_inventory_sha256": inventory_sha256,
                 "selection_sha256": selection_hash,
                 "common_config_sha256": setup["common_config_sha256"],
+                "setup_sha256": sha256(root / "setup.json"),
                 "server_config_sha256": sha256(config),
+                "selected_tracks": selected_tracks,
+                "frontier_full_split": frontier_full_split,
                 "startup_seconds_excluded": startup_seconds,
+                "timing_started_utc": timing_started_utc,
+                "timing_ended_utc": timing_ended_utc,
                 "client_wall_seconds": wall,
                 "output_tokens_per_second": usage["completion_tokens"] / wall,
                 "client_exit_code": result.returncode,
@@ -745,6 +924,12 @@ def score(args: argparse.Namespace) -> None:
     plan = existing_path(args.plan, "frozen client plan")
     if receipt["plan_contract_sha256"] != sha256(plan / "contract.json"):
         raise ValueError("Score plan differs from solver plan")
+    inventory_file = "cases.json" if dataset == "mmlu-pro" else "tasks.json"
+    if receipt["plan_inventory_sha256"] != sha256(plan / inventory_file):
+        raise ValueError("Score inventory differs from solver inventory")
+    if receipt["setup_sha256"] != sha256(Path(setup["private_root"]) / "setup.json"):
+        raise ValueError("Score setup differs from solver setup")
+    _verify_record_hashes(run_dir, receipt)
     if (run_dir / "score-receipt.json").exists():
         raise FileExistsError("This solver run has already been scored")
     prefix = [setup["paths"]["client_python"], "-B", "-m", MODULES[dataset]]
@@ -815,6 +1000,10 @@ def score(args: argparse.Namespace) -> None:
         stats = summary["tracks"][track]
         if stats["total"] != receipt["case_count"] and dataset == "hle-verified":
             raise RuntimeError("HLE Gold score does not cover the complete solver selection")
+        if dataset == "frontierscience":
+            for name, count in receipt["selected_tracks"].items():
+                if summary["tracks"][name]["total"] != count:
+                    raise RuntimeError("FrontierScience score does not cover the selected track")
         quality = {
             "track": track,
             "successes": stats["successes"],
@@ -830,6 +1019,7 @@ def score(args: argparse.Namespace) -> None:
         "dataset": dataset,
         "arm": receipt["arm"],
         "plan_contract_sha256": receipt["plan_contract_sha256"],
+        "plan_inventory_sha256": receipt["plan_inventory_sha256"],
         "selection_sha256": receipt["selection_sha256"],
         "quality": quality,
         "summary_sha256": sha256(
@@ -852,8 +1042,10 @@ def compare(args: argparse.Namespace) -> None:
             raise ValueError("Run arm label mismatch")
         if solver["client_exit_code"] or solver["transport_or_response_failures"]:
             raise ValueError("Cannot compare a failed solver run")
+        _verify_record_hashes(directory, solver)
         if (
             score_result["dataset"] != solver["dataset"]
+            or score_result["plan_inventory_sha256"] != solver["plan_inventory_sha256"]
             or score_result["selection_sha256"] != solver["selection_sha256"]
         ):
             raise ValueError("Score receipt differs from solver scope")
@@ -872,10 +1064,14 @@ def compare(args: argparse.Namespace) -> None:
         "dataset",
         "case_count",
         "plan_contract_sha256",
+        "plan_inventory_sha256",
         "selection_sha256",
         "common_config_sha256",
+        "setup_sha256",
         "physical_npus",
         "worker_runtime_common",
+        "selected_tracks",
+        "frontier_full_split",
     ):
         if native[key] != dynamic[key]:
             raise ValueError(f"Paired runs disagree on {key}")
@@ -906,6 +1102,14 @@ def compare(args: argparse.Namespace) -> None:
     ratio = dynamic["output_tokens_per_second"] / native["output_tokens_per_second"]
     if not math.isfinite(ratio):
         raise ValueError("Non-finite throughput ratio")
+    formal_scope_pass = native["case_count"] >= (160 if dataset == "frontierscience" else 200)
+    if dataset == "frontierscience":
+        tracks = native["selected_tracks"] or {}
+        formal_scope_pass = (
+            formal_scope_pass
+            and native["frontier_full_split"] is True
+            and all(tracks.get(name, 0) > 0 for name in ("olympiad", "research"))
+        )
     result = {
         "dataset": dataset,
         "case_count": native["case_count"],
@@ -916,13 +1120,21 @@ def compare(args: argparse.Namespace) -> None:
         "unresolved_grades_present": unresolved,
         "throughput_ge_1_10": ratio >= 1.10,
         "quality_worst_case_within_2pp": worst_delta >= -0.02,
-        "independent_runtime_worker_and_operator_proof_still_required": True,
+        "formal_scope_pass": formal_scope_pass,
+        "runtime_worker_and_operator_rpc_captured": True,
+        "independent_operator_numerical_parity_proof_required": True,
         "natural_output_lengths_may_differ_not_fixed_work": True,
     }
+    result["performance_quality_scope_pass"] = all(
+        result[key]
+        for key in ("throughput_ge_1_10", "quality_worst_case_within_2pp", "formal_scope_pass")
+    )
     if args.output:
         output = private_root(args.output)
         write_new(output, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result["performance_quality_scope_pass"]:
+        raise SystemExit(2)
 
 
 def build_parser() -> argparse.ArgumentParser:

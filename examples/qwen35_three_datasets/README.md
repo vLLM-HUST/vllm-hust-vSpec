@@ -2,7 +2,7 @@
 
 这个目录提供可公开审计的**入口脚本**，不附带模型、数据集、私人配置、实验结果或历史环境的绝对路径。它生成同口径的原生 MTP4 与动态 vSpec 服务配置，顺序运行两臂，记录请求用时与输出 token，并把评分同吞吐分开记录。所有计划、日志和结果必须存到操作者的私有目录；模型与数据集资产可以由只读共享存储提供。
 
-这不是“安装插件即复现报告数值”的保证。复现所需的底层版本、NPU、算子、judge 服务及证明资产必须另行核验。脚本不会构造算子证明资产，也不提供 HLE/FrontierScience 的评审模型服务。模型级端点能读取实际 worker、静态编译与算子状态，但这些观察值不能代替数值正确性、完整评分或独立审计。
+这不是“安装插件即复现报告数值”的保证。复现所需的底层版本、NPU、算子、judge 服务及证明资产必须另行核验。脚本不会构造算子证明资产，也不提供 HLE/FrontierScience 的评审模型服务。模型级端点能读取实际 worker、静态编译与算子状态，但这些观察值不能代替数值正确性、完整评分或独立审计。后测算子的折叠计数可能包含启动期 graph capture，只能证明同一 worker 进程观察到算子执行，不能单独证明计时窗口内发生了命中；正式声明需另外提供计时前后计数差或独立 profiler 证据。模型权重未逐字节哈希，setup 仅绑定模型目录路径，模型修订与权重哈希需由操作者另行记录。
 
 ## 准备条件
 
@@ -16,7 +16,7 @@
 
 `common-config.json` 是用户自己冻结的 vLLM 顶层配置（JSON 对象，可包含其他所需参数），至少包含 `dtype`, `tensor_parallel_size`, `max_model_len`, `max_num_seqs`, `max_num_batched_tokens`, `enable_prefix_caching`, `kv_cache_memory_bytes`, `compilation_config`, `speculative_config`。这里要求 `dtype=bfloat16`、TP=2、显式正数 KV byte 预算、`speculative_config.method=mtp`；不要把 `model`、`host`、`port`、`served_model_name`、`worker_extension_cls` 或 `num_speculative_tokens` 塞进共享文件。服务配置生成器只允许两臂在投机深度（原生 4、动态容量 8）和 worker 类上不同；数据集可用各自的长度/多模态配置，但**同一数据集的两臂必须用同一共享配置**。动态容量 8 是上限，不代表每轮都固定选 8；实际选择仍需独立 worker 证据核验。
 
-`common-env.json` 和 `dynamic-env.json` 都是私有 JSON 字符串映射。前者可放两臂共同的设备可见性、离线模型、静态编译设置，其中 `HUST_VSPEC_CAPTURE_SAFE_STATIC="1"` 与 `HUST_VSPEC_HOT_STATIC_SHAPES="14,42,70,98,126"` 是本配对入口要求的共同编译设置；后者只放动态臂的 `VSPEC_`、`HUST_VSPEC_` 或 `HUST_ISSUE18_` 配置与 proof 路径。不要在这两个文件中放密码、API token 或旧环境 `PYTHONPATH`。示例自行生成保存在私有 setup 中的随机端点令牌，为每臂新建隔离缓存目录，并在计时前调用受保护的缓存清理路由；不会预存答案或 KV。
+`common-env.json` 和 `dynamic-env.json` 都是私有 JSON 字符串映射。前者可放两臂共同的设备可见性、离线模型、静态编译设置，其中 `HUST_VSPEC_CAPTURE_SAFE_STATIC="1"` 与 `HUST_VSPEC_HOT_STATIC_SHAPES="14,42,70,98,126"` 是本配对入口要求的共同编译设置；后者只放动态臂的 `VSPEC_`、`HUST_VSPEC_` 或 `HUST_ISSUE18_` 配置与 proof 路径。不要在这两个文件中放密码、API token 或旧环境 `PYTHONPATH`。服务子进程只继承必要的系统/NPU 环境变量，并剔除常见凭据变量；需要的额外非敏感设置请显式写入 common-env。示例自行生成保存在私有 setup 中的随机端点令牌，为每臂新建隔离缓存目录，并在计时前调用受保护的缓存清理路由；不会预存答案或 KV。
 
 ## 冻结题目与准备配对配置
 
@@ -84,6 +84,6 @@ PLAN="$PRIVATE_ROOT/mmlu/plan200"
   --output "$PRIVATE_ROOT/pair-mmlu/comparison.json"
 ```
 
-HLE/FrontierScience 的 `run` 命令还需 `--selection /path/to/selection.json`。两个 solver run 完成后，按冻结配置在独立服务上启动 judge，再执行各自的 `score`。`compare` 核对同一 plan、题目清单、共享服务配置、评分范围和规则；HLE/FrontierScience 把未决评分按最不利情况计算质量下降界。它只给观察值，不把未决题自动判为正确。若出现客户端失败、不完整请求、评分范围不一致或非正的基线吞吐，会拒绝对比。MMLU-Pro 按客户端的完整总结评分；截断题仍按规则计入分母。
+HLE/FrontierScience 的 `run` 命令还需 `--selection /path/to/selection.json`。两个 solver run 完成后，按冻结配置在独立服务上启动 judge，再执行各自的 `score`。`score` 和 `compare` 会重验计时请求文件及计划题目清单的哈希。`compare` 核对同一 plan、题目清单、共享服务配置、评分范围和规则；HLE/FrontierScience 把未决评分按最不利情况计算质量下降界，不把未决题自动判为正确。`performance_quality_scope_pass` 仅表示吞吐、质量与样本范围三项通过：MMLU-Pro/HLE-Verified 至少 200 题，FrontierScience 至少 160 题且覆盖完整双轨计划；任一项不满足时仍打印诊断结果，但非零退出。它不代表完整发布验收，后者仍需独立算子数值证明并运行 `scripts/verify_model_acceptance.py`。MMLU-Pro 按客户端的完整总结评分；截断题仍按规则计入分母。
 
 运行日志、计划、选题、请求记录、评分和配置会包含模型路径或题目内容，**不要上传到公开仓库或共享目录**。脚本在正式运行时从 `npu-smi` 记录逻辑 0/1 对应的两块物理 910B2，`compare` 仅在两臂映射一致时继续；但仍须独立保存设备租用和真实 worker/算子证据。公开报告仅可发布脱敏后的聚合结果，并应附版本/哈希、硬件分配、两臂运行时 worker/算子证明、客户端/模型/计划修订及完整计分口径。没有这些证据，就只能称为本地诊断，不应宣称复现了既有吞吐或正确率。

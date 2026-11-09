@@ -109,6 +109,7 @@ class PublicExampleTests(unittest.TestCase):
     def test_runtime_and_operator_proof_cover_both_ranks(self):
         def row(rank):
             return {
+                "pid": 100 + rank,
                 "arm": "native",
                 "configured_speculative_capacity": 4,
                 "vspec_module_loaded": False,
@@ -116,12 +117,23 @@ class PublicExampleTests(unittest.TestCase):
                 "quantization": None,
                 "explicit_kv_bytes": 2_000_000_000,
                 "prefix_cache": True,
-                "compiler": {"actual_enable_static_kernel": True},
+                "compiler": {
+                    "actual_enable_static_kernel": True,
+                    "actual_enable_npugraph_ex": True,
+                    "cudagraph_mode": "FULL",
+                    "all_capture_keys": [14, 42],
+                },
                 "static": {
                     "static_install": {
                         "rank": rank,
+                        "pid": 100 + rank,
+                        "install_owner_pid": 100 if rank == 0 else None,
+                        "installed_package_hashes": ["pkg"] if rank == 0 else [],
+                        "private_install_path": "/private/static-install",
                         "process_isolation": True,
                         "actual_installed_device_binary_sha256": {"kernel.o": "hash"},
+                        "actual_installed_binary_metadata_sha256": {"kernel.json": "hash"},
+                        "offline_compiler_jobs": 8,
                     }
                 },
                 "max_model_len": 32768,
@@ -134,30 +146,79 @@ class PublicExampleTests(unittest.TestCase):
         response = {"results": [row(0), row(1)]}
         common = paired._validate_runtime_metadata("native", response)
         self.assertEqual(common["max_model_len"], 32768)
+        static_before = paired._static_install_signature("native", response)
+        self.assertEqual(set(static_before), {0, 1})
+        changed_install = json.loads(json.dumps(response))
+        for worker in changed_install["results"]:
+            worker["static"]["static_install"]["actual_installed_device_binary_sha256"][
+                "kernel.o"
+            ] = "new-hash"
+        paired._validate_runtime_metadata("native", changed_install)
+        self.assertNotEqual(
+            static_before, paired._static_install_signature("native", changed_install)
+        )
         paired._validate_operator_proof(
             "native",
             {
                 "results": [
                     {
                         "arm": "native",
+                        "software_paths": {"pid": 100},
                         "static_runtime": {
                             "vspec_plugin_absent": True,
-                            "static_install": {"rank": 0},
+                            "static_install": {"rank": 0, "pid": 100},
                         },
                     },
                     {
                         "arm": "native",
+                        "software_paths": {"pid": 101},
                         "static_runtime": {
                             "vspec_plugin_absent": True,
-                            "static_install": {"rank": 1},
+                            "static_install": {"rank": 1, "pid": 101},
                         },
                     },
                 ]
             },
+            response,
+            response,
         )
         response["results"][1]["max_model_len"] = 65536
         with self.assertRaisesRegex(RuntimeError, "disagree"):
             paired._validate_runtime_metadata("native", response)
+
+    def test_dynamic_operator_proof_requires_identity_and_observed_dispatch(self):
+        metadata = {
+            "results": [
+                {"pid": 100 + rank, "static": {"static": {"rank": rank, "pid": 100 + rank}}}
+                for rank in (0, 1)
+            ]
+        }
+
+        def proof_row(rank, active):
+            stride = [
+                {"actual_replay_counts_by_gamma_and_requests": {"4x1": 1} if active else {}}
+            ] + [
+                {"actual_replay_counts_by_gamma_and_requests": {}} for _ in range(29)
+            ]
+            edge = [{"actual_replay_counts_by_gamma_and_requests": {}} for _ in range(30)]
+            rgdr = [{"actual_same_kernel_folded_replay_counter_cells": [0]} for _ in range(30)]
+            return {
+                "arm": "dynamic",
+                "pid": 100 + rank,
+                "static_runtime": {"static": {"rank": rank, "pid": 100 + rank}},
+                "native_stride_convolution": stride,
+                "native_edge_convolution": edge,
+                "native_gamma8_RGDR": rgdr,
+            }
+
+        proof = {"results": [proof_row(0, True), proof_row(1, True)]}
+        paired._validate_operator_proof("dynamic", proof, metadata, metadata)
+        proof["results"][1]["pid"] = 999
+        with self.assertRaisesRegex(RuntimeError, "PID"):
+            paired._validate_operator_proof("dynamic", proof, metadata, metadata)
+        proof["results"][1] = proof_row(1, False)
+        with self.assertRaisesRegex(RuntimeError, "No dynamic native operator dispatch"):
+            paired._validate_operator_proof("dynamic", proof, metadata, metadata)
 
     def test_prepare_and_run_dry_run_without_npu(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -250,9 +311,27 @@ class PublicExampleTests(unittest.TestCase):
             self.assertIn("--qwen35-mtp-compat", command["server"])
             self.assertEqual(command["case_count"], 1)
             self.assertFalse((work / "runs").exists())
-            server_env = paired._server_env(
-                paired._load_setup(work / "setup.json"), "native", root / "native-server"
-            )
+            with patch.dict(
+                paired.os.environ,
+                {
+                    "OPENAI_API_KEY": "private",
+                    "HF_TOKEN": "private",
+                    "AWS_SECRET_ACCESS_KEY": "private",
+                    "PYTORCH_NPU_ALLOC_CONF": "test-setting",
+                    "UNRELATED_VARIABLE": "excluded",
+                },
+            ):
+                server_env = paired._server_env(
+                    paired._load_setup(work / "setup.json"), "native", root / "native-server"
+                )
+            for key in (
+                "OPENAI_API_KEY",
+                "HF_TOKEN",
+                "AWS_SECRET_ACCESS_KEY",
+                "UNRELATED_VARIABLE",
+            ):
+                self.assertNotIn(key, server_env)
+            self.assertEqual(server_env["PYTORCH_NPU_ALLOC_CONF"], "test-setting")
             self.assertEqual(
                 server_env["PYTHONPATH"].split(":"), [str(backend), str(static), str(evaluation)]
             )
@@ -263,6 +342,9 @@ class PublicExampleTests(unittest.TestCase):
             root = Path(temp)
             for arm in ("native", "dynamic"):
                 directory = root / arm
+                output = directory / "solver"
+                for case_id in ("one", "two"):
+                    dump(output / "requests" / f"{case_id}.json", {"case_id": case_id})
                 hashes = {}
                 for name, key in (
                     ("worker-before.json", "worker_before_sha256"),
@@ -279,14 +361,24 @@ class PublicExampleTests(unittest.TestCase):
                         "dataset": "mmlu-pro",
                         "case_count": 2,
                         "plan_contract_sha256": "plan",
+                        "plan_inventory_sha256": "inventory",
                         "selection_sha256": "selection",
                         "common_config_sha256": "common",
+                        "setup_sha256": "setup",
                         "physical_npus": [0, 1],
                         "worker_runtime_common": {"dtype": "torch.bfloat16"},
                         "client_exit_code": 0,
                         "transport_or_response_failures": 0,
                         "output_tokens_per_second": 100,
                         "native_worker": None,
+                        "selected_tracks": None,
+                        "frontier_full_split": None,
+                        "solver_output": str(output),
+                        "record_count": 2,
+                        "record_hashes": {
+                            path.name: paired.sha256(path)
+                            for path in (output / "requests").glob("*.json")
+                        },
                         **hashes,
                     },
                 )
@@ -297,6 +389,7 @@ class PublicExampleTests(unittest.TestCase):
                         "dataset": "mmlu-pro",
                         "selection_sha256": "selection",
                         "plan_contract_sha256": "plan",
+                        "plan_inventory_sha256": "inventory",
                         "quality": {"overall": 0.5},
                     },
                 )
@@ -305,6 +398,26 @@ class PublicExampleTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "observer"):
                 paired.compare(args)
+            dump(root / "native" / "solver" / "requests" / "one.json", {"case_id": "changed"})
+            with self.assertRaisesRegex(ValueError, "changed after generation"):
+                paired.compare(args)
+            dump(root / "native" / "solver" / "requests" / "one.json", {"case_id": "one"})
+            native_receipt_path = root / "native" / "solver-receipt.json"
+            native_receipt = paired.read_json(native_receipt_path)
+            native_receipt["native_worker"] = "native_static_worker.NativeEvaluationWorker"
+            dump(native_receipt_path, native_receipt)
+            dynamic_receipt_path = root / "dynamic" / "solver-receipt.json"
+            dynamic_receipt = paired.read_json(dynamic_receipt_path)
+            dynamic_receipt["output_tokens_per_second"] = 120
+            dump(dynamic_receipt_path, dynamic_receipt)
+            capture = io.StringIO()
+            with contextlib.redirect_stdout(capture), self.assertRaises(SystemExit) as exit_state:
+                paired.compare(args)
+            self.assertEqual(exit_state.exception.code, 2)
+            result = json.loads(capture.getvalue())
+            self.assertFalse(result["formal_scope_pass"])
+            self.assertFalse(result["performance_quality_scope_pass"])
+            self.assertNotIn("acceptance_pass", result)
 
 
 if __name__ == "__main__":
