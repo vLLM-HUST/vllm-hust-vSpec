@@ -7,6 +7,7 @@ import os
 import time
 import traceback
 from collections import Counter
+from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
@@ -20,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 _DEVICE_COUNT_EVENT_OWNERS: dict[int, Any] = {}
 _DEVICE_COUNT_PRECOPY_PATCH_MARKER = "_vllm_hust_vspec_device_count_precopy"
+_GENERIC_MTP_LOCAL_ARGMAX: ContextVar[bool] = ContextVar(
+    "vspec_generic_mtp_local_argmax", default=False
+)
 
 
 def _get_current_mamba_groups(kv_cache_config: Any) -> dict[Any, list[int]]:
@@ -124,6 +128,15 @@ def _patch_mtp_local_argmax_reduction() -> bool:
             **kwargs: Any,
         ) -> Any:
             if self.method == "mtp" and self.use_local_argmax_reduction:
+                if _GENERIC_MTP_LOCAL_ARGMAX.get():
+                    calls = getattr(self, "_vspec_generic_mtp_local_argmax_calls", 0) + 1
+                    self._vspec_generic_mtp_local_argmax_calls = calls
+                    if calls in (1, 2, 3, 128, 1024):
+                        logger.warning(
+                            "vSpec generic MTP local argmax draft call=%d "
+                            "(Python eager/capture; ACL graph replays bypass Python)",
+                            calls,
+                        )
                 return _sample_mtp_local_argmax(self, hidden_states)
             return original_compute_draft_token_ids(
                 self,
@@ -158,7 +171,288 @@ def _patch_mtp_local_argmax_reduction() -> bool:
         sample_draft_tokens_for_step._vspec_mtp_local_argmax = True  # type: ignore[attr-defined]
         AscendStep3p5MTPProposer._sample_draft_tokens_for_step = sample_draft_tokens_for_step
         applied = True
+
+    # Ascend's generic _run_merged_draft bypasses compute_draft_token_ids()
+    # unless enable_reduce_sample is set. Do not enable that global option:
+    # it also changes target sampling and rejection. Scope only this branch
+    # selection to the Qwen3.5 greedy MTP drafter, so the existing local
+    # argmax implementation runs while the rest of Ascend retains its config.
+    from vllm_ascend.spec_decode import llm_base_proposer as proposer_module
+
+    original_run = AscendSpecDecodeBaseProposer._run_merged_draft
+    if not getattr(original_run, "_vspec_generic_mtp_local_argmax", False):
+        original_get_ascend_config = proposer_module.get_ascend_config
+
+        class DraftOnlyAscendConfig:
+            enable_reduce_sample = True
+
+            def __init__(self, source: Any) -> None:
+                self._source = source
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._source, name)
+
+        @wraps(original_get_ascend_config)
+        def draft_only_get_ascend_config() -> Any:
+            config = original_get_ascend_config()
+            if _GENERIC_MTP_LOCAL_ARGMAX.get():
+                return DraftOnlyAscendConfig(config)
+            return config
+
+        @wraps(original_run)
+        def run_merged_draft(self: Any, *args: Any, **kwargs: Any) -> Any:
+            if (
+                self.method != "mtp"
+                or not self.use_local_argmax_reduction
+                or not _is_qwen35_mtp_config(self.vllm_config)
+                or original_get_ascend_config().enable_reduce_sample
+            ):
+                return original_run(self, *args, **kwargs)
+            if getattr(self, "_enable_probabilistic_draft_probs", False):
+                raise RuntimeError("Generic MTP local argmax requires greedy draft selection")
+            if getattr(self, "dynamic_spec", None) is not None:
+                raise RuntimeError("Generic MTP local argmax does not support a logits-dependent selector")
+            if proposer_module.lmhead_tp_enable():
+                raise RuntimeError("Generic MTP local argmax has not validated fine-grained LM-head TP")
+            if not hasattr(self.model, "get_top_tokens"):
+                raise RuntimeError("Generic MTP local argmax requires get_top_tokens()")
+            if not getattr(self, "_vspec_generic_mtp_local_argmax_logged", False):
+                logger.warning(
+                    "vSpec generic MTP draft-only local argmax branch active; "
+                    "global Ascend reduce-sample remains disabled"
+                )
+                self._vspec_generic_mtp_local_argmax_logged = True
+            token = _GENERIC_MTP_LOCAL_ARGMAX.set(True)
+            try:
+                return original_run(self, *args, **kwargs)
+            finally:
+                _GENERIC_MTP_LOCAL_ARGMAX.reset(token)
+
+        run_merged_draft._vspec_generic_mtp_local_argmax = True  # type: ignore[attr-defined]
+        AscendSpecDecodeBaseProposer._run_merged_draft = run_merged_draft
+        proposer_module.get_ascend_config = draft_only_get_ascend_config
+        applied = True
     return applied
+
+
+def _patch_q35_eagle_mtp_metadata_fusion() -> bool:
+    """Opt in only the actual Q35 Eagle-MTP continuation metadata path.
+
+    Q35 uses AscendEagleProposer, not AscendStep3p5MTPProposer.  Define own
+    methods on Eagle so other Ascend proposers retain the inherited methods.
+    The actual kernel path additionally requires an exact Eagle instance,
+    decode-only proposal, one attention group, and non-capture FULL/PIECEWISE.
+    """
+    if os.environ.get("VSPEC_DRAFT_Q35_METADATA_FUSION") != "1":
+        return False
+
+    from vllm.config import CUDAGraphMode
+    from vllm_ascend.spec_decode import llm_base_proposer as ascend_base
+    from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+
+    original_init = AscendEagleProposer.__init__
+    original_propose = AscendEagleProposer._propose
+    original_attn_update = AscendEagleProposer.attn_update_stack_num_spec_norm
+    if getattr(original_propose, "_vspec_q35_eagle_metadata_fusion", False):
+        return False
+
+    trace = os.environ.get("VSPEC_DRAFT_Q35_METADATA_TRACE") == "1"
+
+    @wraps(original_init)
+    def init(self: Any, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        enabled = bool(
+            type(self) is AscendEagleProposer
+            and getattr(self, "method", None) == "mtp"
+            and getattr(self, "uses_mrope", False)
+            and _is_qwen35_mtp_config(self.vllm_config)
+        )
+        self._vspec_q35_metadata_fusion = enabled
+        self._vspec_q35_metadata_runtime = False
+        self._vspec_q35_metadata_logged = False
+        self._vspec_q35_metadata_reject_logged = False
+        self._vspec_q35_metadata_capture_logged = False
+        self._vspec_q35_metadata_propose_seen: set[str] = set()
+        if trace:
+            print(
+                "VSPEC_Q35_METADATA_EAGLE init: "
+                f"enabled={int(enabled)} method={self.method} "
+                f"uses_mrope={int(bool(self.uses_mrope))} "
+                f"groups_at_init={len(self.draft_attn_groups)}",
+                flush=True,
+            )
+
+    @wraps(original_propose)
+    def propose(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # Adaptive/runtime may have wrapped the inherited Ascend _propose as
+        # a generic (*args, **kwargs) function before this hook is installed.
+        # The production model runner supplies these fields by keyword, but
+        # non-DCP runs report both counts as zero even for a mixed batch.
+        # Require its independently computed uniform-decode descriptor too.
+        # An unfamiliar/malformed caller retains the host path.
+        prefill_known = type(kwargs.get("num_prefill_reqs")) is int
+        num_prefill_reqs = kwargs.get("num_prefill_reqs")
+        decode_count = kwargs.get("num_decode_reqs")
+        decode_count_zero = type(decode_count) is int and decode_count == 0
+        target_descriptor = kwargs.get("target_model_batch_desc")
+        uniform_decode = getattr(target_descriptor, "uniform", None) is True
+        previous_runtime = getattr(self, "_vspec_q35_metadata_runtime", False)
+        self._vspec_q35_metadata_runtime = bool(
+            type(self) is AscendEagleProposer
+            and getattr(self, "_vspec_q35_metadata_fusion", False)
+            and prefill_known
+            and num_prefill_reqs == 0
+            and decode_count_zero
+            and uniform_decode
+        )
+        phase = (
+            "decode" if num_prefill_reqs == 0 else "prefill"
+        ) if prefill_known else "unknown"
+        seen = getattr(self, "_vspec_q35_metadata_propose_seen", None)
+        if trace and seen is not None and phase not in seen:
+            seen.add(phase)
+            print(
+                "VSPEC_Q35_METADATA_EAGLE propose: "
+                f"phase={phase} prefill_reqs={num_prefill_reqs if prefill_known else 'unknown'} "
+                f"decode_reqs={decode_count if type(decode_count) is int else 'unknown'} "
+                f"uniform={int(uniform_decode)} "
+                f"runtime={int(bool(self._vspec_q35_metadata_runtime))}",
+                flush=True,
+            )
+        try:
+            return original_propose(self, *args, **kwargs)
+        finally:
+            self._vspec_q35_metadata_runtime = previous_runtime
+
+    @wraps(original_attn_update)
+    def attn_update_stack_num_spec_norm(
+        self: Any,
+        draft_index: int,
+        old_common_metadata: Any,
+        batch_size: int,
+        input_batch_size: int,
+        used_update_positions: torch.Tensor,
+        aclgraph_runtime_mode: Any,
+        ori_seq_len: Any = None,
+        ori_seq_len_cpu: Any = None,
+        slot_indices: Any = None,
+        mtp_slot_mapping: Any = None,
+        attn_group: Any = None,
+    ) -> Any:
+        runtime = bool(
+            type(self) is AscendEagleProposer
+            and getattr(self, "_vspec_q35_metadata_runtime", False)
+        )
+        # This update executes before Ascend installs a forward context, so
+        # _EXTRA_CTX.capturing would assert.  The NPU stream query explicitly
+        # returns False without initializing a missing NPU context.  Missing
+        # or faulty capture-query APIs fail closed to the host updater.
+        capturing = False
+        if runtime:
+            capture_checker = getattr(
+                getattr(torch, "npu", None), "is_current_stream_capturing", None
+            )
+            if capture_checker is None:
+                capturing = True
+            else:
+                try:
+                    capturing = bool(capture_checker())
+                except Exception:
+                    capturing = True
+        if (
+            runtime
+            and not capturing
+            and ori_seq_len is None
+            and ori_seq_len_cpu is None
+            and slot_indices is None
+            and mtp_slot_mapping is None
+        ):
+            from .draft_metadata_fusion import (
+                can_fuse_q35_mtp_continuation,
+                fuse_q35_mtp_continuation,
+            )
+
+            arguments = dict(
+                draft_index=draft_index,
+                old_common_metadata=old_common_metadata,
+                batch_size=batch_size,
+                input_batch_size=input_batch_size,
+                used_update_positions=used_update_positions,
+                attn_group=attn_group,
+            )
+            full_mode = aclgraph_runtime_mode == CUDAGraphMode.FULL
+            piecewise_mode = aclgraph_runtime_mode == CUDAGraphMode.PIECEWISE
+            if can_fuse_q35_mtp_continuation(
+                self,
+                arguments,
+                full_mode=full_mode,
+                piecewise_mode=piecewise_mode,
+                capturing=False,
+                spec_decode_state=ascend_base.AscendAttentionState.SpecDecoding,
+            ):
+                if trace and not self._vspec_q35_metadata_logged:
+                    self._vspec_q35_metadata_logged = True
+                    print(
+                        "VSPEC_Q35_METADATA_FUSION hit: "
+                        f"path=eagle_mtp mode={aclgraph_runtime_mode.name} "
+                        f"batch={batch_size} input={input_batch_size} "
+                        f"draft_index={draft_index}",
+                        flush=True,
+                    )
+                return fuse_q35_mtp_continuation(
+                    self,
+                    arguments,
+                    full_mode=full_mode,
+                    attention_state=ascend_base.AscendAttentionState.SpecDecoding,
+                    padding_slot_id=ascend_base.PADDING_SLOT_ID,
+                )
+
+        if trace and getattr(self, "_vspec_q35_metadata_fusion", False):
+            log_attr = (
+                "_vspec_q35_metadata_capture_logged"
+                if capturing
+                else "_vspec_q35_metadata_reject_logged"
+            )
+            if (runtime or capturing) and not getattr(self, log_attr, False):
+                setattr(self, log_attr, True)
+                state = getattr(old_common_metadata, "attn_state", None)
+                block_table = getattr(old_common_metadata, "block_table_tensor", None)
+                print(
+                    "VSPEC_Q35_METADATA_FUSION fallback: "
+                    f"path=eagle_mtp capturing={int(capturing)} "
+                    f"runtime={int(runtime)} "
+                    f"mode={getattr(aclgraph_runtime_mode, 'name', aclgraph_runtime_mode)} "
+                    f"batch={batch_size} input={input_batch_size} "
+                    f"draft_index={draft_index} groups={len(self.draft_attn_groups)} "
+                    f"attn_state={getattr(state, 'name', type(state).__name__)} "
+                    f"used_shape={tuple(used_update_positions.shape)} "
+                    f"used_dtype={used_update_positions.dtype} "
+                    f"block_shape={getattr(block_table, 'shape', None)}",
+                    flush=True,
+                )
+        return original_attn_update(
+            self,
+            draft_index,
+            old_common_metadata,
+            batch_size,
+            input_batch_size,
+            used_update_positions,
+            aclgraph_runtime_mode,
+            ori_seq_len=ori_seq_len,
+            ori_seq_len_cpu=ori_seq_len_cpu,
+            slot_indices=slot_indices,
+            mtp_slot_mapping=mtp_slot_mapping,
+            attn_group=attn_group,
+        )
+
+    init._vspec_q35_eagle_metadata_fusion = True  # type: ignore[attr-defined]
+    propose._vspec_q35_eagle_metadata_fusion = True  # type: ignore[attr-defined]
+    attn_update_stack_num_spec_norm._vspec_q35_eagle_metadata_fusion = True  # type: ignore[attr-defined]
+    AscendEagleProposer.__init__ = init
+    AscendEagleProposer._propose = propose
+    AscendEagleProposer.attn_update_stack_num_spec_norm = attn_update_stack_num_spec_norm
+    logger.info("vSpec installed opt-in Q35 Eagle-MTP continuation metadata fusion")
+    return True
 
 
 def _uniform_step3p5_batch_size(
@@ -447,6 +741,29 @@ def _is_async_mtp_mamba_runner(runner: Any) -> bool:
     return _is_async_hybrid_mamba_runner(runner, frozenset({"mtp"}))
 
 
+def _synchronize_device_count_event(
+    event: Any,
+    runner: Any | None,
+    original_synchronize: Any,
+    *args: Any,
+    diagnostic_host_wait: bool,
+    validate_device_counts: bool,
+    **kwargs: Any,
+) -> Any:
+    """Wait on accepted counts before any validation reads their CPU copy."""
+    if runner is None or getattr(runner, "_vspec_mtp_device_count_phase", "idle") != "remap":
+        return original_synchronize(event, *args, **kwargs)
+
+    runner.prev_positions.copy_to_gpu(runner.input_batch.num_reqs)
+    if diagnostic_host_wait or validate_device_counts:
+        # CpuGpuBuffer.copy_to_cpu is nonblocking. Validation calls the
+        # original CPU remap immediately after this event, so stream-only
+        # ordering would leave its host source potentially stale.
+        return original_synchronize(event, *args, **kwargs)
+    torch.npu.current_stream().wait_event(event)
+    return None
+
+
 def _patch_mtp_cohort_refill() -> bool:
     """Select MTP replacement admission from measured online goodput."""
     from ..adaptive.refill import install_online_refill_patch
@@ -511,6 +828,7 @@ def _patch_async_mtp_device_counts(
         return False
 
     original_sync_counts = NPUModelRunner._sync_num_accepted_tokens
+    original_update_states_after_model_execute = NPUModelRunner._update_states_after_model_execute
     original_event_synchronize = torch.npu.Event.synchronize
     original_preprocess_mamba = mamba_utils.preprocess_mamba
     diagnostic_host_wait = os.getenv("HUST_VSPEC_DEVICE_COUNTS_HOST_WAIT", "0") == "1"
@@ -519,6 +837,28 @@ def _patch_async_mtp_device_counts(
     publish_cpu_counts = os.getenv("HUST_VSPEC_DEVICE_COUNTS_PUBLISH_CPU", "0") == "1"
     trace_device_counts = os.getenv("HUST_VSPEC_DEVICE_COUNTS_TRACE", "0") == "1"
     fused_precopy_device_bias = os.getenv("HUST_VSPEC_DEVICE_COUNTS_FUSED_PRECOPY", "0") == "1"
+    skip_postprocess_d2h = (
+        os.getenv("HUST_VSPEC_DEVICE_COUNTS_SKIP_D2H", "0") == "1"
+        or os.getenv("HUST_ISSUE18_DEVICE_COUNTS_SKIP_D2H", "0") == "1"
+    )
+
+    def materialize_pending_cpu_counts(runner: Any) -> None:
+        """Publish a skipped postprocess count before a CPU-count path runs."""
+        if not getattr(runner, "_vspec_mtp_device_count_pending_cpu", False):
+            return
+        ctx = runner._vspec_mtp_device_count_pending_ctx
+        count = runner._vspec_mtp_device_count_pending_count
+        event = runner.num_accepted_tokens_event
+        if event is None:
+            raise RuntimeError("A skipped accepted-count D2H requires a postprocess event")
+        # The event is recorded after the fused postprocess. A host wait is
+        # needed before publishing the CPU tensor, not merely a stream wait.
+        original_event_synchronize(event)
+        runner.num_accepted_tokens.cpu[:count].copy_(
+            ctx.num_accepted_tokens_out[:count], non_blocking=True
+        )
+        torch.npu.current_stream().synchronize()
+        runner._vspec_mtp_device_count_pending_cpu = False
 
     if fused_precopy_device_bias:
         precopy_owner = mamba_utils.MambaSpecDecodeGPUContext
@@ -577,6 +917,7 @@ def _patch_async_mtp_device_counts(
                 ctx = runner._get_mamba_bufs().postprocess_align
                 assert ctx is not None
                 num_reqs = runner.input_batch.num_reqs
+                runner.prev_positions.copy_to_gpu(num_reqs)
                 _remap_accepted_tokens_on_device(
                     ctx.num_accepted_tokens_out,
                     runner.prev_positions.gpu,
@@ -590,23 +931,134 @@ def _patch_async_mtp_device_counts(
                 runner._vspec_mtp_device_count_phase = "mapped"
                 return accepted.gpu if n is None else accepted.gpu[:n]
             if phase == "preprocessed":
+                ctx = runner._get_mamba_bufs().postprocess_align
+                assert ctx is not None
+                num_reqs = runner.input_batch.num_reqs
+                _remap_accepted_tokens_on_device(
+                    ctx.num_accepted_tokens_out,
+                    runner.prev_positions.gpu,
+                    accepted.gpu,
+                    runner._vspec_mtp_safe_prev_positions,
+                    runner._vspec_mtp_new_request_mask,
+                    num_reqs,
+                )
                 runner._vspec_mtp_device_count_phase = "idle"
+                runner._vspec_mtp_device_count_fast_step = True
                 return accepted.gpu if n is None else accepted.gpu[:n]
             return original_copy_to_gpu(n)
 
         accepted.copy_to_gpu = copy_to_gpu
         accepted._vspec_mtp_device_counts = True
 
+    def install_postprocess_scratch_hook(runner: Any, mamba_bufs: Any) -> None:
+        mamba_bufs.preprocess._vspec_mtp_runner = runner
+        if publish_cpu_counts or validate_device_counts or diagnostic_host_wait:
+            return
+        original_postprocess_mamba_align_gpu = mamba_utils.postprocess_mamba_align_gpu
+        if getattr(original_postprocess_mamba_align_gpu, "__name__", None) == "_postprocess_mamba_align_gpu_cpu_fallback":
+            return
+        # This opt-in bypasses only the known upstream function's final D2H.
+        # Other wrappers may have additional work that cannot be skipped.
+        supports_device_only_postprocess = (
+            original_postprocess_mamba_align_gpu.__module__ == mamba_utils.__name__
+            and original_postprocess_mamba_align_gpu.__name__ == "postprocess_mamba_align_gpu"
+        )
+        if getattr(original_postprocess_mamba_align_gpu, "_vspec_mtp_d2h_scratch", False):
+            return
+        if skip_postprocess_d2h and not supports_device_only_postprocess:
+            logger.warning(
+                "vSpec accepted-count D2H skip disabled for unsupported postprocess %s.%s",
+                original_postprocess_mamba_align_gpu.__module__,
+                original_postprocess_mamba_align_gpu.__name__,
+            )
+
+        @wraps(original_postprocess_mamba_align_gpu)
+        def postprocess_mamba_align_gpu(*post_args: Any, **post_kwargs: Any) -> Any:
+            bufs = post_kwargs.get("bufs")
+            post_runner = getattr(getattr(bufs, "preprocess", None), "_vspec_mtp_runner", None)
+            ctx = getattr(bufs, "postprocess_align", None)
+            use_scratch = post_runner is not None and ctx is not None and ctx.is_initialized
+            if post_runner is not None:
+                post_runner._vspec_mtp_device_count_last_d2h_scratch = use_scratch
+            use_device_only = bool(
+                skip_postprocess_d2h
+                and supports_device_only_postprocess
+                and use_scratch
+                and getattr(post_runner, "_vspec_mtp_device_count_fast_step", False)
+                and getattr(post_runner, "_vspec_mtp_device_count_phase", None) == "idle"
+                and post_runner.num_accepted_tokens_event is not None
+                and _is_async_hybrid_mamba_runner(post_runner, methods)
+            )
+            if use_device_only:
+                # The original routine's only work after this fused call is
+                # D2H of num_accepted_tokens_out. The next fast step consumes
+                # that GPU tensor directly; defer D2H until a CPU path needs it.
+                ctx.run_fused_postprocess(
+                    num_reqs=post_kwargs["num_reqs"],
+                    num_accepted_tokens_gpu=post_kwargs["num_accepted_tokens_gpu"],
+                    mamba_state_idx_gpu=ctx.mamba_state_idx_buf.gpu,
+                    num_scheduled_tokens_gpu=ctx.num_scheduled_tokens_buf.gpu,
+                    num_computed_tokens_gpu=ctx.num_computed_tokens_buf.gpu,
+                    num_draft_tokens_gpu=ctx.num_draft_tokens_buf.gpu,
+                )
+                post_runner._vspec_mtp_device_count_pending_ctx = ctx
+                post_runner._vspec_mtp_device_count_pending_count = post_kwargs["num_reqs"]
+                post_runner._vspec_mtp_device_count_pending_cpu = True
+                post_runner._vspec_mtp_device_count_last_d2h_scratch = False
+                post_runner._vspec_mtp_device_count_fast_step = False
+                skipped = getattr(post_runner, "_vspec_mtp_device_count_skipped_d2h_steps", 0) + 1
+                post_runner._vspec_mtp_device_count_skipped_d2h_steps = skipped
+                if skipped == 1:
+                    logger.warning(
+                        "vSpec accepted-count postprocess D2H skipped after fused GPU kernel"
+                    )
+                return None
+            if post_runner is not None:
+                materialize_pending_cpu_counts(post_runner)
+                post_runner._vspec_mtp_device_count_fast_step = False
+            if use_scratch:
+                scratch = getattr(post_runner, "_vspec_mtp_device_count_d2h_scratch", None)
+                if scratch is None:
+                    scratch = torch.empty_like(
+                        post_runner.num_accepted_tokens.cpu,
+                        pin_memory=True,
+                    )
+                    post_runner._vspec_mtp_device_count_d2h_scratch = scratch
+                post_runner._vspec_mtp_device_count_d2h_count = post_kwargs["num_reqs"]
+                post_kwargs["num_accepted_tokens_cpu_tensor"] = scratch
+            return original_postprocess_mamba_align_gpu(*post_args, **post_kwargs)
+
+        postprocess_mamba_align_gpu._vspec_mtp_d2h_scratch = True  # type: ignore[attr-defined]
+        mamba_utils.postprocess_mamba_align_gpu = postprocess_mamba_align_gpu
+
     @wraps(original_prepare_inputs)
     def prepare_inputs(self: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal original_preprocess_mamba
         if not _is_async_hybrid_mamba_runner(self, methods):
+            self._vspec_mtp_device_count_fast_step = False
+            materialize_pending_cpu_counts(self)
             return original_prepare_inputs(self, *args, **kwargs)
 
+        self._vspec_mtp_device_count_fast_step = False
+
+        if mamba_utils.preprocess_mamba is not preprocess_mamba:
+            # Ascend installs its worker Mamba patch after plugin registration.
+            # Restore this wrapper around the Ascend implementation, not the
+            # upstream function captured before worker initialization.
+            original_preprocess_mamba = mamba_utils.preprocess_mamba
+            mamba_utils.preprocess_mamba = preprocess_mamba
+            logger.warning(
+                "vSpec restored accepted-count Mamba wrapper around %s.%s",
+                original_preprocess_mamba.__module__,
+                original_preprocess_mamba.__name__,
+            )
+
         mamba_bufs = self._get_mamba_bufs()
-        mamba_bufs.preprocess._vspec_mtp_runner = self
+        install_postprocess_scratch_hook(self, mamba_bufs)
         ctx = mamba_bufs.postprocess_align
         if ctx is None or not ctx.is_initialized:
             self._vspec_mtp_device_count_phase = "fallback"
+            materialize_pending_cpu_counts(self)
             return original_prepare_inputs(self, *args, **kwargs)
         if fused_precopy_device_bias:
             ctx._vspec_mtp_device_count_runner = self
@@ -629,6 +1081,7 @@ def _patch_async_mtp_device_counts(
             return original_prepare_inputs(self, *args, **kwargs)
         except Exception:
             self._vspec_mtp_device_count_phase = "idle"
+            self._vspec_mtp_device_count_fast_step = False
             raise
 
     @wraps(original_sync_counts)
@@ -638,6 +1091,15 @@ def _patch_async_mtp_device_counts(
         has_prev_mapping: bool,
     ) -> None:
         if getattr(self, "_vspec_mtp_device_count_phase", "idle") != "remap":
+            materialize_pending_cpu_counts(self)
+            scratch = getattr(self, "_vspec_mtp_device_count_d2h_scratch", None)
+            if scratch is not None and getattr(
+                self, "_vspec_mtp_device_count_last_d2h_scratch", False
+            ):
+                if self.num_accepted_tokens_event is not None:
+                    original_event_synchronize(self.num_accepted_tokens_event)
+                count = self._vspec_mtp_device_count_d2h_count
+                self.num_accepted_tokens.cpu[:count].copy_(scratch[:count])
             original_sync_counts(self, num_reqs, has_prev_mapping)
             return
         if publish_cpu_counts:
@@ -687,20 +1149,25 @@ def _patch_async_mtp_device_counts(
             )
         self._vspec_mtp_device_count_phase = "fallback"
 
+    @wraps(original_update_states_after_model_execute)
+    def update_states_after_model_execute(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _is_async_hybrid_mamba_runner(self, methods):
+            mamba_bufs = self._get_mamba_bufs()
+            install_postprocess_scratch_hook(self, mamba_bufs)
+        return original_update_states_after_model_execute(self, *args, **kwargs)
+
     @wraps(original_event_synchronize)
     def event_synchronize(self: Any, *args: Any, **kwargs: Any) -> Any:
         runner = _DEVICE_COUNT_EVENT_OWNERS.get(id(self))
-        if (
-            runner is not None
-            and getattr(runner, "_vspec_mtp_device_count_phase", "idle") == "remap"
-        ):
-            runner.prev_positions.copy_to_gpu(runner.input_batch.num_reqs)
-            if diagnostic_host_wait:
-                original_event_synchronize(self, *args, **kwargs)
-            else:
-                torch.npu.current_stream().wait_event(self)
-            return None
-        return original_event_synchronize(self, *args, **kwargs)
+        return _synchronize_device_count_event(
+            self,
+            runner,
+            original_event_synchronize,
+            *args,
+            diagnostic_host_wait=diagnostic_host_wait or publish_cpu_counts,
+            validate_device_counts=validate_device_counts,
+            **kwargs,
+        )
 
     @wraps(original_preprocess_mamba)
     def preprocess_mamba(*args: Any, **kwargs: Any) -> Any:
@@ -742,11 +1209,22 @@ def _patch_async_mtp_device_counts(
         )
         if has_state_transition and not device_precopy_available:
             num_reqs = len(input_batch.req_ids)
+            ctx = runner._get_mamba_bufs().postprocess_align
+            assert ctx is not None
+            _remap_accepted_tokens_on_device(
+                ctx.num_accepted_tokens_out,
+                runner.prev_positions.gpu,
+                runner.num_accepted_tokens.gpu,
+                runner._vspec_mtp_safe_prev_positions,
+                runner._vspec_mtp_new_request_mask,
+                num_reqs,
+            )
             runner.num_accepted_tokens.copy_to_cpu(num_reqs)
             torch.npu.current_stream().synchronize()
             input_batch.num_accepted_tokens_cpu[:num_reqs] = runner.num_accepted_tokens.np[
                 :num_reqs
             ]
+            runner._vspec_mtp_device_count_pending_cpu = False
             runner._vspec_mtp_device_count_phase = "fallback"
             return original_preprocess_mamba(*args, **kwargs)
 
@@ -756,10 +1234,12 @@ def _patch_async_mtp_device_counts(
 
     prepare_inputs._vspec_mtp_device_counts = True  # type: ignore[attr-defined]
     sync_num_accepted_tokens._vspec_mtp_device_counts = True  # type: ignore[attr-defined]
+    update_states_after_model_execute._vspec_mtp_device_counts = True  # type: ignore[attr-defined]
     event_synchronize._vspec_mtp_device_counts = True  # type: ignore[attr-defined]
     preprocess_mamba._vspec_mtp_device_counts = True  # type: ignore[attr-defined]
     NPUModelRunner._prepare_inputs = prepare_inputs
     NPUModelRunner._sync_num_accepted_tokens = sync_num_accepted_tokens
+    NPUModelRunner._update_states_after_model_execute = update_states_after_model_execute
     torch.npu.Event.synchronize = event_synchronize
     mamba_utils.preprocess_mamba = preprocess_mamba
     from vllm.logger import logger as vllm_logger
@@ -767,12 +1247,13 @@ def _patch_async_mtp_device_counts(
     vllm_logger.info(
         "vSpec enabled device-resident accepted-token remapping for %s between "
         "Mamba block transitions (host_wait=%s, remap_sync=%s, "
-        "publish_cpu=%s, fused_precopy_bias=%s, validate=%s)",
+        "publish_cpu=%s, fused_precopy_bias=%s, skip_d2h=%s, validate=%s)",
         ", ".join(sorted(methods)),
         diagnostic_host_wait,
         synchronize_device_remap,
         publish_cpu_counts,
         fused_precopy_device_bias,
+        skip_postprocess_d2h,
         validate_device_counts,
     )
     return True
@@ -899,6 +1380,14 @@ def _patch_mtp_sync_trace() -> bool:
     return True
 
 
+def _multistep_install_requested() -> bool:
+    # VALIDATE without the base opt-in must reach the installer and hard-fail.
+    return (
+        os.getenv("HUST_ISSUE18_Q35_EAGLE_MULTISTEP", "0") == "1"
+        or os.getenv("HUST_ISSUE18_Q35_EAGLE_MULTISTEP_VALIDATE", "0") == "1"
+    )
+
+
 def apply_mtp_patches(settings: PluginSettings) -> bool:
     """Use the host's native MTP implementation after ABI validation.
 
@@ -908,19 +1397,53 @@ def apply_mtp_patches(settings: PluginSettings) -> bool:
     """
     _validate_ascend_custom_ops()
     applied = _patch_mtp_hybrid_kv_group_annotation()
+    if os.getenv("HUST_ISSUE18_Q35_DRAFT_QSL_DEVICE", "0") == "1":
+        # Wrap the inherited base proposal first.  The Eagle-only metadata
+        # wrapper installed below then captures this scoped QSL wrapper and
+        # preserves its ContextVar lifetime through the original proposal.
+        from .mtp_qsl_device import apply_q35_draft_qsl_device_patch
+
+        applied = apply_q35_draft_qsl_device_patch() or applied
     if os.getenv("HUST_VSPEC_MTP_SYNC_TRACE") == "1":
         applied = _patch_mtp_sync_trace() or applied
     applied = _patch_mtp_mamba_group_api() or applied
     applied = _patch_mtp_local_argmax_reduction() or applied
+    if os.getenv('HUST_ISSUE18_Q35_COMPACT_BODY', '0') == '1':
+        from .mtp_compact_body import install_compact_mtp_body
+
+        applied = install_compact_mtp_body() or applied
+    applied = _patch_q35_eagle_mtp_metadata_fusion() or applied
+    if _multistep_install_requested():
+        # Private, default-off prototype.  It must wrap the Eagle per-step
+        # fusion so an ineligible proposal can still use that vetted path.
+        from .eagle_multistep_metadata import apply_q35_eagle_multistep_metadata_patch
+
+        applied = apply_q35_eagle_multistep_metadata_patch() or applied
     applied = _patch_step3p5_incremental_layers() or applied
     applied = _patch_async_mtp_device_counts() or applied
+    if os.getenv("HUST_ISSUE18_Q35_GDN_MTP_SHARE", "0") == "1":
+        from .gdn_mtp_share import apply_q35_mtp_gdn_share_patch
+
+        applied = apply_q35_mtp_gdn_share_patch() or applied
+    if os.getenv("HUST_ISSUE18_Q35_EARLY_VALID_COUNT", "0") == "1":
+        from .mtp_early_valid_count import apply_q35_early_valid_count_patch
+
+        applied = apply_q35_early_valid_count_patch() or applied
     applied = _patch_mtp_cohort_refill() or applied
+    if os.getenv('HUST_ISSUE18_TARGET_GREEDY_LOCALREDUCE') == '1':
+        from .target_localreduce import install_target_localreduce
+
+        applied = install_target_localreduce() or applied
     if not settings.mtp_strict_graph:
         return applied
 
     from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
     applied = _patch_mtp_drafter_graph_guard() or applied
+    if os.getenv('HUST_ISSUE18_Q35_MTP_DRAFT_ACTIVE_SIZE', '0') != '0':
+        from .mtp_active_head import install_q35_active_proposal_head
+
+        applied = install_q35_active_proposal_head() or applied
     original_dispatch = CudagraphDispatcher.dispatch
     if getattr(original_dispatch, "_vspec_mtp_strict_graph", False):
         return applied

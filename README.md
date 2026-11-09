@@ -1,12 +1,16 @@
 # vllm-hust-vSpec
 
+> **v0.15.1 开发分支：尚未完成发布验证。** 当前新增 Qwen3.5 动态控制及实验性执行路径仍依赖特定 Ascend 后端、自定义算子和本地验证材料；这些依赖不随本分支提供。当前代码仅供开发检查，不应作为已验证、可独立部署的正式版本或性能复现包。设备端正确性、清单管理器兼容性与完整复现仍需验证。
+
+实验性组件通过 `VSPEC_FUSED_PROPOSAL_VOTE_DIR`、`VSPEC_OWNER_MID_TWIN_DIR`、`VSPEC_OWNER_TAIL_TWIN_DIR`、`VSPEC_PREFIX_CLIP_BRIDGE_DIR`、`VSPEC_NATIVE_CONV_TILE_DIR`、`VSPEC_TWO_BANK_EMBEDDING_DIR`、`VSPEC_INPLACE_HEAD_NZ_DIR` 指定其本地验证材料目录；相关影子校验还使用 `VSPEC_ASCEND_SOURCE_ROOT` 和 `VSPEC_VLLM_SOURCE_ROOT`。路径未配置或校验不通过时，相应实验性功能应拒绝启用；设置路径不会跳过既有校验。不得把私人评测结果、模型权重或验证材料上传到此仓库。
+
 历史原件下载与校验见 [benchmark custody guide](docs/benchmark-originals.md)。
 
 `vllm-hust-vSpec` 是面向 vLLM-HUST + vLLM-Ascend-HUST 的独立
 `vllm.general_plugins` 投机解码插件。插件支持动态 gamma，并提供已验证的 Draft 、EAGLE 和 MTP 投机解码方案。
 
 Extension Manager ID：`org.vllm-hust.vspec`。插件遵循 Manifest
-`0.2-experimental` 的 `in_process_plugin` 边界，同时注册
+`0.3-experimental` 的 `in_process_plugin` 边界，同时注册
 `vllm.general_plugins` 运行入口和 `vllm_hust.extension_bundles` 静态发现入口。
 
 当前物理迁移范围、干净宿主 NPU 结果和剩余 ABI 边界见
@@ -179,7 +183,7 @@ Qwen3.5 MTP2 只需要 `Qwen/Qwen3.5-35B-A3B`，MTP head 已包含在 target che
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.14.3-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.15.1-py3-none-any.whl
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
 
@@ -287,10 +291,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.14.3 --enable
+./manage.sh upgrade --version 0.15.1 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.14.3-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.15.1-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -314,12 +318,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.14.3` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由 `v0.15.1` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.14.3
+export VSPEC_RELEASE_CONFIRM=0.15.1
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```

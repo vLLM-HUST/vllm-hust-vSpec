@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import fields, replace
 from typing import Any
 
-from ..config import PluginSettings
+from ..config import ENV_MTP_CANDIDATE_STRIDE, PluginSettings
 from ..host_compat import call_with_supported_kwargs
 from .controller import GoodputController
 from .entropy import EntropyDraftStopper, topk_entropy
@@ -90,6 +90,29 @@ def _adaptive_scheduled_batch_size(
     if get_batch_size is not None:
         return int(get_batch_size(num_scheduled_requests))
     return int(num_scheduled_requests)
+
+
+def _adaptive_initial_cohort_started_at(
+    scheduler: Any,
+    num_running: int,
+    num_waiting: int,
+    now: float,
+) -> float:
+    """Start a fresh bounded arrival wait for each drained-engine burst.
+
+    An active cohort may last much longer than the arrival budget. Keeping
+    its last schedule timestamp would make the next burst's first request
+    appear to have already waited too long after any idle gap.
+    """
+    attribute = "_vspec_adaptive_initial_cohort_started_at"
+    if num_running == 0 and num_waiting > 0:
+        started_at = getattr(scheduler, attribute, None)
+        if started_at is None:
+            started_at = now
+            setattr(scheduler, attribute, started_at)
+        return float(started_at)
+    setattr(scheduler, attribute, None)
+    return now
 
 
 def _should_hold_initial_cohort(
@@ -310,6 +333,10 @@ def _normalize_spec_decoding_stats_width(stats: Any, width: int) -> Any:
         "num_accepted_tokens_per_pos",
         "num_draft_tokens_per_pos",
     ):
+        # Older hosts expose total draft counts but not per-position attempts.
+        # Do not invent counters: normalize only metrics actually provided.
+        if attribute == "num_draft_tokens_per_pos" and not hasattr(stats, attribute):
+            continue
         values = getattr(stats, attribute)
         if len(values) > configured_width:
             raise RuntimeError(
@@ -891,11 +918,18 @@ def _eagle3_native_anchor_query_width(
     *,
     cohort_locked: bool,
 ) -> int | None:
-    """Resolve a cohort-locked native frame without scanning requests."""
+    """Resolve a cohort-locked native frame using the current MTP layout."""
     if not cohort_locked or bool(scheduler_output.scheduled_new_reqs):
         return None
     gamma = int(getattr(scheduler_output, "num_spec_tokens_to_schedule", -1))
     query_width = gamma + 1
+    if method == "mtp" and _runtime_target_query_width(scheduler_output) != query_width:
+        # Async scheduling chooses the next proposal width after scheduling
+        # the current Target frame. A continuation after chunked prefill can
+        # therefore request gamma=4 while verifying no draft tokens (q1).
+        # Treating that frame as native q5 binds speculative GDN state to a
+        # non-spec decode; the following q5 replay can read invalid indices.
+        return None
     if not _is_eagle3_anchor_runtime(
         runner,
         method,
@@ -960,6 +994,83 @@ def _synchronize_eagle3_width_transition(
         if state is not None:
             state.metadata = None
             state.gather_indices = None
+    return True
+
+
+def _synchronize_mtp_width_transition(
+    runner: Any,
+    method: str,
+    gamma: int,
+    *,
+    enabled: bool,
+    empty_cohort_boundary: bool,
+    synchronize: Any | None = None,
+    quiescent_growth_receipt: Any | None = None,
+) -> bool:
+    """Fence a changed MTP width once, before the next cohort's graph work.
+
+    The scheduler may finish the last request before its queued NPU work has
+    completed. A drained *scheduler* cohort is therefore not by itself a
+    device fence. Reject any width change without the scheduler's explicit
+    empty-cohort marker instead of silently switching an active async cohort.
+    """
+    if not enabled or method != "mtp" or runner is None:
+        return False
+
+    previous_gamma = int(
+        getattr(
+            runner,
+            "_vspec_mtp_synchronized_gamma",
+            getattr(runner, "_vspec_adaptive_anchor_gamma", gamma),
+        )
+    )
+    growth_stage = None
+    if isinstance(quiescent_growth_receipt,dict) and quiescent_growth_receipt.get('kind')=='even_round':
+        from .even_fence_contract import consume
+        if os.environ.get('HUST_VSPEC_EVEN_ROUND_ENABLE')!='1':
+            raise RuntimeError('Even transition marker without explicit enable')
+        consume(runner,quiescent_growth_receipt,previous_gamma,gamma,os.getpid())
+        if synchronize is None:
+            import torch
+            synchronize=torch.npu.synchronize
+        synchronize()
+        runner._vspec_mtp_synchronized_gamma=gamma
+        return previous_gamma!=gamma
+    if isinstance(quiescent_growth_receipt, dict) and quiescent_growth_receipt.get('stage') == 'prefix_shrink':
+        from vllm_hust_vspec.config import q35_tail_prefix_shrink_enabled
+        from .prefix_shrink import consume_prefix_shrink
+        if not q35_tail_prefix_shrink_enabled():
+            raise RuntimeError('Private accepted-prefix shrink is disabled')
+        consume_prefix_shrink(runner, quiescent_growth_receipt, previous_gamma, gamma)
+        if synchronize is None:
+            import torch
+            synchronize = torch.npu.synchronize
+        synchronize()
+        runner._vspec_mtp_synchronized_gamma = gamma
+        return True
+    if quiescent_growth_receipt is not None:
+        from .quiescent_plan import consume_worker_fence
+        growth_stage = consume_worker_fence(runner, quiescent_growth_receipt, previous_gamma, gamma)
+        if synchronize is None:
+            import torch
+            synchronize = torch.npu.synchronize
+        synchronize()
+    if previous_gamma == gamma:
+        runner._vspec_mtp_synchronized_gamma = gamma
+        return False
+    if not empty_cohort_boundary and growth_stage != 'bridge':
+        raise RuntimeError(
+            "MTP async width changed outside an empty cohort boundary: "
+            f"previous={previous_gamma}, next={gamma}"
+        )
+
+    if synchronize is None:
+        import torch
+
+        synchronize = torch.npu.synchronize
+    if growth_stage is None:
+        synchronize()
+    runner._vspec_mtp_synchronized_gamma = gamma
     return True
 
 
@@ -1192,6 +1303,24 @@ def _proposal_execution_gamma(
     return requested_gamma
 
 
+def _online_candidate_stride(
+    method: str,
+    min_gamma: int,
+    max_gamma: int,
+    environ: Any = None,
+) -> int:
+    """Resolve MTP arm spacing at scheduler construction, never in the hot path."""
+    if method != "mtp":
+        return 1
+    environment = os.environ if environ is None else environ
+    stride = int(environment.get(ENV_MTP_CANDIDATE_STRIDE, "2"))
+    if stride <= 0 or stride % 2 or (max_gamma - min_gamma) % stride:
+        raise ValueError(
+            f"{ENV_MTP_CANDIDATE_STRIDE} must be positive, even, and include max_gamma"
+        )
+    return stride
+
+
 def _online_initial_gamma(
     method: str,
     min_gamma: int,
@@ -1205,8 +1334,14 @@ def _online_initial_gamma(
         # arms remain available to the online model and UCB selector.
         return min(max_gamma, max(min_gamma, 5))
     if method == "mtp":
+        if os.environ.get('HUST_VSPEC_EVEN_ROUND_ENABLE') == '1':
+            if (min_gamma,max_gamma)!=(2,8):
+                raise RuntimeError('Even-round MTP requires [2,8]')
+            if os.environ.get('HUST_ISSUE18_B16_ARM')=='fixed4':
+                return 4
+            return 2
         # MTP2 rolls the two-layer head repeatedly. Gamma 4 is the measured
-        # B16 knee while 2 and 6 remain explicit online candidates.
+        # B16 knee while the configured even-width arms remain candidates.
         anchor = min(max_gamma, max(min_gamma, 4))
         return anchor - (anchor % 2)
     return None
@@ -1458,7 +1593,7 @@ def _configure_mtp_runtime_anchor(
     min_gamma: int,
     max_gamma: int,
 ) -> int | None:
-    """Keep native MTP state at gamma 4 with capacity through gamma 6."""
+    """Keep native MTP state at gamma 4 with the configured frontier capacity."""
     if method != "mtp":
         return None
 
@@ -2240,10 +2375,23 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 "max_batched_tokens": int(self.scheduler_config.max_num_batched_tokens),
             }
             if settings.adaptive_policy == "online":
+                mtp_boundary_probe_observations = int(
+                    os.environ.get("HUST_VSPEC_MTP_BOUNDARY_FRONTIER_PROBE_OBS",
+                                   os.environ.get("HUST_VSPEC_MTP_BOUNDARY_G6_PROBE_OBS", "0"))
+                ) if settings.method == "mtp" else 0
+                if mtp_boundary_probe_observations and not stateful_cohort_locked:
+                    raise RuntimeError(
+                        "MTP frontier boundary probing requires the async cohort lock"
+                    )
                 self._vspec_adaptive_controller = OnlineGammaController(
                     **common_options,
-                    candidate_stride=(2 if settings.method == "mtp" else 1),
+                    candidate_stride=_online_candidate_stride(
+                        settings.method,
+                        settings.adaptive_min_gamma,
+                        settings.adaptive_max_gamma,
+                    ),
                     window_size=settings.adaptive_online_window,
+                    reward_normalization=settings.adaptive_online_reward_normalization,
                     exploration=settings.adaptive_online_exploration,
                     warmup_samples=(settings.adaptive_online_warmup_samples),
                     warmup_return=(settings.adaptive_online_warmup_return),
@@ -2261,6 +2409,9 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                         settings.adaptive_min_gamma,
                         settings.adaptive_max_gamma,
                         int(self.scheduler_config.max_num_seqs),
+                    ),
+                    boundary_frontier_probe_after_observations=(
+                        mtp_boundary_probe_observations
                     ),
                 )
             else:
@@ -2364,18 +2515,12 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             )
             initial_cohort_wait_seconds = self._vspec_adaptive_initial_cohort_wait_seconds
             now = time.monotonic()
-            initial_cohort_started_at = getattr(
+            initial_cohort_started_at = _adaptive_initial_cohort_started_at(
                 self,
-                "_vspec_adaptive_initial_cohort_started_at",
+                num_running,
+                num_waiting,
                 now,
             )
-            if num_running == 0 and num_waiting > 0:
-                if not hasattr(self, "_vspec_adaptive_initial_cohort_started_at"):
-                    self._vspec_adaptive_initial_cohort_started_at = now
-                    initial_cohort_started_at = now
-            else:
-                self._vspec_adaptive_initial_cohort_started_at = now
-                initial_cohort_started_at = now
             hold_initial_cohort = _should_hold_initial_cohort(
                 num_running,
                 num_waiting,
@@ -2407,6 +2552,9 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 preselected_decision = self._vspec_adaptive_controller.choose(
                     anticipated_batch_size,
                     0,
+                    at_cohort_boundary=(
+                        settings.method == "mtp" and stateful_cohort_locked
+                    ),
                 )
                 schedule_gamma = preselected_decision.gamma
 
@@ -2513,6 +2661,19 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 if decision.gamma == 0 and settings.adaptive_gamma0_mode == "sticky":
                     self._vspec_adaptive_target_only.enter(set(self.requests))
             scheduler_output.num_spec_tokens_to_schedule = decision.gamma
+            if settings.method == "mtp" and stateful_cohort_locked:
+                # The marker describes the schedule that actually has work.
+                # A prior empty schedule may already have selected the new
+                # width, so `decision.changed` alone is insufficient here.
+                scheduler_output.vspec_adaptive_empty_cohort_boundary = (
+                    num_running == 0
+                )
+            if preselected_decision is not None and settings.method == "mtp":
+                # Only a nonempty schedule starts the one-cohort probe. An
+                # empty scheduler output must not consume the probe budget.
+                self._vspec_adaptive_controller.mark_boundary_probe_started(
+                    decision.gamma
+                )
             scheduler_output.vspec_adaptive_batch_size = batch_size
             scheduler_output.vspec_adaptive_context_tokens = context_tokens
             _update_async_next_frame_gamma(
@@ -2554,6 +2715,8 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
         ) -> Any:
             controller = self._vspec_adaptive_controller
             if settings.adaptive_policy == "online":
+                if hasattr(controller,'begin_verified_round'):
+                    controller.begin_verified_round(self,scheduler_output)
                 controller.begin_step_feedback()
             try:
                 result = original_update_from_output(
@@ -2568,6 +2731,13 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                     )
                 raise
             if settings.adaptive_policy == "online":
+                if not scheduler_output.num_scheduled_tokens:
+                    # An empty scheduler step has no gamma decision or stable
+                    # decode feedback. Keep the completion clock in sync.
+                    controller.discard_step_feedback(
+                        completed_at_ms=time.perf_counter() * 1000.0,
+                    )
+                    return result
                 gamma = int(scheduler_output.num_spec_tokens_to_schedule)
                 stable_decode = (
                     not bool(scheduler_output.scheduled_new_reqs)
@@ -3153,6 +3323,20 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 settings.method,
                 runtime_gamma,
                 enabled=stateful_cohort_locked,
+            )
+            _synchronize_mtp_width_transition(
+                self,
+                settings.method,
+                runtime_gamma,
+                enabled=stateful_cohort_locked,
+                empty_cohort_boundary=bool(
+                    getattr(
+                        scheduler_output,
+                        "vspec_adaptive_empty_cohort_boundary",
+                        False,
+                    )
+                ),
+                quiescent_growth_receipt=getattr(scheduler_output, 'vspec_q35_quiescent_growth_receipt', None),
             )
             native_query_width = _eagle3_native_anchor_query_width(
                 self,

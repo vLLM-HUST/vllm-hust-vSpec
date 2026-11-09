@@ -8,6 +8,25 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 ENV_ENABLED = "HUST_VSPEC_ENABLED"
+# Non-sensitive private Q35 host trigger; default off. No new GPU reads.
+ENV_Q35_ACCEPTANCE_GROWTH = "HUST_ISSUE18_Q35_ACCEPTANCE_GROWTH"
+# Non-sensitive private, default-off host-only cross-cohort4/6 progress memory.
+ENV_Q35_COHORT_MEMORY = "HUST_ISSUE18_Q35_COHORT_MEMORY"
+ENV_Q35_MOE_NZ_LAYOUT = "HUST_ISSUE18_Q35_MOE_NZ_LAYOUT"
+# Non-sensitive, private load-time proposal-head layout, disabled by default.
+ENV_Q35_INPLACE_HEAD_NZ = "HUST_ISSUE18_Q35_INPLACE_HEAD_NZ"
+ENV_Q35_NATIVE_CONV_TILE = "HUST_ISSUE18_Q35_NATIVE_CONV_TILE"
+ENV_Q35_TAIL_PREFIX_SHRINK = "HUST_ISSUE18_Q35_TAIL_PREFIX_SHRINK"
+ENV_Q35_NARROW_TAIL_TWIN = "HUST_ISSUE18_Q35_NARROW_TAIL_TWIN"
+ENV_Q35_TWO_BANK_EMBEDDING = "HUST_ISSUE18_Q35_TWO_BANK_EMBEDDING"
+ENV_Q35_OWNER_MID_TWIN = "HUST_ISSUE18_Q35_OWNER_MID_TWIN"
+ENV_Q35_FUSED_PROPOSAL_VOTE = "HUST_ISSUE18_Q35_FUSED_PROPOSAL_VOTE"
+ENV_Q35_HYBRID_TAIL = "HUST_ISSUE18_Q35_HYBRID_TAIL"
+ENV_Q35_HYBRID_N1_ONLY = "HUST_ISSUE18_Q35_HYBRID_N1_ONLY"
+ENV_Q35_SMALL_SINGLE_TAIL = "HUST_ISSUE18_Q35_SMALL_SINGLE_TAIL"
+# Private Q35 draft-only read-only input replicas. Non-sensitive; default off.
+# embedding: lookup only; split/full: lookup plus native-shape/full FC copy.
+ENV_Q35_REPLICATED_INPUTS = "HUST_ISSUE18_Q35_MTP_REPLICATED_INPUTS"
 ENV_METHOD = "HUST_VSPEC_METHOD"
 ENV_ASSUME_SHARED_TOKENIZER = "HUST_VSPEC_SHARED_TOKENIZER_PADDING"
 ENV_USE_MERGED_FULL = "HUST_VSPEC_USE_MERGED_FULL"
@@ -25,6 +44,9 @@ ENV_EAGLE_DRAFT_ACTIVE_VOCAB = "HUST_VSPEC_EAGLE_DRAFT_ACTIVE_VOCAB"
 ENV_EAGLE_TARGET_ACTIVE_VOCAB = "HUST_VSPEC_EAGLE_TARGET_ACTIVE_VOCAB"
 ENV_EAGLE_RELAXED_ACCEPT_TOPK = "HUST_VSPEC_EAGLE_RELAXED_ACCEPT_TOPK"
 ENV_MTP_STRICT_GRAPH = "HUST_VSPEC_MTP_STRICT_GRAPH"
+# Experimental non-secret MTP arm spacing: positive even integer, default 2.
+# The spacing must include both adaptive range endpoints; ignored by other methods.
+ENV_MTP_CANDIDATE_STRIDE = "HUST_VSPEC_MTP_CANDIDATE_STRIDE"
 ENV_CONFIDENCE_ACCEPT_MARGIN = "HUST_VSPEC_CONFIDENCE_ACCEPT_MARGIN"
 ENV_CONFIDENCE_ACCEPT_FROM_POSITION = "HUST_VSPEC_CONFIDENCE_ACCEPT_FROM_POSITION"
 ENV_CONFIDENCE_ACCEPT_AFTER_TOKENS = "HUST_VSPEC_CONFIDENCE_ACCEPT_AFTER_TOKENS"
@@ -46,6 +68,9 @@ ENV_ADAPTIVE_TRACE = "HUST_VSPEC_ADAPTIVE_TRACE"
 ENV_ADAPTIVE_FULL_GRAPH = "HUST_VSPEC_ADAPTIVE_FULL_GRAPH"
 ENV_ADAPTIVE_ASYNC = "HUST_VSPEC_ADAPTIVE_ASYNC"
 ENV_ADAPTIVE_ONLINE_WINDOW = "HUST_VSPEC_ADAPTIVE_ONLINE_WINDOW"
+# Experimental non-sensitive bool, default false. Compare measured arm costs
+# under a common current acceptance-yield estimate; never changes raw feedback.
+ENV_ADAPTIVE_ONLINE_REWARD_NORMALIZATION = "HUST_VSPEC_ADAPTIVE_ONLINE_REWARD_NORMALIZATION"
 ENV_ADAPTIVE_ONLINE_EXPLORATION = "HUST_VSPEC_ADAPTIVE_ONLINE_EXPLORATION"
 ENV_ADAPTIVE_ONLINE_WARMUP_SAMPLES = "HUST_VSPEC_ADAPTIVE_ONLINE_WARMUP_SAMPLES"
 ENV_ADAPTIVE_ONLINE_WARMUP_RETURN = "HUST_VSPEC_ADAPTIVE_ONLINE_WARMUP_RETURN"
@@ -172,6 +197,63 @@ def _read_choice(
     return value
 
 
+def q35_replicated_inputs(environment: Mapping[str, str] | None = None) -> str:
+    return _read_choice(os.environ if environment is None else environment,
+                        ENV_Q35_REPLICATED_INPUTS, 'off', frozenset({'off', 'embedding', 'split', 'full'}))
+
+
+def q35_hybrid_n1_only_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_HYBRID_N1_ONLY, False)
+
+
+def q35_hybrid_tail_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_HYBRID_TAIL, False)
+
+
+def q35_small_single_tail_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_SMALL_SINGLE_TAIL, False)
+
+
+def q35_fused_proposal_vote_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_FUSED_PROPOSAL_VOTE, False)
+
+
+def q35_owner_mid_twin_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_OWNER_MID_TWIN, False)
+
+
+def q35_two_bank_embedding_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_TWO_BANK_EMBEDDING, False)
+
+
+def q35_narrow_tail_twin_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_NARROW_TAIL_TWIN, False)
+
+
+def q35_tail_prefix_shrink_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_TAIL_PREFIX_SHRINK, False)
+
+
+def q35_acceptance_growth_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_ACCEPTANCE_GROWTH, False)
+
+
+def q35_cohort_memory_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_COHORT_MEMORY, False)
+
+
+def q35_moe_nz_layout_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_MOE_NZ_LAYOUT, False)
+
+
+def q35_inplace_head_nz_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_INPLACE_HEAD_NZ, False)
+
+
+def q35_native_conv_tile_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    return _read_bool(os.environ if environment is None else environment, ENV_Q35_NATIVE_CONV_TILE, False)
+
+
 @dataclass(frozen=True)
 class PluginSettings:
     enabled: bool = False
@@ -213,6 +295,7 @@ class PluginSettings:
     adaptive_full_graph: bool = False
     adaptive_async: bool = False
     adaptive_online_window: int = 32
+    adaptive_online_reward_normalization: bool = False
     adaptive_online_exploration: float = 0.01
     adaptive_online_warmup_samples: int = 1
     adaptive_online_warmup_return: str = "best"
@@ -484,6 +567,9 @@ class PluginSettings:
                 32,
                 1,
             ),
+            adaptive_online_reward_normalization=_read_bool(
+                values, ENV_ADAPTIVE_ONLINE_REWARD_NORMALIZATION, False,
+            ),
             adaptive_online_exploration=_read_float(
                 values,
                 ENV_ADAPTIVE_ONLINE_EXPLORATION,
@@ -581,6 +667,7 @@ class PluginSettings:
             ENV_ADAPTIVE_FULL_GRAPH: ("1" if self.adaptive_full_graph else "0"),
             ENV_ADAPTIVE_ASYNC: "1" if self.adaptive_async else "0",
             ENV_ADAPTIVE_ONLINE_WINDOW: str(self.adaptive_online_window),
+            ENV_ADAPTIVE_ONLINE_REWARD_NORMALIZATION: ("1" if self.adaptive_online_reward_normalization else "0"),
             ENV_ADAPTIVE_ONLINE_EXPLORATION: str(self.adaptive_online_exploration),
             ENV_ADAPTIVE_ONLINE_WARMUP_SAMPLES: str(self.adaptive_online_warmup_samples),
             ENV_ADAPTIVE_ONLINE_WARMUP_RETURN: (self.adaptive_online_warmup_return),

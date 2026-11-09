@@ -1,7 +1,7 @@
 {
   "schema_version": "0.3-experimental",
   "extension_id": "org.vllm-hust.vspec",
-  "extension_version": "0.14.3",
+  "extension_version": "0.15.1",
   "kind": "in_process_plugin",
   "host": {
     "provider": "vllm",
