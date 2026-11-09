@@ -99,3 +99,9 @@ artifacts are distributed in this bundle. Hardware and driver, CANN SDK,
 compatible Python/PyTorch/torch_npu and build tools must be available on the
 host. Since the full build and NPU correctness/performance checks have not
 been performed on this packaged variant, do not use it as a production backend.
+
+For an installed backend, run commands through
+`vllm-hust-vspec-run-with-backend --backend-package /path/to/site-packages -- <command> ...`
+to select its bundled custom operator directory and library before process
+startup. The CANN-generated `set_env.bash` can contain the original build path;
+do not rely on it after moving or installing the package elsewhere.

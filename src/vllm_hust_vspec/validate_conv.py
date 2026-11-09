@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from .backends.experimental_paths import current_npu_allocation, require_current_npu_proof
+from .backends.experimental_paths import configure_custom_opp, current_npu_allocation, require_current_npu_proof
 
 
 def validate(component: str, root: Path, backend_package: Path, reference: Path | None = None) -> None:
@@ -69,6 +69,7 @@ def validate(component: str, root: Path, backend_package: Path, reference: Path 
     os.umask(0o077)
     runs.mkdir(mode=0o700)
     env = dict(os.environ)
+    configure_custom_opp(env, backend_package)
     for key in ('XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'VLLM_CACHE_ROOT', 'TRITON_CACHE_DIR',
                 'TORCHINDUCTOR_CACHE_DIR', 'TORCH_HOME', 'TORCH_EXTENSIONS_DIR', 'HF_HOME',
                 'ASCEND_WORK_PATH', 'ASCEND_PROCESS_LOG_PATH', 'ASCEND_CACHE_PATH', 'ACL_OP_COMPILER_CACHE_DIR'):

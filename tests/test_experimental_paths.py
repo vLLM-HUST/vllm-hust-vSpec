@@ -3,7 +3,23 @@ import subprocess
 
 import pytest
 
-from vllm_hust_vspec.backends.experimental_paths import artifact_dir, require_current_npu_proof
+from vllm_hust_vspec.backends.experimental_paths import artifact_dir, configure_custom_opp, require_current_npu_proof
+
+
+def test_custom_ops_use_selected_installed_backend(tmp_path):
+    vendor = tmp_path / 'vllm_ascend/_cann_ops_custom/vendors/custom_transformer'
+    library = vendor / 'op_api/lib/libcust_opapi.so'
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b'test')
+    env = {'ASCEND_CUSTOM_OPP_PATH': '/old/backend', 'LD_LIBRARY_PATH': '/system/lib'}
+    configure_custom_opp(env, tmp_path)
+    assert env['ASCEND_CUSTOM_OPP_PATH'] == str(vendor)
+    assert env['LD_LIBRARY_PATH'] == f'{library.parent}:/system/lib'
+
+
+def test_custom_ops_fail_closed_when_not_installed(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        configure_custom_opp({}, tmp_path)
 
 
 def test_artifact_directory_defaults_to_unconfigured(monkeypatch):

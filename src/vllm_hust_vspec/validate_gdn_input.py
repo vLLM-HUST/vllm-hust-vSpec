@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 
-from .backends.experimental_paths import current_npu_allocation, require_current_npu_proof
+from .backends.experimental_paths import configure_custom_opp, current_npu_allocation, require_current_npu_proof
 
 
 def sha(path: Path) -> str:
@@ -51,6 +51,7 @@ def validate(width: int, backend: Path, vllm: Path, destination: Path) -> None:
     with (destination / 'launch.json').open('x') as stream:
         json.dump({'sha256': hashes, 'component_only': True, 'physical_npus': physical}, stream, indent=2)
     env = dict(os.environ)
+    configure_custom_opp(env, backend)
     for key in ('XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'VLLM_CACHE_ROOT', 'TRITON_CACHE_DIR',
                 'TORCHINDUCTOR_CACHE_DIR', 'TORCH_HOME', 'TORCH_EXTENSIONS_DIR', 'HF_HOME',
                 'ASCEND_WORK_PATH', 'ASCEND_PROCESS_LOG_PATH', 'ASCEND_CACHE_PATH', 'ACL_OP_COMPILER_CACHE_DIR'):
