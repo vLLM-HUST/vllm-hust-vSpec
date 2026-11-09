@@ -16,6 +16,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import time
 import urllib.error
@@ -72,6 +73,7 @@ CACHE_DIRS = {
     "CUPY_CACHE_DIR": "cupy",
     "MPLCONFIGDIR": "matplotlib",
 }
+ZMQ_IPC_PATH_MAX_BYTES = 107
 SERVER_INHERITED_KEYS = {
     "PATH",
     "HOME",
@@ -406,6 +408,30 @@ def _client_env(source: str | None) -> dict[str, str]:
     return env
 
 
+def _private_ipc_dir() -> Path:
+    """Reserve a private, short per-run directory for vLLM's UUID IPC sockets."""
+    base = Path.home() / ".vspec-ipc"
+    base.mkdir(mode=0o700, exist_ok=True)
+    metadata = base.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise RuntimeError("IPC base must be an owned, private directory, not a symlink")
+    for _ in range(10):
+        ipc = base / f"r-{secrets.token_hex(8)}"
+        # vLLM appends a UUID4 (36 bytes) to VLLM_RPC_BASE_PATH.
+        if len(os.fsencode(str(ipc / ("0" * 36)))) > ZMQ_IPC_PATH_MAX_BYTES:
+            raise RuntimeError("Private IPC path is too long for a Unix-domain ZMQ socket")
+        try:
+            ipc.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return ipc
+    raise RuntimeError("Could not reserve a unique private IPC directory")
+
+
 def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str]:
     env = {
         key: value
@@ -451,8 +477,7 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         or env.get("HUST_VSPEC_HOT_STATIC_SHAPES") != "14,42,70,98,126"
     ):
         raise ValueError("Matched static compiler settings are required in common-env.json")
-    ipc = run_dir / "ipc"
-    ipc.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ipc = _private_ipc_dir()
     env.update(TMPDIR=str(ipc), TMP=str(ipc), TEMP=str(ipc), VLLM_RPC_BASE_PATH=str(ipc))
     if arm == "dynamic":
         env["HUST_VSPEC_ENABLED"] = "1"
@@ -1102,6 +1127,7 @@ def run(args: argparse.Namespace) -> None:
             "no_saved_kv_or_answers_preloaded": True,
             "evaluation_metadata_and_cache_reset_required_before_timing": True,
             "physical_npus": physical_npus,
+            "private_ipc_path": env["VLLM_RPC_BASE_PATH"],
         },
     )
     process = None
@@ -1182,6 +1208,7 @@ def run(args: argparse.Namespace) -> None:
                 "client_exit_code": result.returncode,
                 "native_worker": setup["native_worker"],
                 "physical_npus": physical_npus,
+                "private_ipc_path": env["VLLM_RPC_BASE_PATH"],
                 "worker_runtime_common": runtime_common,
                 "worker_before_sha256": sha256(run_dir / "worker-before.json"),
                 "worker_after_sha256": sha256(run_dir / "worker-after.json"),

@@ -682,6 +682,52 @@ class PublicExampleTests(unittest.TestCase):
             )
             self.assertEqual(server_env["VLLM_PLUGINS"], "ascend,vspec_eval")
 
+    def test_long_run_path_uses_short_private_collision_safe_ipc(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            run_dir = root / ("long-run-root-" * 5) / "runs" / "hle-verified" / "native" / "final"
+            run_dir.mkdir(parents=True)
+            self.assertGreater(len(os.fsencode(str(run_dir / "ipc" / ("0" * 36)))), 107)
+            setup = {
+                "common_env": {
+                    "ASCEND_RT_VISIBLE_DEVICES": "0,1",
+                    "HUST_VSPEC_CAPTURE_SAFE_STATIC": "1",
+                    "HUST_VSPEC_HOT_STATIC_SHAPES": "14,42,70,98,126",
+                },
+                "dynamic_env": {},
+                "evaluation_token": "private-token",
+                "paths": {
+                    "native_backend_package": str(root),
+                    "native_evaluation_static_dir": str(root),
+                    "native_evaluation_dir": str(root),
+                },
+            }
+            with patch.object(paired.Path, "home", return_value=home), patch.dict(
+                os.environ, {}, clear=True
+            ):
+                first = paired._server_env(setup, "native", run_dir)
+                second = paired._server_env(setup, "native", run_dir)
+            first_ipc = Path(first["VLLM_RPC_BASE_PATH"])
+            second_ipc = Path(second["VLLM_RPC_BASE_PATH"])
+            self.assertNotEqual(first_ipc, second_ipc)
+            self.assertEqual(first_ipc.parent, home / ".vspec-ipc")
+            self.assertEqual(first["TMPDIR"], str(first_ipc))
+            self.assertEqual(first["TMP"], str(first_ipc))
+            self.assertEqual(first["TEMP"], str(first_ipc))
+            self.assertEqual(first_ipc.stat().st_mode & 0o777, 0o700)
+            self.assertLessEqual(
+                len(os.fsencode(str(first_ipc / ("0" * 36)))),
+                paired.ZMQ_IPC_PATH_MAX_BYTES,
+            )
+
+            long_home = root / ("h" * 70)
+            long_home.mkdir(mode=0o700)
+            with patch.object(paired.Path, "home", return_value=long_home):
+                with self.assertRaisesRegex(RuntimeError, "too long"):
+                    paired._private_ipc_dir()
+
     def test_compare_rejects_unproven_native_worker(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
