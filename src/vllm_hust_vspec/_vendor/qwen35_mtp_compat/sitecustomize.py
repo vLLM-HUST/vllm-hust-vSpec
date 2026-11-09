@@ -6,6 +6,19 @@ vLLM or the optional vSpec plugin. Neither bridge imports vllm_hust_vspec.
 """
 
 import os
+import sys
+
+
+_CANN_COMPILER_ENTRYPOINTS = {
+    ("op_compile_tool", "op_compiler_tool.py"),
+    ("opc_tool", "opc.py"),
+}
+_entrypoint = (os.path.basename(os.path.dirname(sys.argv[0])), os.path.basename(sys.argv[0]))
+if _entrypoint in _CANN_COMPILER_ENTRYPOINTS:
+    # The compiler starts further Python tools with its environment. Neither
+    # it nor its children are vLLM workers, so do not install the KV/Mamba
+    # compatibility bridge there. The parent worker remains unchanged.
+    os.environ.pop("QWEN35_MTP_COMPAT", None)
 
 if os.environ.get("QWEN35_MTP_COMPAT") == "1":
     try:

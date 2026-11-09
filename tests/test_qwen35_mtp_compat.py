@@ -141,6 +141,38 @@ def test_unflagged_sitecustomize_does_not_import_runtime_modules():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize(
+    ("directory", "filename"),
+    (("op_compile_tool", "op_compiler_tool.py"), ("opc_tool", "opc.py")),
+)
+def test_cann_compiler_subprocess_does_not_load_bridge_or_pass_flag(
+    tmp_path, directory, filename
+):
+    compiler_dir = tmp_path / directory
+    compiler_dir.mkdir()
+    entrypoint = compiler_dir / filename
+    entrypoint.write_text(
+        "import os, subprocess, sys\n"
+        "assert 'QWEN35_MTP_COMPAT' not in os.environ\n"
+        "assert 'qwen35_mtp_kv_compat' not in sys.modules\n"
+        "assert 'qwen35_mtp_mamba_compat' not in sys.modules\n"
+        "subprocess.run([sys.executable, '-c', "
+        "\"import os; assert 'QWEN35_MTP_COMPAT' not in os.environ\"], check=True)\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["QWEN35_MTP_COMPAT"] = "1"
+    env["PYTHONPATH"] = str(COMPAT_DIR)
+    result = subprocess.run(
+        [sys.executable, str(entrypoint)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_sitecustomize_activation_calls_standalone_bridges(monkeypatch):
     calls = []
     kv = types.ModuleType("qwen35_mtp_kv_compat")

@@ -7,7 +7,7 @@
 ## 准备条件
 
 - 使用锁定版本的干净 Python 环境、vLLM、vllm-ascend、CANN、torch-npu、插件 wheel 和匹配的 custom OPP。两臂可以分别使用隔离环境；空间受限时，也可以在同一个干净环境中顺序运行，给原生臂指定独立的只读原生后端覆盖层。此时必须用 worker 记录证明原生子进程未导入 vSpec，且两臂确实使用各自指定的后端和 OPP。`run_with_backend` 会检查实际导入路径；仅复制旧工作目录或设置历史 `SOURCE` 不符合此条件。
-- 同一份有固定 revision/hash 的 Qwen3.5 模型、同一对物理 NPU、BF16、同一份共享服务配置。原生服务的 `VLLM_PLUGINS` 只启用 Ascend；动态服务启用 Ascend 与 vSpec。两臂都启用插件包中独立的 Qwen3.5 MTP KV/Mamba 兼容启动钩子；原生服务的子进程不应导入 `vllm_hust_vspec`。
+- 同一份有固定 revision/hash 的 Qwen3.5 模型、同一对物理 NPU、BF16、同一份共享服务配置。原生服务的 `VLLM_PLUGINS` 为 `ascend,vspec_eval`；动态服务为 `ascend,vspec,vspec_eval`。两臂都启用插件包中独立的 Qwen3.5 MTP KV/Mamba 兼容启动钩子；原生服务的子进程不应导入 `vllm_hust_vspec`。
 - 一个干净的评测客户端 Python 环境，安装并固定对应版本的 `hust-eval-client-mmlu-pro`、`hust-eval-client-hle-verified`、`hust-eval-client-frontierscience`。按各客户端文档准备受许可的数据资产、solver/judge 配置和冻结计划。HLE-Verified 用 Gold；FrontierScience 计时覆盖 olympiad 与 research，质量只按 olympiad 的评分定义。切勿将 MMLU 或 SWE-bench Verified 代替相应数据集。
 - 插件安装包内的独立原生编译适配/观察类与通用评测端点。原生子进程仅将安装包的独立 `evaluation_static`、`evaluation` 文件目录加入 Python 模块搜索路径，端点与原生 worker 均不导入 vSpec 插件；`VLLM_PLUGINS` 只显式加载 Ascend 和 `vspec_eval`。动态子进程加载 Ascend、vSpec 与 `vspec_eval`。不要用私有旧 `SOURCE` 覆盖这两个目录。
 - 动态 worker 所需的 proof/构建产物路径由操作者在私有 `dynamic-env.json` 中提供。`*_DIR`、`*_ROOT`、`*_PATH` 键必须指向存在的绝对路径。请先执行插件的发行校验与目标机器上的模型级验收，确认 wheel/sdist、后端覆盖层、算子和 worker 的版本、路径与哈希吻合。
@@ -18,7 +18,7 @@
 
 `common-env.json` 和 `dynamic-env.json` 都是私有 JSON 字符串映射。前者可放两臂共同的设备可见性、离线模型、静态编译设置，其中 `HUST_VSPEC_CAPTURE_SAFE_STATIC="1"` 与 `HUST_VSPEC_HOT_STATIC_SHAPES="14,42,70,98,126"` 是本配对入口要求的共同编译设置；还可放六个固定取值的 vLLM 共同开关：`VLLM_DISABLE_SHARED_EXPERTS_STREAM=1`、`VLLM_NO_USAGE_STATS=1`、`VLLM_SERVER_DEV_MODE=0`、`VLLM_USE_AOT_COMPILE=0`、`VLLM_USE_BREAKABLE_CUDAGRAPH=0`、`VLLM_WORKER_MULTIPROC_METHOD=spawn`。其他 `VLLM_*` 不能混入共同环境。后者放动态臂的 `VSPEC_`、`HUST_VSPEC_`、`HUST_ISSUE18_` 配置与 proof 路径，以及显式允许的 Qwen3.5 后端开关。不要在这两个文件中放密码、API token 或旧环境 `PYTHONPATH`。服务子进程只继承必要的系统/NPU 环境变量，并剔除常见凭据变量；需要的额外非敏感设置请显式写入 common-env。示例自行生成保存在私有 setup 中的随机端点令牌，为每臂新建隔离缓存目录，并在计时前调用受保护的缓存清理路由；不会预存答案或 KV。所有由评测入口设置的 vLLM、Hugging Face、Ascend、编译器及绘图库缓存路径都指向本次私有运行目录，不沿用旧实验或共享区缓存。
 
-动态臂如需启用 Qwen3.5 后端优化，可在 `dynamic-env.json` 中加入入口脚本显式允许的 `VLLM_ASCEND_Q35_*` 开关；这些开关不能混入两臂共享环境，也不会从当前 shell 隐式继承。`VLLM_ALLOW_INSECURE_SERIALIZATION=0` 则由入口对两臂强制设置，不需要写进私有环境文件。
+本入口只允许在 `dynamic-env.json` 中显式设置列入白名单的 `VLLM_ASCEND_Q35_*` 开关；`common-env.json` 不接受这些键，原生臂使用所选原生后端的默认值。这些开关也不会从当前 shell 隐式继承。因此，同一共享服务配置和公共编译设置不表示两臂的 Qwen3.5 后端优化相同。历史三数据集对照中的原生与动态实现也有逐臂差异；复核历史配置时应在私有启动记录中核对各臂实际开关、后端和算子，不能把整体吞吐差异单独归因于动态控制器。`VLLM_ALLOW_INSECURE_SERIALIZATION=0` 由入口对两臂强制设置，不需要写进私有环境文件。
 
 ## 冻结题目与准备配对配置
 
