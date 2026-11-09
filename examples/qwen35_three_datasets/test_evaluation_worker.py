@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 EVALUATION_DIR = Path(__file__).resolve().parents[2] / "src/vllm_hust_vspec/evaluation"
 sys.path.insert(0, str(EVALUATION_DIR))
+import evaluation_worker_common as worker_common  # noqa: E402
 from evaluation_worker_common import EvaluationMetadataMixin  # noqa: E402
 
 
@@ -46,8 +47,9 @@ class FakeWorker(EvaluationMetadataMixin):
 class WorkerTests(unittest.TestCase):
     def test_native_metadata_does_not_import_vspec(self):
         before = set(sys.modules)
-        with patch.dict(os.environ, {"VSPEC_EVAL_ARM": "native"}):
-            result = FakeWorker().get_eval_metadata()
+        with patch.object(worker_common, "sys", SimpleNamespace(modules={})):
+            with patch.dict(os.environ, {"VSPEC_EVAL_ARM": "native"}):
+                result = FakeWorker().get_eval_metadata()
         self.assertEqual(result["configured_speculative_capacity"], 4)
         self.assertFalse(result["vspec_module_loaded"])
         self.assertFalse(
@@ -58,12 +60,14 @@ class WorkerTests(unittest.TestCase):
         )
 
     def test_dynamic_requires_plugin_and_capacity_eight(self):
-        with patch.dict(os.environ, {"VSPEC_EVAL_ARM": "dynamic"}):
-            with self.assertRaisesRegex(RuntimeError, "did not load"):
-                FakeWorker(8).get_eval_metadata()
-            with patch.dict(sys.modules, {"vllm_hust_vspec": SimpleNamespace()}):
-                result = FakeWorker(8).get_eval_metadata()
-                self.assertEqual(result["dynamic_activity"], {"observed": True})
+        modules = {}
+        with patch.object(worker_common, "sys", SimpleNamespace(modules=modules)):
+            with patch.dict(os.environ, {"VSPEC_EVAL_ARM": "dynamic"}):
+                with self.assertRaisesRegex(RuntimeError, "did not load"):
+                    FakeWorker(8).get_eval_metadata()
+                with patch.dict(modules, {"vllm_hust_vspec": SimpleNamespace()}):
+                    result = FakeWorker(8).get_eval_metadata()
+                    self.assertEqual(result["dynamic_activity"], {"observed": True})
 
 
 if __name__ == "__main__":
