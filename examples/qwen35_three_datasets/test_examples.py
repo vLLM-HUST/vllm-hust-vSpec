@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -60,11 +61,19 @@ class PublicExampleTests(unittest.TestCase):
             }
             dump(env_file, common)
             self.assertEqual(paired.read_env(env_file, dynamic=False), common)
+            cann = root / "cann"
+            cann_site = cann / "python" / "site-packages"
+            cann_site.mkdir(parents=True)
+            (cann_site / "acl.py").write_text("TEST_CANN_ACL = True\n", encoding="utf-8")
+            opp = cann / "opp"
+            (opp / "built-in" / "op_impl" / "ai_core" / "tbe").mkdir(parents=True)
             setup = {
                 "common_env": common,
                 "dynamic_env": {},
                 "evaluation_token": "test-only-private-token",
                 "paths": {
+                    "native_python": sys.executable,
+                    "dynamic_python": sys.executable,
                     "native_backend_package": "/private/native-backend",
                     "native_evaluation_static_dir": "/private/evaluation-static",
                     "native_evaluation_dir": "/private/evaluation",
@@ -76,10 +85,12 @@ class PublicExampleTests(unittest.TestCase):
                 os.environ,
                 {
                     "ASCEND_API_KEY": "must-not-be-inherited",
+                    "ASCEND_HOME_PATH": str(cann),
+                    "ASCEND_OPP_PATH": str(opp),
                     "VLLM_WORKER_MULTIPROC_METHOD": "fork",
                 },
                 clear=True,
-            ):
+            ), patch.object(paired.Path, "home", return_value=root):
                 for arm in ("native", "dynamic"):
                     run_dir = root / arm
                     env = paired._server_env(setup, arm, run_dir)
@@ -656,6 +667,13 @@ class PublicExampleTests(unittest.TestCase):
                 warmup_command["warmup"],
             )
             self.assertFalse((work / "runs").exists())
+            cann = root / "cann"
+            cann_site = cann / "python" / "site-packages"
+            cann_site.mkdir(parents=True)
+            (cann_site / "acl.py").write_text("TEST_CANN_ACL = True\n", encoding="utf-8")
+            opp = cann / "opp"
+            opp_tbe = opp / "built-in" / "op_impl" / "ai_core" / "tbe"
+            opp_tbe.mkdir(parents=True)
             with patch.dict(
                 paired.os.environ,
                 {
@@ -664,8 +682,12 @@ class PublicExampleTests(unittest.TestCase):
                     "AWS_SECRET_ACCESS_KEY": "private",
                     "PYTORCH_NPU_ALLOC_CONF": "test-setting",
                     "UNRELATED_VARIABLE": "excluded",
+                    "PYTHONPATH": "/sensitive/inherited/path",
+                    "ASCEND_HOME_PATH": str(cann),
+                    "ASCEND_OPP_PATH": str(opp),
                 },
-            ):
+                clear=True,
+            ), patch.object(paired.Path, "home", return_value=root):
                 server_env = paired._server_env(
                     paired._load_setup(work / "setup.json"), "native", root / "native-server"
                 )
@@ -678,9 +700,19 @@ class PublicExampleTests(unittest.TestCase):
                 self.assertNotIn(key, server_env)
             self.assertEqual(server_env["PYTORCH_NPU_ALLOC_CONF"], "test-setting")
             self.assertEqual(
-                server_env["PYTHONPATH"].split(":"), [str(backend), str(static), str(evaluation)]
+                server_env["PYTHONPATH"].split(":"),
+                [str(backend), str(static), str(evaluation), str(cann_site), str(opp_tbe)],
             )
             self.assertEqual(server_env["VLLM_PLUGINS"], "ascend,vspec_eval")
+            self.assertNotIn("/sensitive/inherited/path", server_env["PYTHONPATH"])
+            probe = subprocess.run(
+                [str(python), "-B", "-c", "import acl; print(acl.__file__)"],
+                env=server_env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(Path(probe.stdout.strip()).resolve(), cann_site / "acl.py")
 
     def test_long_run_path_uses_short_private_collision_safe_ipc(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -690,6 +722,12 @@ class PublicExampleTests(unittest.TestCase):
             run_dir = root / ("long-run-root-" * 5) / "runs" / "hle-verified" / "native" / "final"
             run_dir.mkdir(parents=True)
             self.assertGreater(len(os.fsencode(str(run_dir / "ipc" / ("0" * 36)))), 107)
+            cann = root / "cann"
+            cann_site = cann / "python" / "site-packages"
+            cann_site.mkdir(parents=True)
+            (cann_site / "acl.py").write_text("TEST_CANN_ACL = True\n", encoding="utf-8")
+            opp = cann / "opp"
+            (opp / "built-in" / "op_impl" / "ai_core" / "tbe").mkdir(parents=True)
             setup = {
                 "common_env": {
                     "ASCEND_RT_VISIBLE_DEVICES": "0,1",
@@ -699,13 +737,16 @@ class PublicExampleTests(unittest.TestCase):
                 "dynamic_env": {},
                 "evaluation_token": "private-token",
                 "paths": {
+                    "native_python": sys.executable,
                     "native_backend_package": str(root),
                     "native_evaluation_static_dir": str(root),
                     "native_evaluation_dir": str(root),
                 },
             }
             with patch.object(paired.Path, "home", return_value=home), patch.dict(
-                os.environ, {}, clear=True
+                os.environ,
+                {"ASCEND_HOME_PATH": str(cann), "ASCEND_OPP_PATH": str(opp)},
+                clear=True,
             ):
                 first = paired._server_env(setup, "native", run_dir)
                 second = paired._server_env(setup, "native", run_dir)

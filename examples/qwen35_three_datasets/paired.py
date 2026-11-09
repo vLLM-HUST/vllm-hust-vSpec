@@ -432,6 +432,38 @@ def _private_ipc_dir() -> Path:
     raise RuntimeError("Could not reserve a unique private IPC directory")
 
 
+def _cann_python_paths(env: dict[str, str]) -> tuple[Path, Path]:
+    cann_home = existing_path(env.get("ASCEND_HOME_PATH", ""), "ASCEND_HOME_PATH")
+    opp_home = existing_path(env.get("ASCEND_OPP_PATH", ""), "ASCEND_OPP_PATH")
+    site = cann_home / "python" / "site-packages"
+    tbe = opp_home / "built-in" / "op_impl" / "ai_core" / "tbe"
+    if not site.is_dir() or not tbe.is_dir():
+        raise FileNotFoundError("Selected CANN Python site or OPP TBE directory is missing")
+    return site, tbe
+
+
+def _validate_acl_import(python: str, env: dict[str, str], site: Path) -> None:
+    probe_env = dict(env)
+    probe_env.pop("VSPEC_EVAL_TOKEN", None)
+    probe = subprocess.run(
+        [
+            python,
+            "-B",
+            "-c",
+            "import acl\nfrom pathlib import Path\nimport sys\n"
+            "if not Path(acl.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve()):\n"
+            "    raise RuntimeError('acl was not imported from the selected CANN site')\n",
+            str(site),
+        ],
+        env=probe_env,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    if probe.returncode:
+        raise RuntimeError("Selected server Python cannot import acl from the selected CANN site")
+
+
 def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str]:
     env = {
         key: value
@@ -477,6 +509,9 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         or env.get("HUST_VSPEC_HOT_STATIC_SHAPES") != "14,42,70,98,126"
     ):
         raise ValueError("Matched static compiler settings are required in common-env.json")
+    cann_site, opp_tbe = _cann_python_paths(env)
+    env["PYTHONPATH"] = os.pathsep.join((env["PYTHONPATH"], str(cann_site), str(opp_tbe)))
+    _validate_acl_import(setup["paths"][f"{arm}_python"], env, cann_site)
     ipc = _private_ipc_dir()
     env.update(TMPDIR=str(ipc), TMP=str(ipc), TEMP=str(ipc), VLLM_RPC_BASE_PATH=str(ipc))
     if arm == "dynamic":
