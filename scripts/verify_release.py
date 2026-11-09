@@ -24,6 +24,41 @@ EXTENSION_ID = "org.vllm-hust.vspec"
 PROJECT_NAME = "vllm-hust-vspec"
 WHEEL_NAME = "vllm_hust_vspec"
 HOST_VERSION_RANGE = ">=0.17.2rc1.dev5871,<0.26"
+REQUIRED_TOOLS = {
+    "vllm-hust-vspec-prepare-backend": "vllm_hust_vspec.backend_bundle:main",
+    "vllm-hust-vspec-build-operator": "vllm_hust_vspec.native_operator_build:main",
+    "vllm-hust-vspec-run-with-backend": "vllm_hust_vspec.run_with_backend:main",
+    "vllm-hust-vspec-validate-conv": "vllm_hust_vspec.validate_conv:main",
+    "vllm-hust-vspec-validate-tail-conv": "vllm_hust_vspec.validate_tail_conv:main",
+    "vllm-hust-vspec-validate-rgdr": "vllm_hust_vspec.validate_rgdr:main",
+    "vllm-hust-vspec-validate-gdn-input": "vllm_hust_vspec.validate_gdn_input:main",
+    "vllm-hust-vspec-validate-mask": "vllm_hust_vspec.validate_mask:main",
+    "vllm-hust-vspec-validate-prefix-clip": "vllm_hust_vspec.validate_prefix_clip:main",
+    "vllm-hust-vspec-validate-fia-host": "vllm_hust_vspec.validate_fia_host:main",
+    "vllm-hust-vspec-validate-two-bank": "vllm_hust_vspec.validate_two_bank:main",
+    "vllm-hust-vspec-validate-inplace-head": "vllm_hust_vspec.validate_inplace_head:main",
+}
+REQUIRED_VENDOR = {
+    "_vendor/ascend_hust/build-python.patch",
+    "_vendor/ascend_hust/tracked-changes.patch",
+    "_vendor/runtime/campaign_candidate_worker.py",
+    "_vendor/runtime/preflight.py",
+    "_vendor/native/conv_reference/CMakeLists.txt",
+    "_vendor/native/conv_stride/CMakeLists.txt",
+    "_vendor/native/conv_edge/CMakeLists.txt",
+    "_vendor/native/gamma6_tail/CMakeLists.txt",
+    "_vendor/native/gamma6_rgdr_reference/CMakeLists.txt",
+    "_vendor/native/gamma6_rgdr_packed_reference/CMakeLists.txt",
+    "_vendor/native/gamma6_rgdr/CMakeLists.txt",
+    "_vendor/native/gamma8_rgdr/CMakeLists.txt",
+    "_vendor/native/fia_host/CMakeLists.txt",
+    "_vendor/operators/gamma6_input/kernel.py",
+    "_vendor/operators/gamma8_input/kernel.py",
+    "_vendor/operators/gamma6_mask/kernel.py",
+    "_vendor/operators/prefix_clip/clip_kernel.py",
+    "_vendor/operators/two_bank_embedding/kernel.py",
+    "_vendor/operators/inplace_head_nz/real_weight.py",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -60,6 +95,15 @@ def verify_source() -> str:
         "vllm-hust-vspec-models" not in scripts,
         "release must not expose an automatic model download command",
     )
+    for name, entry in REQUIRED_TOOLS.items():
+        require(scripts.get(name) == entry, f"missing or incorrect release tool: {name}")
+    for asset in REQUIRED_VENDOR:
+        require((PACKAGE / asset).is_file(), f"required vendor source missing: {asset}")
+    require((ROOT / "docs/v0.15.1-reproduction.md").is_file(), "reproduction guide is missing")
+    require(
+        (ROOT / "scripts/verify_model_acceptance.py").is_file(),
+        "model-level release gate is missing",
+    )
     require((MANIFEST_DIR / "__init__.py").is_file(), "manifests package is missing")
     require(MANIFEST.is_file(), "0.3 manifest is missing")
     require(
@@ -88,6 +132,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def vendor_payload() -> set[str]:
+    """Require every packaged source asset, not only a historical sample."""
+    vendor = PACKAGE / "_vendor"
+    return {
+        f"vllm_hust_vspec/{path.relative_to(PACKAGE).as_posix()}"
+        for path in vendor.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    }
+
+
 def verify_wheel(path: Path, version: str) -> None:
     dist_info = f"{WHEEL_NAME}-{version}.dist-info"
     required = {
@@ -96,6 +152,9 @@ def verify_wheel(path: Path, version: str) -> None:
         "vllm_hust_vspec/backends/mtp.py",
         "vllm_hust_vspec/cli.py",
         "vllm_hust_vspec/online_benchmark.py",
+        "vllm_hust_vspec/backend_bundle.py",
+        "vllm_hust_vspec/native_operator_build.py",
+        "vllm_hust_vspec/run_with_backend.py",
         "vllm_hust_vspec/manifests/__init__.py",
         f"vllm_hust_vspec/manifests/{MANIFEST_NAME}",
         f"{dist_info}/METADATA",
@@ -104,6 +163,7 @@ def verify_wheel(path: Path, version: str) -> None:
     }
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
+        required.update(vendor_payload())
         require(required <= names, f"wheel is missing {sorted(required - names)}")
         require(
             f"vllm_hust_vspec/{MANIFEST_NAME}" not in names,
@@ -124,6 +184,11 @@ def verify_wheel(path: Path, version: str) -> None:
             == "vllm_hust_vspec.online_benchmark:main",
             "wheel ARC-Easy benchmark entry point mismatch",
         )
+        for name, entry in REQUIRED_TOOLS.items():
+            require(
+                entry_points["console_scripts"].get(name) == entry,
+                f"wheel release tool entry point mismatch: {name}",
+            )
 
 
 def verify_sdist(path: Path, version: str) -> None:
@@ -138,16 +203,19 @@ def verify_sdist(path: Path, version: str) -> None:
         f"{prefix}/configs/qwen35-35b-a3b-frontier-mtp2.toml",
         f"{prefix}/docs/arc_easy_regression.md",
         f"{prefix}/docs/agentx_256k_benchmark.md",
+        f"{prefix}/docs/v0.15.1-reproduction.md",
         f"{prefix}/docs/qwen35_frontier_mtp2.md",
         f"{prefix}/docs/qwen35_mtp2_b16_graph_benchmark_commands.md",
         f"{prefix}/scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh",
         f"{prefix}/scripts/verify_release.py",
+        f"{prefix}/scripts/verify_model_acceptance.py",
         f"{prefix}/src/vllm_hust_vspec/_version.py",
         f"{prefix}/src/vllm_hust_vspec/manifests/__init__.py",
         f"{prefix}/src/vllm_hust_vspec/manifests/{MANIFEST_NAME}",
     }
     with tarfile.open(path, "r:gz") as archive:
         names = set(archive.getnames())
+    required.update({f"{prefix}/src/{asset}" for asset in vendor_payload()})
     require(required <= names, f"sdist is missing {sorted(required - names)}")
 
 

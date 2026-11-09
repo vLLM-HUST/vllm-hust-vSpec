@@ -44,7 +44,8 @@ build() {
 }
 
 publish() {
-  local release_version
+  local release_version release_commit
+  local -a receipt_args
   release_version=$(version)
   [[ -n "${UV_PUBLISH_TOKEN:-}" ]] || die "UV_PUBLISH_TOKEN is required"
   [[ "${VSPEC_RELEASE_CONFIRM:-}" == "$release_version" ]] || die \
@@ -54,10 +55,17 @@ publish() {
   if git -C "$PLUGIN_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     [[ -z "$(git -C "$PLUGIN_DIR" status --short)" ]] || die \
       "refusing to publish from a dirty worktree"
-    git -C "$PLUGIN_DIR" rev-parse HEAD
+    release_commit=$(git -C "$PLUGIN_DIR" rev-parse HEAD)
   else
     die "publishing requires a Git checkout so the release commit can be recorded"
   fi
+  if [[ -n "${VSPEC_MODEL_ACCEPTANCE_RECEIPT_FILE:-}" ]]; then
+    receipt_args=(--receipt "$VSPEC_MODEL_ACCEPTANCE_RECEIPT_FILE")
+  else
+    receipt_args=(--env VSPEC_MODEL_ACCEPTANCE_RECEIPT)
+  fi
+  "$PYTHON_BIN" "$PLUGIN_DIR/scripts/verify_model_acceptance.py" \
+    "${receipt_args[@]}" --commit "$release_commit"
   uv publish \
     --check-url https://pypi.org/simple \
     "$DIST_DIR/vllm_hust_vspec-$release_version-py3-none-any.whl" \

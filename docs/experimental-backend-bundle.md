@@ -4,6 +4,9 @@ This development bundle stages source code from the experimental Qwen3.5
 execution path. It is not a complete installer and is not an NPU validation or
 an assertion that historical benchmark results can be reproduced.
 
+For the pinned host stack, build sequence, proof-directory mapping and
+model-level acceptance boundary, use [the v0.15.1 reproduction guide](v0.15.1-reproduction.md).
+
 The tracked backend patch and additional Python sources apply to the
 `vLLM-HUST/vllm-ascend-hust` source tree at commit
 `4e57439e58ed3d78e675f9fd7b4614fb183c5394` (Apache-2.0). The repository
@@ -39,7 +42,7 @@ Building does not validate or enable a component. To validate the
 convolution's
 fresh build against the selected installed backend, run:
 
-`vllm-hust-vspec-validate-tail-conv --component-dir /new/private/build-dir --backend-package /path/to/installed/backend/package`
+`vllm-hust-vspec-validate-tail-conv --component-dir <NEW_BUILD_DIR> --backend-package <VENV_SITE_PACKAGES>`
 
 This test requires idle devices and writes only local component evidence. Its CANN-derived
 headers retain their original notices and the adjacent `CANN-LICENSE` applies
@@ -72,7 +75,7 @@ selected paths, and validates the packaged kernel against that backend. These
 commands do not validate the full model. The gamma-six reference and gamma-eight
 recurrent builds have a separate local proof command:
 
-`vllm-hust-vspec-validate-rgdr --component gamma8 --component-dir /new/private/build-dir --backend-package /path/to/installed/backend/package`
+`vllm-hust-vspec-validate-rgdr --component gamma8 --component-dir <NEW_BUILD_DIR> --backend-package <VENV_SITE_PACKAGES>`
 
 The gamma-six reference uses `--component gamma6-reference`. The packed
 reference uses `--component gamma6-packed-reference --reference-dir <validated-reference>`;
@@ -105,5 +108,7 @@ been performed on this packaged variant, do not use it as a production backend.
 For an installed backend, run commands through
 `vllm-hust-vspec-run-with-backend --backend-package /path/to/site-packages -- <command> ...`
 to select its bundled custom operator directory and library before process
-startup. The CANN-generated `set_env.bash` can contain the original build path;
+startup. The command must use the same Python environment that imports the
+selected `vllm_ascend` package; console scripts from a different environment
+are rejected. The CANN-generated `set_env.bash` can contain the original build path;
 do not rely on it after moving or installing the package elsewhere.

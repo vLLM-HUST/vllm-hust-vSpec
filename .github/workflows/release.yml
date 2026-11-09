@@ -24,17 +24,24 @@ jobs:
           python -m pip install --no-deps --editable .
       - name: Verify source and release tag
         run: |
-          ruff check .
-          ruff format --check .
+          ruff check scripts/verify_release.py scripts/verify_model_acceptance.py src/vllm_hust_vspec/run_with_backend.py tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py
+          ruff format --check scripts/verify_release.py scripts/verify_model_acceptance.py src/vllm_hust_vspec/run_with_backend.py tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py
           bash -n install.sh manage.sh release.sh run.sh uninstall.sh
-          pytest -q tests/test_manifest.py tests/test_extension_lifecycle.py tests/test_management.py tests/test_release.py
+          python -m compileall -q src/vllm_hust_vspec
+          pytest -q tests/test_manifest.py tests/test_extension_lifecycle.py tests/test_management.py tests/test_release.py tests/test_model_acceptance.py tests/test_run_with_backend.py
           VERSION=$(python -c 'from vllm_hust_vspec._version import __version__; print(__version__)')
           test "$GITHUB_REF_NAME" = "v${VERSION}"
+      - name: Require private model-level acceptance receipt
+        env:
+          VSPEC_MODEL_ACCEPTANCE_RECEIPT: ${{ secrets.VSPEC_MODEL_ACCEPTANCE_RECEIPT }}
+        run: |
+          python scripts/verify_model_acceptance.py --env VSPEC_MODEL_ACCEPTANCE_RECEIPT --commit "$GITHUB_SHA"
       - name: Build distributions
         run: ./release.sh build
       - name: Publish exact artifacts
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          VSPEC_MODEL_ACCEPTANCE_RECEIPT: ${{ secrets.VSPEC_MODEL_ACCEPTANCE_RECEIPT }}
         run: |
           VERSION=$(python -c 'from vllm_hust_vspec._version import __version__; print(__version__)')
           VSPEC_RELEASE_CONFIRM="$VERSION" ./release.sh publish
