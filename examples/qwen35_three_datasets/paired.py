@@ -702,7 +702,60 @@ def _static_install_signature(arm: str, response: Any) -> dict[int, dict[str, An
     }
 
 
-def _validate_operator_proof(arm: str, response: Any, before: Any, after: Any) -> None:
+def _dynamic_counter_inventory(
+    response: Any, identities: dict[int, int]
+) -> dict[int, dict[str, dict[str, dict[str, int]]]]:
+    rows = response.get("results") if isinstance(response, dict) else None
+    if not isinstance(rows, list) or len(rows) != 2:
+        raise RuntimeError("Dynamic operator proof must cover both worker ranks")
+    inventory: dict[int, dict[str, dict[str, dict[str, int]]]] = {}
+    for row in rows:
+        if row.get("arm") != "dynamic":
+            raise RuntimeError("Dynamic operator proof arm mismatch")
+        install = row["static_runtime"]["static"]
+        rank, pid = install["rank"], install["pid"]
+        if rank in inventory or identities.get(rank) != pid or row.get("pid") != pid:
+            raise RuntimeError("Dynamic operator proof worker identity mismatch")
+        families = {}
+        for family in (
+            "native_stride_convolution",
+            "native_edge_convolution",
+            "native_gamma8_RGDR",
+        ):
+            layers = row.get(family)
+            if not isinstance(layers, list) or len(layers) != 30:
+                raise RuntimeError("Dynamic operator proof lacks the expected Qwen3.5 layers")
+            per_layer = {}
+            for layer in layers:
+                name = layer.get("layer") if isinstance(layer, dict) else None
+                if not isinstance(name, str) or not name or name in per_layer:
+                    raise RuntimeError(
+                        "Dynamic operator proof has duplicate or missing layer names"
+                    )
+                if family == "native_gamma8_RGDR":
+                    cells = layer.get("actual_same_kernel_folded_replay_counter_cells")
+                    if not isinstance(cells, list) or not cells:
+                        raise RuntimeError("Dynamic RGDR counter cells are missing")
+                    counts = {str(index): value for index, value in enumerate(cells)}
+                else:
+                    counts = layer.get("actual_replay_counts_by_gamma_and_requests")
+                    if not isinstance(counts, dict) or any(
+                        not isinstance(key, str) for key in counts
+                    ):
+                        raise RuntimeError("Dynamic convolution counter map is invalid")
+                if any(type(value) is not int or value < 0 for value in counts.values()):
+                    raise RuntimeError("Dynamic operator proof contains invalid dispatch counters")
+                per_layer[name] = counts
+            families[family] = per_layer
+        inventory[rank] = families
+    if set(inventory) != {0, 1}:
+        raise RuntimeError("Dynamic operator proof did not cover both worker ranks")
+    return inventory
+
+
+def _validate_operator_proof(
+    arm: str, response: Any, before: Any, after: Any, operator_before: Any = None
+) -> dict[int, dict[str, int]] | None:
     rows = response.get("results") if isinstance(response, dict) else None
     if not isinstance(rows, list) or len(rows) != 2 or any(row.get("arm") != arm for row in rows):
         raise RuntimeError("Operator proof did not cover the selected two-arm worker ranks")
@@ -735,32 +788,33 @@ def _validate_operator_proof(arm: str, response: Any, before: Any, after: Any) -
             for row in rows
         ):
             raise RuntimeError("Native operator proof is incomplete")
+        return None
     else:
-        for row in rows:
-            if any(
-                len(row.get(key, ())) != 30
-                for key in (
-                    "native_stride_convolution",
-                    "native_edge_convolution",
-                    "native_gamma8_RGDR",
-                )
-            ):
-                raise RuntimeError("Dynamic operator proof lacks the expected Qwen3.5 layers")
-            counts = [
-                value
-                for key in ("native_stride_convolution", "native_edge_convolution")
-                for layer in row[key]
-                for value in layer["actual_replay_counts_by_gamma_and_requests"].values()
-            ]
-            counts.extend(
-                value
-                for layer in row["native_gamma8_RGDR"]
-                for value in layer["actual_same_kernel_folded_replay_counter_cells"]
-            )
-            if not counts or any(type(value) is not int or value < 0 for value in counts):
-                raise RuntimeError("Dynamic operator proof contains invalid dispatch counters")
-            if not any(counts):
-                raise RuntimeError("No dynamic native operator dispatch was observed")
+        if operator_before is None:
+            raise RuntimeError("Dynamic operator proof needs a pre-timing counter snapshot")
+        previous = _dynamic_counter_inventory(operator_before, identities[0])
+        current = _dynamic_counter_inventory(response, identities[1])
+        deltas: dict[int, dict[str, int]] = {}
+        for rank in (0, 1):
+            deltas[rank] = {}
+            for family, before_layers in previous[rank].items():
+                after_layers = current[rank][family]
+                if set(before_layers) != set(after_layers):
+                    raise RuntimeError("Dynamic operator layer inventory changed during timing")
+                increase = 0
+                for name, before_cells in before_layers.items():
+                    after_cells = after_layers[name]
+                    if family == "native_gamma8_RGDR" and set(before_cells) != set(after_cells):
+                        raise RuntimeError("Dynamic RGDR counter shape changed during timing")
+                    for cell in set(before_cells) | set(after_cells):
+                        delta = after_cells.get(cell, 0) - before_cells.get(cell, 0)
+                        if delta < 0:
+                            raise RuntimeError("Dynamic operator counter decreased during timing")
+                        increase += delta
+                deltas[rank][family] = increase
+            if not any(deltas[rank].values()):
+                raise RuntimeError("No timed dynamic native operator dispatch was observed")
+        return deltas
 
 
 def _stop_owned_server(process: subprocess.Popen[Any]) -> None:
@@ -1067,6 +1121,15 @@ def run(args: argparse.Namespace) -> None:
             before, runtime_common, warmup_receipt = _prepare_timing(
                 setup, arm, dataset, run_dir, warmup_cmd, warmup_ids, args.client_source
             )
+            operator_before = None
+            if arm == "dynamic":
+                operator_before = _eval_request(setup, "vspec-evaluation-operator-proof")
+                identities = {
+                    rank: install["pid"]
+                    for rank, install in _static_install_signature(arm, before).items()
+                }
+                _dynamic_counter_inventory(operator_before, identities)
+                write_new(run_dir / "operator-before.json", operator_before)
             timing_started_utc = datetime.now(UTC).isoformat()
             started = time.monotonic()
             with (run_dir / "client.log").open("x", encoding="utf-8") as client_log:
@@ -1087,7 +1150,9 @@ def run(args: argparse.Namespace) -> None:
                 raise RuntimeError("Static compiler install changed during the timed run")
             write_new(run_dir / "worker-after.json", after)
             operator = _eval_request(setup, "vspec-evaluation-operator-proof")
-            _validate_operator_proof(arm, operator, before, after)
+            operator_deltas = _validate_operator_proof(
+                arm, operator, before, after, operator_before
+            )
             write_new(run_dir / "operator-proof.json", operator)
             receipt = {
                 "schema_version": 1,
@@ -1121,7 +1186,13 @@ def run(args: argparse.Namespace) -> None:
                 "worker_before_sha256": sha256(run_dir / "worker-before.json"),
                 "worker_after_sha256": sha256(run_dir / "worker-after.json"),
                 "cache_reset_sha256": sha256(run_dir / "cache-reset.json"),
+                "operator_before_sha256": (
+                    sha256(run_dir / "operator-before.json")
+                    if operator_before is not None
+                    else None
+                ),
                 "operator_proof_sha256": sha256(run_dir / "operator-proof.json"),
+                "operator_timed_counter_deltas": operator_deltas,
                 "solver_output": str(solver_out),
                 "timing_includes_client_overhead": True,
                 "natural_output_lengths_may_differ_not_fixed_work": True,
@@ -1148,6 +1219,68 @@ def run(args: argparse.Namespace) -> None:
         finally:
             if process is not None:
                 _stop_owned_server(process)
+
+
+def _quality_from_summary(
+    dataset: str, summary: dict[str, Any], solver: dict[str, Any]
+) -> dict[str, Any]:
+    if dataset == "mmlu-pro":
+        accuracy = summary["accuracy"]
+        total = accuracy["cases"]
+        correct = accuracy["correct"]
+        rate = accuracy["accuracy"]
+        if (
+            summary.get("complete") is not True
+            or type(total) is not int
+            or total <= 0
+            or total != solver["case_count"]
+            or type(correct) is not int
+            or not 0 <= correct <= total
+            or type(rate) not in (int, float)
+            or not math.isfinite(rate)
+            or not math.isclose(rate, correct / total, abs_tol=1e-12)
+        ):
+            raise RuntimeError("MMLU-Pro summary does not cover the complete solver selection")
+        return {"overall": rate, "unresolved": 0}
+
+    if summary.get("contract_sha256") != solver["plan_contract_sha256"]:
+        raise RuntimeError("Judge summary belongs to a different frozen plan")
+    track = "gold" if dataset == "hle-verified" else "olympiad"
+    tracks = summary["tracks"]
+    if dataset == "hle-verified":
+        if tracks[track]["total"] != solver["case_count"]:
+            raise RuntimeError("HLE Gold score does not cover the complete solver selection")
+    else:
+        selected_tracks = solver["selected_tracks"]
+        if not isinstance(selected_tracks, dict) or sum(selected_tracks.values()) != solver[
+            "case_count"
+        ]:
+            raise RuntimeError("FrontierScience selected track inventory is incomplete")
+        for name, count in selected_tracks.items():
+            if tracks[name]["total"] != count:
+                raise RuntimeError("FrontierScience score does not cover the selected track")
+    stats = tracks[track]
+    successes = stats["successes"]
+    total = stats["total"]
+    unresolved = stats.get("unresolved", stats.get("judge_unresolved", 0))
+    if (
+        any(type(value) is not int for value in (successes, total, unresolved))
+        or total <= 0
+        or successes < 0
+        or unresolved < 0
+        or successes + unresolved > total
+        or not isinstance(summary.get("scoring_policy"), str)
+        or not summary["scoring_policy"]
+    ):
+        raise RuntimeError("Judge summary contains invalid success/unresolved counts")
+    return {
+        "track": track,
+        "successes": successes,
+        "total": total,
+        "unresolved": unresolved,
+        "observed_lower_bound": successes / total,
+        "scoring_policy": summary["scoring_policy"],
+    }
 
 
 def score(args: argparse.Namespace) -> None:
@@ -1189,9 +1322,6 @@ def score(args: argparse.Namespace) -> None:
                 check=True,
             )
         summary = read_json(run_dir / "mmlu-summary.json")
-        if not summary["complete"]:
-            raise RuntimeError("Partial MMLU-Pro summary is not a score")
-        quality = {"overall": summary["accuracy"]["accuracy"], "unresolved": 0}
     else:
         grades = run_dir / "judge"
         judge_cmd = prefix + [
@@ -1231,24 +1361,7 @@ def score(args: argparse.Namespace) -> None:
                 check=True,
             )
         summary = read_json(summary_path / "summary.json")
-        track = "gold" if dataset == "hle-verified" else "olympiad"
-        stats = summary["tracks"][track]
-        if stats["total"] != receipt["case_count"] and dataset == "hle-verified":
-            raise RuntimeError("HLE Gold score does not cover the complete solver selection")
-        if dataset == "frontierscience":
-            for name, count in receipt["selected_tracks"].items():
-                if summary["tracks"][name]["total"] != count:
-                    raise RuntimeError("FrontierScience score does not cover the selected track")
-        quality = {
-            "track": track,
-            "successes": stats["successes"],
-            "total": stats["total"],
-            "unresolved": stats.get("unresolved", stats.get("judge_unresolved", 0)),
-            "observed_lower_bound": stats["successes"] / stats["total"],
-            "scoring_policy": summary["scoring_policy"],
-        }
-        if quality["total"] <= 0 or quality["successes"] + quality["unresolved"] > quality["total"]:
-            raise RuntimeError("Judge summary contains invalid success/unresolved counts")
+    quality = _quality_from_summary(dataset, summary, receipt)
     result = {
         "schema_version": 1,
         "dataset": dataset,
@@ -1269,10 +1382,12 @@ def score(args: argparse.Namespace) -> None:
 
 def compare(args: argparse.Namespace) -> None:
     runs = {}
+    scoring_artifacts = {}
     for arm, path in (("native", args.native_run), ("dynamic", args.dynamic_run)):
         directory = existing_path(path, f"{arm} run")
         solver = read_json(directory / "solver-receipt.json")
-        score_result = read_json(directory / "score-receipt.json")
+        score_path = directory / "score-receipt.json"
+        score_result = read_json(score_path)
         if solver["arm"] != arm or score_result["arm"] != arm:
             raise ValueError("Run arm label mismatch")
         if solver["client_exit_code"] or solver["transport_or_response_failures"]:
@@ -1281,10 +1396,28 @@ def compare(args: argparse.Namespace) -> None:
         _verify_warmup_record_hashes(directory, solver)
         if (
             score_result["dataset"] != solver["dataset"]
+            or score_result["plan_contract_sha256"] != solver["plan_contract_sha256"]
             or score_result["plan_inventory_sha256"] != solver["plan_inventory_sha256"]
             or score_result["selection_sha256"] != solver["selection_sha256"]
         ):
             raise ValueError("Score receipt differs from solver scope")
+        summary_path = (
+            directory / "mmlu-summary.json"
+            if solver["dataset"] == "mmlu-pro"
+            else directory / "summary" / "summary.json"
+        )
+        summary_hash = sha256(summary_path)
+        if score_result.get("summary_sha256") != summary_hash:
+            raise ValueError(f"Missing or altered {arm} score summary")
+        expected_quality = _quality_from_summary(
+            solver["dataset"], read_json(summary_path), solver
+        )
+        if canonical_sha256(score_result["quality"]) != canonical_sha256(expected_quality):
+            raise ValueError(f"{arm} score quality differs from its summary")
+        scoring_artifacts[arm] = {
+            "score_receipt_sha256": sha256(score_path),
+            "summary_sha256": summary_hash,
+        }
         for name, key in (
             ("worker-before.json", "worker_before_sha256"),
             ("worker-after.json", "worker_after_sha256"),
@@ -1293,6 +1426,9 @@ def compare(args: argparse.Namespace) -> None:
         ):
             if solver.get(key) != sha256(directory / name):
                 raise ValueError(f"Missing or altered {arm} runtime proof: {name}")
+        if arm == "dynamic":
+            if solver.get("operator_before_sha256") != sha256(directory / "operator-before.json"):
+                raise ValueError("Missing or altered dynamic pre-timing operator proof")
         runs[arm] = (solver, score_result)
     native, native_score = runs["native"]
     dynamic, dynamic_score = runs["dynamic"]
@@ -1365,6 +1501,7 @@ def compare(args: argparse.Namespace) -> None:
         "quality_worst_case_within_2pp": worst_delta >= -0.02,
         "formal_scope_pass": formal_scope_pass,
         "runtime_worker_and_operator_rpc_captured": True,
+        "scoring_artifacts_sha256": scoring_artifacts,
         "independent_operator_numerical_parity_proof_required": True,
         "natural_output_lengths_may_differ_not_fixed_work": True,
     }

@@ -459,7 +459,7 @@ class PublicExampleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "disagree"):
             paired._validate_runtime_metadata("native", response)
 
-    def test_dynamic_operator_proof_requires_identity_and_observed_dispatch(self):
+    def test_dynamic_operator_proof_requires_timed_counter_increase(self):
         metadata = {
             "results": [
                 {"pid": 100 + rank, "static": {"static": {"rank": rank, "pid": 100 + rank}}}
@@ -467,12 +467,21 @@ class PublicExampleTests(unittest.TestCase):
             ]
         }
 
-        def proof_row(rank, active):
+        def proof_row(rank, count):
             stride = [
-                {"actual_replay_counts_by_gamma_and_requests": {"4x1": 1} if active else {}}
-            ] + [{"actual_replay_counts_by_gamma_and_requests": {}} for _ in range(29)]
-            edge = [{"actual_replay_counts_by_gamma_and_requests": {}} for _ in range(30)]
-            rgdr = [{"actual_same_kernel_folded_replay_counter_cells": [0]} for _ in range(30)]
+                {"layer": "layer-0", "actual_replay_counts_by_gamma_and_requests": {"4x1": count}}
+            ] + [
+                {"layer": f"layer-{i}", "actual_replay_counts_by_gamma_and_requests": {}}
+                for i in range(1, 30)
+            ]
+            edge = [
+                {"layer": f"layer-{i}", "actual_replay_counts_by_gamma_and_requests": {}}
+                for i in range(30)
+            ]
+            rgdr = [
+                {"layer": f"layer-{i}", "actual_same_kernel_folded_replay_counter_cells": [0]}
+                for i in range(30)
+            ]
             return {
                 "arm": "dynamic",
                 "pid": 100 + rank,
@@ -482,14 +491,57 @@ class PublicExampleTests(unittest.TestCase):
                 "native_gamma8_RGDR": rgdr,
             }
 
-        proof = {"results": [proof_row(0, True), proof_row(1, True)]}
-        paired._validate_operator_proof("dynamic", proof, metadata, metadata)
+        baseline = {"results": [proof_row(0, 1), proof_row(1, 1)]}
+        proof = {"results": [proof_row(0, 2), proof_row(1, 2)]}
+        deltas = paired._validate_operator_proof("dynamic", proof, metadata, metadata, baseline)
+        self.assertEqual(deltas[0]["native_stride_convolution"], 1)
+        self.assertEqual(deltas[1]["native_stride_convolution"], 1)
         proof["results"][1]["pid"] = 999
         with self.assertRaisesRegex(RuntimeError, "PID"):
+            paired._validate_operator_proof("dynamic", proof, metadata, metadata, baseline)
+        proof["results"][1] = proof_row(1, 1)
+        with self.assertRaisesRegex(RuntimeError, "No timed dynamic native operator dispatch"):
+            paired._validate_operator_proof("dynamic", proof, metadata, metadata, baseline)
+        proof["results"][1] = proof_row(1, 0)
+        with self.assertRaisesRegex(RuntimeError, "counter decreased"):
+            paired._validate_operator_proof("dynamic", proof, metadata, metadata, baseline)
+        with self.assertRaisesRegex(RuntimeError, "pre-timing counter snapshot"):
             paired._validate_operator_proof("dynamic", proof, metadata, metadata)
-        proof["results"][1] = proof_row(1, False)
-        with self.assertRaisesRegex(RuntimeError, "No dynamic native operator dispatch"):
-            paired._validate_operator_proof("dynamic", proof, metadata, metadata)
+
+    def test_judged_quality_is_derived_from_complete_selected_counts(self):
+        hle_solver = {"case_count": 2, "plan_contract_sha256": "plan"}
+        hle_summary = {
+            "contract_sha256": "plan",
+            "scoring_policy": "strict_json",
+            "tracks": {"gold": {"total": 2, "successes": 1, "unresolved": 1}},
+        }
+        hle_quality = paired._quality_from_summary("hle-verified", hle_summary, hle_solver)
+        self.assertEqual(hle_quality["observed_lower_bound"], 0.5)
+        self.assertEqual(hle_quality["unresolved"], 1)
+        hle_summary["tracks"]["gold"]["total"] = 1
+        with self.assertRaisesRegex(RuntimeError, "complete solver selection"):
+            paired._quality_from_summary("hle-verified", hle_summary, hle_solver)
+
+        frontier_solver = {
+            "case_count": 3,
+            "plan_contract_sha256": "plan",
+            "selected_tracks": {"olympiad": 2, "research": 1},
+        }
+        frontier_summary = {
+            "contract_sha256": "plan",
+            "scoring_policy": "strict_final",
+            "tracks": {
+                "olympiad": {"total": 2, "successes": 1, "judge_unresolved": 1},
+                "research": {"total": 1, "successes": 0, "judge_unresolved": 0},
+            },
+        }
+        frontier_quality = paired._quality_from_summary(
+            "frontierscience", frontier_summary, frontier_solver
+        )
+        self.assertEqual(frontier_quality["unresolved"], 1)
+        frontier_summary["tracks"]["research"]["total"] = 0
+        with self.assertRaisesRegex(RuntimeError, "selected track"):
+            paired._quality_from_summary("frontierscience", frontier_summary, frontier_solver)
 
     def test_prepare_and_run_dry_run_without_npu(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -647,6 +699,16 @@ class PublicExampleTests(unittest.TestCase):
                 ):
                     dump(directory / name, {"arm": arm})
                     hashes[key] = paired.sha256(directory / name)
+                if arm == "dynamic":
+                    dump(directory / "operator-before.json", {"arm": arm, "phase": "before"})
+                    hashes["operator_before_sha256"] = paired.sha256(
+                        directory / "operator-before.json"
+                    )
+                summary_path = directory / "mmlu-summary.json"
+                dump(
+                    summary_path,
+                    {"complete": True, "accuracy": {"cases": 2, "correct": 1, "accuracy": 0.5}},
+                )
                 dump(
                     directory / "solver-receipt.json",
                     {
@@ -683,7 +745,8 @@ class PublicExampleTests(unittest.TestCase):
                         "selection_sha256": "selection",
                         "plan_contract_sha256": "plan",
                         "plan_inventory_sha256": "inventory",
-                        "quality": {"overall": 0.5},
+                        "quality": {"overall": 0.5, "unresolved": 0},
+                        "summary_sha256": paired.sha256(summary_path),
                     },
                 )
             args = Namespace(
@@ -711,6 +774,27 @@ class PublicExampleTests(unittest.TestCase):
             self.assertFalse(result["formal_scope_pass"])
             self.assertFalse(result["performance_quality_scope_pass"])
             self.assertNotIn("acceptance_pass", result)
+            self.assertIn("score_receipt_sha256", result["scoring_artifacts_sha256"]["native"])
+
+            native_summary = root / "native" / "mmlu-summary.json"
+            dump(
+                native_summary,
+                {"complete": True, "accuracy": {"cases": 2, "correct": 0, "accuracy": 0.0}},
+            )
+            with self.assertRaisesRegex(ValueError, "altered native score summary"):
+                paired.compare(args)
+            dump(
+                native_summary,
+                {"complete": True, "accuracy": {"cases": 2, "correct": 1, "accuracy": 0.5}},
+            )
+            score_path = root / "native" / "score-receipt.json"
+            score_result = paired.read_json(score_path)
+            score_result["quality"]["overall"] = 0.0
+            dump(score_path, score_result)
+            with self.assertRaisesRegex(ValueError, "quality differs"):
+                paired.compare(args)
+            score_result["quality"]["overall"] = 0.5
+            dump(score_path, score_result)
 
             for arm in ("native", "dynamic"):
                 directory = root / arm
