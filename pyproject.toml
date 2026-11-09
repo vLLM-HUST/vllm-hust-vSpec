@@ -8,8 +8,8 @@ dynamic = ["version"]
 description = "Out-of-tree speculative decoding plugin for vLLM-HUST on Ascend"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "Apache-2.0 AND LicenseRef-CANN-OSL-2.0"
+license-files = ["LICENSE", "src/vllm_hust_vspec/_vendor/native/gamma6_tail/CANN-LICENSE"]
 authors = [{name = "vLLM-HUST"}]
 dependencies = []
 

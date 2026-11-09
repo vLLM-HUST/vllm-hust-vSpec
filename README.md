@@ -1,10 +1,12 @@
 # vllm-hust-vSpec
 
-> **v0.15.1 开发分支：尚未完成发布验证。** 当前新增 Qwen3.5 动态控制及实验性执行路径仍依赖特定 Ascend 后端、自定义算子和本地验证材料；这些依赖不随本分支提供。当前代码仅供开发检查，不应作为已验证、可独立部署的正式版本或性能复现包。设备端正确性、清单管理器兼容性与完整复现仍需验证。
+> **v0.15.1 开发分支：尚未完成发布验证。** 当前新增 Qwen3.5 动态控制及实验性执行路径仍依赖特定 Ascend 后端、自定义算子和本地验证材料；这些依赖尚未完整随本分支提供。当前代码仅供开发检查，不应作为已验证、可独立部署的正式版本或性能复现包。完整设备端正确性与性能复现仍需验证。
 
 实验性组件通过 `VSPEC_FUSED_PROPOSAL_VOTE_DIR`、`VSPEC_OWNER_MID_TWIN_DIR`、`VSPEC_OWNER_TAIL_TWIN_DIR`、`VSPEC_PREFIX_CLIP_BRIDGE_DIR`、`VSPEC_NATIVE_CONV_TILE_DIR`、`VSPEC_TWO_BANK_EMBEDDING_DIR`、`VSPEC_INPLACE_HEAD_NZ_DIR` 指定其本地验证材料目录；相关影子校验还使用 `VSPEC_ASCEND_SOURCE_ROOT` 和 `VSPEC_VLLM_SOURCE_ROOT`。路径未配置或校验不通过时，相应实验性功能应拒绝启用；设置路径不会跳过既有校验。不得把私人评测结果、模型权重或验证材料上传到此仓库。
 
 开发包包含基于 vLLM-Ascend-HUST 固定提交 `4e57439e58ed3d78e675f9fd7b4614fb183c5394` 的实验性后端补丁、附加源码与部分算子源码。可使用 `vllm-hust-vspec-prepare-backend --source <本地后端Git目录> --destination <新的私有目录>` 在不修改原后端的情况下准备源码副本。**该命令目前不会编译或安装后端，也不会生成算子的验证材料**；它不是一键安装或复现流程。用户仍需具备兼容的 Ascend 驱动、CANN 及工具链；完整安装流程和设备端验证尚待完成。
+
+内置的部分算子含 CANN 衍生源码，除本项目 Apache-2.0 许可证外，还须遵循对应目录中的 CANN Open Software License Agreement 2.0；构建和本机组件验证入口见 [实验性后端说明](docs/experimental-backend-bundle.md)。
 
 历史原件下载与校验见 [benchmark custody guide](docs/benchmark-originals.md)。
 
