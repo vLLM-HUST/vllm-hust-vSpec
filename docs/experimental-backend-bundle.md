@@ -85,6 +85,15 @@ components use `vllm-hust-vspec-validate-conv`; the stride test requires
 The prefix bridge has a separate local component test,
 `vllm-hust-vspec-validate-prefix-clip --backend /path/to/installed/site-packages --destination /new/private/proof-dir`.
 
+The FIA host adapter can be built in a new private directory with
+`vllm-hust-vspec-build-operator --operator fia-host --cann-root /path/to/cann --destination /new/private/fia-build`,
+then checked on both allocated devices with
+`vllm-hust-vspec-validate-fia-host --directory /new/private/fia-build`.
+The two-bank embedding component uses
+`vllm-hust-vspec-validate-two-bank --model /path/to/checkpoint --destination /new/private/proof-dir`.
+These commands generate only local component evidence; they are not model-level
+correctness or performance evidence.
+
 No model, dataset, private benchmark configuration, logs, results or proof
 artifacts are distributed in this bundle. Hardware and driver, CANN SDK,
 compatible Python/PyTorch/torch_npu and build tools must be available on the
