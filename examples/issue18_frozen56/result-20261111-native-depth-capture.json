@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-11-11",
+  "scope": "Current-host native MTP depth and graph-capture-size comparison on the teacher's frozen Issue #18 workload; not a byte-identical replay of the historical software stack",
+  "teacher_capsule_commit": "d67aea6eb3eb0dee271a01b4d66acce8b65bd034",
+  "teacher_capsule_path": "reports/reproductions/native-mtp4-gamma4-20261027",
+  "teacher_gamma4_configs_json_sha256": "292af8278e4d7b65957d7274d1ee9926e42475004d7541181402db7b371f22a0",
+  "vllm_version": "0.17.2rc1.dev5871+g762f85b31.empty",
+  "vllm_ascend_version": "0.25.1rc2.dev0+hust.20260903.4.g4e57439e5.d20261111",
+  "installed_vspec_package_version": "0.15.2.post1",
+  "native_stack_note": "The native arm uses VLLM_PLUGINS=ascend; the installed package supplies only the shared Qwen3.5 startup compatibility bridge.",
+  "hardware": "2 x Ascend 910B2",
+  "model": "Qwen3.5-35B-A3B, BF16, TP=2, EP enabled",
+  "protocol": {
+    "runner": "offline LLM.generate, one formal submission of the same 56 questions",
+    "qwen_chat_template": true,
+    "pilot_questions": 14,
+    "pilot_max_output_tokens_per_question": 16,
+    "formal_questions": 56,
+    "formal_max_output_tokens_per_question": 4000,
+    "natural_stop": true,
+    "timing": "sum of actual formal output token counts / formal LLM.generate wall seconds; engine startup and pilot excluded",
+    "max_num_seqs": 16,
+    "max_model_len": 16384,
+    "max_num_batched_tokens": 8192,
+    "automatic_kv_allocation_gpu_memory_utilization": 0.9,
+    "cudagraph_mode": "FULL_AND_PIECEWISE",
+    "native_use_local_argmax_reduction": false,
+    "perf56_jsonl_sha256": "9ee8849d84172ec7fd04ceeea71c4123a2eb53111d1334b85a5f987c86064462",
+    "pilot_jsonl_sha256": "0e1eeeb81f7b8a784a29083a5ae79c47931a5b80bc43a688a281ee7a46843317",
+    "same_ordered_question_ids_and_input_token_lengths": true,
+    "input_tokens_per_run": 76907,
+    "fixed_1024_output_workload": false
+  },
+  "capture_profiles": {
+    "teacher_original_48": {"size_count": 48, "max_size": 112},
+    "mtp8_extended_52": {"size_count": 52, "max_size": 144, "added_sizes": [117, 126, 135, 144]}
+  },
+  "runs": [
+    {"arm": "native_mtp4", "label": "native-mtp4-r3-48-20261111", "capture_profile": "teacher_original_48", "completed": 56, "output_tokens": 159650, "formal_wall_seconds": 192.45799296349287, "output_tokens_per_second": 829.5316684004068, "correct": 37, "invalid": 0, "exit_code": 0, "capture_size_warning": false},
+    {"arm": "native_mtp6", "label": "native-mtp6-r1-48-20261111", "capture_profile": "teacher_original_48", "completed": 56, "output_tokens": 152253, "formal_wall_seconds": 180.91922551766038, "output_tokens_per_second": 841.5523533464268, "correct": 35, "invalid": 0, "exit_code": 0, "capture_size_warning": false},
+    {"arm": "native_mtp6", "label": "native-mtp6-r2-48-20261111", "capture_profile": "teacher_original_48", "completed": 56, "output_tokens": 152465, "formal_wall_seconds": 180.04138978011906, "output_tokens_per_second": 846.8330542560377, "correct": 35, "invalid": 0, "exit_code": 0, "capture_size_warning": false},
+    {"arm": "native_mtp6", "label": "native-mtp6-r3-48-20261111", "capture_profile": "teacher_original_48", "completed": 56, "output_tokens": 152465, "formal_wall_seconds": 179.20111772045493, "output_tokens_per_second": 850.8038450844822, "correct": 35, "invalid": 0, "exit_code": 0, "capture_size_warning": false},
+    {"arm": "native_mtp8", "label": "native-mtp8-r1-48-20261111", "capture_profile": "teacher_original_48", "role": "diagnostic only", "completed": 56, "output_tokens": 153506, "formal_wall_seconds": 657.0944193843752, "output_tokens_per_second": 233.61330650748508, "correct": 39, "invalid": 0, "exit_code": 0, "capture_size_warning": true},
+    {"arm": "native_mtp8", "label": "native-mtp8-r1-144-retry-20261111", "capture_profile": "mtp8_extended_52", "completed": 56, "output_tokens": 153031, "formal_wall_seconds": 193.43241923954338, "output_tokens_per_second": 791.1341883724725, "correct": 35, "invalid": 0, "exit_code": 0, "capture_size_warning": false},
+    {"arm": "native_mtp8", "label": "native-mtp8-r2-144-20261111", "capture_profile": "mtp8_extended_52", "completed": 56, "output_tokens": 152730, "formal_wall_seconds": 195.5572535181418, "output_tokens_per_second": 780.9989005896489, "correct": 35, "invalid": 0, "exit_code": 0, "capture_size_warning": false},
+    {"arm": "native_mtp8", "label": "native-mtp8-r3-144-20261111", "capture_profile": "mtp8_extended_52", "completed": 56, "output_tokens": 150372, "formal_wall_seconds": 192.00358073506504, "output_tokens_per_second": 783.1728940903965, "correct": 37, "invalid": 0, "exit_code": 0, "capture_size_warning": false}
+  ],
+  "median_output_tokens_per_second": {
+    "native_mtp6_teacher_original_48": 846.8330542560377,
+    "native_mtp8_extended_52": 783.1728940903965
+  },
+  "interpretation": "The original 48 sizes end at 112. With 16 simultaneous requests, MTP8 can require 16*(8+1)=144 decode tokens and the backend warns that 112 may be suboptimal. Adding only 117/126/135/144 removes the warning and raises one full-run throughput from 233.61 to 791.13 output token/s. This is strong evidence of insufficient graph coverage, not direct per-step proof of eager fallback. MTP4 has only one new 48-size run, so no median is reported."
+}
