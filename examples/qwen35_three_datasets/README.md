@@ -16,9 +16,13 @@
 
 `common-config.json` 是用户自己冻结的 vLLM 顶层配置（JSON 对象，可包含其他所需参数），至少包含 `dtype`, `tensor_parallel_size`, `max_model_len`, `max_num_seqs`, `max_num_batched_tokens`, `enable_prefix_caching`, `kv_cache_memory_bytes`, `compilation_config`, `speculative_config`。这里要求 `dtype=bfloat16`、TP=2、`kv_cache_memory_bytes` 为正整数或 `null`（自动分配）、`speculative_config.method=mtp`；不要把 `model`、`host`、`port`、`served_model_name`、`worker_extension_cls` 或 `num_speculative_tokens` 塞进共享文件。服务配置生成器只允许两臂在投机深度（原生可选 4/6/8、动态容量 8）和 worker 类上不同；数据集可用各自的长度/多模态配置，但**同一数据集的两臂必须用同一共享配置**。动态容量 8 是上限，不代表每轮都固定选 8；实际选择仍需独立 worker 证据核验。
 
-`common-env.json` 和 `dynamic-env.json` 都是私有 JSON 字符串映射。前者可放两臂共同的设备可见性、离线模型、静态编译设置，其中 `HUST_VSPEC_CAPTURE_SAFE_STATIC="1"` 与 `HUST_VSPEC_HOT_STATIC_SHAPES="14,42,70,98,126"` 是本配对入口要求的共同编译设置；还可放六个固定取值的 vLLM 共同开关：`VLLM_DISABLE_SHARED_EXPERTS_STREAM=1`、`VLLM_NO_USAGE_STATS=1`、`VLLM_SERVER_DEV_MODE=0`、`VLLM_USE_AOT_COMPILE=0`、`VLLM_USE_BREAKABLE_CUDAGRAPH=0`、`VLLM_WORKER_MULTIPROC_METHOD=spawn`。其他 `VLLM_*` 不能混入共同环境。后者放动态臂的 `VSPEC_`、`HUST_VSPEC_`、`HUST_ISSUE18_` 配置与 proof 路径，以及显式允许的 Qwen3.5 后端开关。不要在这两个文件中放密码、API token 或旧环境 `PYTHONPATH`。服务子进程只继承必要的系统/NPU 环境变量，并剔除常见凭据变量；需要的额外非敏感设置请显式写入 common-env。示例自行生成保存在私有 setup 中的随机端点令牌，为每臂新建隔离缓存目录，并在计时前调用受保护的缓存清理路由；不会预存答案或 KV。所有由评测入口设置的 vLLM、Hugging Face、Ascend、编译器及绘图库缓存路径都指向本次私有运行目录，不沿用旧实验或共享区缓存。
+`common-env.json` 和 `dynamic-env.json` 都是私有 JSON 字符串映射。设备由宿主机或容器的资源分配决定；评测入口不设置可见设备号，也拒绝在这两个文件中写入 `ASCEND_RT_VISIBLE_DEVICES` 或 `ASCEND_VISIBLE_DEVICES`，运行前仍会核验恰有两张可见的 910B2。前者可放两臂共同的离线模型、静态编译设置，其中 `HUST_VSPEC_CAPTURE_SAFE_STATIC="1"` 与 `HUST_VSPEC_HOT_STATIC_SHAPES="14,42,70,98,126"` 是本配对入口要求的共同编译设置；还可放六个固定取值的 vLLM 共同开关：`VLLM_DISABLE_SHARED_EXPERTS_STREAM=1`、`VLLM_NO_USAGE_STATS=1`、`VLLM_SERVER_DEV_MODE=0`、`VLLM_USE_AOT_COMPILE=0`、`VLLM_USE_BREAKABLE_CUDAGRAPH=0`、`VLLM_WORKER_MULTIPROC_METHOD=spawn`。其他 `VLLM_*` 不能混入共同环境。后者放动态臂的 `VSPEC_`、`HUST_VSPEC_`、`HUST_ISSUE18_` 配置与 proof 路径，以及显式允许的 Qwen3.5 后端开关。不要在这两个文件中放密码、API token 或旧环境 `PYTHONPATH`。服务子进程只继承必要的系统/NPU 环境变量，并剔除常见凭据变量；需要的额外非敏感设置请显式写入 common-env。示例自行生成保存在私有 setup 中的随机端点令牌，为每臂新建隔离缓存目录，并在计时前调用受保护的缓存清理路由；不会预存答案或 KV。所有由评测入口设置的 vLLM、Hugging Face、Ascend、编译器及绘图库缓存路径都指向本次私有运行目录，不沿用旧实验或共享区缓存。
+
+私有运行根目录请使用短绝对路径。当前 CANN 静态编译器会把完整编译路径编码进单个文件名；路径过长会在服务启动时触发 `File name too long`，导致静态编译失败或回退。入口在启动前限制最终运行目录长度，避免把这种异常轮次误判为正常吞吐复现。
 
 本入口只允许在 `dynamic-env.json` 中显式设置列入白名单的 `VLLM_ASCEND_Q35_*` 开关；`common-env.json` 不接受这些键，原生臂使用所选原生后端的默认值。这些开关也不会从当前 shell 隐式继承。因此，同一共享服务配置和公共编译设置不表示两臂的 Qwen3.5 后端优化相同。历史三数据集对照中的原生与动态实现也有逐臂差异；复核历史配置时应在私有启动记录中核对各臂实际开关、后端和算子，不能把整体吞吐差异单独归因于动态控制器。`VLLM_ALLOW_INSECURE_SERIALIZATION=0` 由入口对两臂强制设置，不需要写进私有环境文件。
+
+v0.15.2 可在 `dynamic-env.json` 中显式覆盖 `HUST_VSPEC_HOT_STATIC_SHAPES` 为 `70`，减少动态臂首次静态编译；原生臂仍使用公共五形状设置。此优化不删减解码图，具体冷启动和吞吐观察值见 [0.15.2 冷启动记录](../../docs/v0.15.2-cold-start.md)。v0.15.1 的既有配置与结果不因此改变。
 
 ## 冻结题目与准备配对配置
 
@@ -57,6 +61,8 @@ PRIVATE_ROOT=/path/to/private/evaluation
   --dynamic-evaluation-dir /path/to/fresh/dynamic-venv/lib/pythonX.Y/site-packages/vllm_hust_vspec/evaluation \
   --served-model paired-solver --port 18080 --native-capacity 4
 ```
+
+若要复测**已有**的 HLE/FrontierScience 题单，可在 `select_cases.py` 命令中增加 `--existing-selection <旧题单 JSON>`，保留其 `case_ids`，并用本次计划的哈希生成新入口所需的清单。脚本会拒绝计划哈希或题号不匹配的旧题单；不要只凭相同题数就声称与历史负载相同。
 
 若原生 `vllm_ascend` 是单独的后端覆盖层，`--native-backend-package` 指向该覆盖层，`--native-evaluation-dir` 仍指向**同一原生 Python 环境安装的插件 wheel**；两者不必是同一目录。原生静态 worker 位于该 evaluation 目录的同级 `evaluation_static`，由入口核验后加入子进程模块路径。
 

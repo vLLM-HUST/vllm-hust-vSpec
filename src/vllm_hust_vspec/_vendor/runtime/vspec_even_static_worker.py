@@ -18,7 +18,7 @@ install_native_conv_tile()
 install_native_fia_host_batch()
 
 assert os.environ['HUST_VSPEC_CAPTURE_SAFE_STATIC']=='1'
-assert os.environ['HUST_VSPEC_HOT_STATIC_SHAPES']=='14,42,70,98,126'
+assert os.environ.get('HUST_VSPEC_HOT_STATIC_SHAPES','70')==','.join(str(v) for v in HOT)
 _ORIGINAL,_STATISTICS=install_capture_guard(acl_graph,torch_npu.npu.is_current_stream_capturing)
 install(compiler_config)
 

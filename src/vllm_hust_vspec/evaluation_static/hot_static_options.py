@@ -2,8 +2,15 @@
 
 from copy import deepcopy
 from functools import wraps
+import os
 
-HOT = (14, 42, 70, 98, 126)
+_AVAILABLE_HOT = (14, 42, 70, 98, 126)
+_hot_text = os.environ.get("HUST_VSPEC_HOT_STATIC_SHAPES", "14,42,70,98,126")
+if not _hot_text or any(not part.isdecimal() for part in _hot_text.split(",")):
+    raise RuntimeError("Invalid hot static shape selection")
+HOT = tuple(int(part) for part in _hot_text.split(","))
+if HOT != tuple(sorted(set(HOT))) or 70 not in HOT or any(v not in _AVAILABLE_HOT for v in HOT):
+    raise RuntimeError("Hot static shapes must be an ordered subset containing 70")
 CALLS = []
 _RANGE_KEY = "_vllm_aclnn_static_kernel_sym_range"
 _FIXED = {

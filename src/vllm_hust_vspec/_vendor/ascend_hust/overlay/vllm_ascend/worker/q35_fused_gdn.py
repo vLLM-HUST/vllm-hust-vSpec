@@ -9,6 +9,7 @@ tables, change accepted-token counts, or alter native Mamba preprocessing.
 from collections import Counter
 from dataclasses import fields, is_dataclass
 import os
+import time
 
 import numpy as np
 import torch
@@ -31,6 +32,42 @@ BUFFER_NAMES = (
 GDN_GROUP_IDS = (1, 2, 3)
 STATE_WIDTH = 7
 KERNEL_BLOCK = 128
+
+
+def _precompile_tail_mamba_kernels(runner):
+    """Compile cold-path Mamba variants without a model step or device write.
+
+    The 14-request short pilot does not reach the single-request tail or the
+    block-copy path of a long formal run. Both are compile-time specializations
+    on this Qwen3.5/Ascend stack; putting their compilation in the pilot avoids
+    counting compiler work as generation throughput.
+    """
+    from vllm.v1.worker.mamba_utils import _TEMPORAL_TILES, is_conv_state_dim_first
+    from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+    from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+
+    buffers = runner._get_mamba_bufs()
+    context = buffers.postprocess_align
+    if context is None or not context.is_initialized or not context.block_table_stride_req:
+        return False
+    postprocess_mamba_fused_kernel.warmup(
+        torch.int32, torch.int32, torch.int32, torch.int32, torch.int32,
+        context.block_table_ptrs, context.block_table_stride_req,
+        context.state_base_addrs, context.state_block_strides,
+        context.state_elem_sizes, context.state_inner_sizes,
+        context.state_conv_widths, context.state_group_indices,
+        context.state_dim_row_count, context.state_dim_row_stride,
+        context.num_accepted_tokens_out, None, 1,
+        grid=(1, 1, _TEMPORAL_TILES), block_size=context.block_size,
+        COPY_BLOCK_SIZE=1024, CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+        TEMPORAL_TILES=_TEMPORAL_TILES,
+    )
+    batch_memcpy_kernel.warmup(
+        buffers.preprocess.src_ptrs.gpu, buffers.preprocess.dst_ptrs.gpu,
+        buffers.preprocess.sizes.gpu,
+        grid=(1,), BLOCK_SIZE=8192,
+    )
+    return True
 
 
 def pure_spec_gamma(prefilling, drafts, query, upper, tokens):
@@ -102,6 +139,8 @@ class FusedGDNRefresh:
         # Bound: two layouts * max requests * capture-token capacity.
         self.metadata_cache = {}
         self.last_gamma = None
+        self.precompiled_geometries = set()
+        self.precompiled_tail_mamba = False
         if self.mode != "off":
             print(f"[q35-gdn-fused] pid={os.getpid()} initialized mode={self.mode}", flush=True)
 
@@ -183,11 +222,42 @@ class FusedGDNRefresh:
         # Metadata construction can fail only before any launch; never fallback
         # after a partially completed refresh.
         results = self._metadata_for(builders, width, n, tokens)
-        gdn_gid123_full_stable_refresh[(triton.cdiv(capacity * width, KERNEL_BLOCK),)](
-            *inputs, *(x for buffers in groups for x in buffers[:6]), n, tokens,
+        kernel_inputs = (*inputs, *(x for buffers in groups for x in buffers[:6]), n, tokens)
+        kernel_constants = dict(
             TABLE_COLS=tables[0].shape[1], TABLE_STRIDE0=tables[0].stride(0),
             STATE_CAPACITY=capacity, STATE_WIDTH=width, MAMBA_BLOCK_SIZE=block_size,
             BLOCK=KERNEL_BLOCK,
+        )
+        # A short pilot can exercise only the starting gamma.  Compiling a
+        # previously unseen width during the timed workload blocks the worker
+        # for several seconds.  Triton warmup compiles without launching or
+        # touching model state, so prepare all configured even-gamma widths on
+        # the first admitted pilot frame when explicitly requested.
+        if os.environ.get("VLLM_ASCEND_Q35_GDN_PRECOMPILE_WIDTHS") == "1":
+            geometry = (kernel_constants["TABLE_COLS"], kernel_constants["TABLE_STRIDE0"],
+                        capacity, block_size)
+            if geometry not in self.precompiled_geometries:
+                started = time.monotonic()
+                max_gamma = int(r.speculative_config.num_speculative_tokens)
+                widths = tuple(range(3, max_gamma + 2, 2))
+                for candidate_width in widths:
+                    candidate_constants = dict(kernel_constants, STATE_WIDTH=candidate_width)
+                    gdn_gid123_full_stable_refresh.warmup(
+                        *kernel_inputs,
+                        grid=(triton.cdiv(capacity * candidate_width, KERNEL_BLOCK),),
+                        **candidate_constants,
+                    )
+                self.precompiled_geometries.add(geometry)
+                print(f"[q35-gdn-fused] pid={os.getpid()} precompiled_widths={widths} "
+                      f"seconds={time.monotonic() - started:.3f}", flush=True)
+            if not self.precompiled_tail_mamba:
+                started = time.monotonic()
+                self.precompiled_tail_mamba = _precompile_tail_mamba_kernels(r)
+                if self.precompiled_tail_mamba:
+                    print(f"[q35-gdn-fused] pid={os.getpid()} precompiled_tail_mamba "
+                          f"seconds={time.monotonic() - started:.3f}", flush=True)
+        gdn_gid123_full_stable_refresh[(triton.cdiv(capacity * width, KERNEL_BLOCK),)](
+            *kernel_inputs, **kernel_constants,
         )
         if self.mode == "validate":
             snapshots = [[x.clone() for x in buffers] for buffers in groups]

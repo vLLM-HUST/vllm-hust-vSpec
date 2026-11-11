@@ -297,8 +297,17 @@ def prepare(args: argparse.Namespace) -> None:
     dynamic_env_file = existing_path(args.dynamic_env, "dynamic environment/proof map")
     common_env = read_env(common_env_file, dynamic=False)
     dynamic_env = read_env(dynamic_env_file, dynamic=True)
-    if set(common_env) & set(dynamic_env):
+    visibility_keys = {"ASCEND_VISIBLE_DEVICES", "ASCEND_RT_VISIBLE_DEVICES"}
+    if visibility_keys.intersection(common_env) or visibility_keys.intersection(dynamic_env):
+        raise ValueError("Device visibility must come from the host allocation, not the evaluation configuration")
+    overlap = set(common_env) & set(dynamic_env)
+    if overlap - {"HUST_VSPEC_HOT_STATIC_SHAPES"}:
         raise ValueError("Dynamic environment must not override a common setting")
+    if (
+        "HUST_VSPEC_HOT_STATIC_SHAPES" in overlap
+        and dynamic_env["HUST_VSPEC_HOT_STATIC_SHAPES"] != "70"
+    ):
+        raise ValueError("v0.15.2 dynamic hot static shape override must be 70")
     paths = {
         key: str(existing_executable(getattr(args, key), key))
         for key in ("native_python", "dynamic_python", "client_python")
@@ -418,7 +427,7 @@ def _client_env(source: str | None) -> dict[str, str]:
 
 def _private_ipc_dir() -> Path:
     """Reserve a private, short per-run directory for vLLM's UUID IPC sockets."""
-    base = Path.home() / ".vspec-ipc"
+    base = Path(os.environ.get("VSPEC_IPC_BASE", str(Path.home() / ".vspec-ipc")))
     base.mkdir(mode=0o700, exist_ok=True)
     metadata = base.lstat()
     if (
@@ -482,8 +491,9 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
     if any(_credential_key(key) for key in (*setup["common_env"], *setup["dynamic_env"])):
         raise ValueError("Server environment cannot inherit credential variables")
     env.update(setup["common_env"])
-    if env.get("ASCEND_VISIBLE_DEVICES") or env.get("ASCEND_RT_VISIBLE_DEVICES", "0,1") != "0,1":
-        raise ValueError("Both arms require unambiguous logical NPU visibility 0,1")
+    visibility_keys = {"ASCEND_VISIBLE_DEVICES", "ASCEND_RT_VISIBLE_DEVICES"}
+    if visibility_keys.intersection(setup["common_env"]) or visibility_keys.intersection(setup["dynamic_env"]):
+        raise ValueError("Device visibility must come from the host allocation, not the evaluation configuration")
     if arm == "dynamic":
         env.update(setup["dynamic_env"])
     if arm == "native":
@@ -502,16 +512,19 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         PYTHONDONTWRITEBYTECODE="1",
         PYTHONUNBUFFERED="1",
         VLLM_ALLOW_INSECURE_SERIALIZATION="0",
-        ASCEND_RT_VISIBLE_DEVICES="0,1",
         VSPEC_EVAL_ARM=arm,
+        VSPEC_EVAL_NATIVE_CAPACITY=str(setup.get("native_capacity", 4)),
         VSPEC_EVAL_TOKEN=setup["evaluation_token"],
         PYTHONPATH=os.pathsep.join(import_paths),
     )
+    expected_hot_shapes = "14,42,70,98,126"
+    if arm == "dynamic" and setup["dynamic_env"].get("HUST_VSPEC_HOT_STATIC_SHAPES") == "70":
+        expected_hot_shapes = "70"
     if (
         env.get("HUST_VSPEC_CAPTURE_SAFE_STATIC") != "1"
-        or env.get("HUST_VSPEC_HOT_STATIC_SHAPES") != "14,42,70,98,126"
+        or env.get("HUST_VSPEC_HOT_STATIC_SHAPES") != expected_hot_shapes
     ):
-        raise ValueError("Matched static compiler settings are required in common-env.json")
+        raise ValueError("Expected static compiler settings are missing from the selected arm")
     cann_site, opp_tbe = _cann_python_paths(env)
     env["PYTHONPATH"] = os.pathsep.join((env["PYTHONPATH"], str(cann_site), str(opp_tbe)))
     _validate_acl_import(setup["paths"][f"{arm}_python"], env, cann_site)
@@ -1138,6 +1151,16 @@ def _verify_warmup_record_hashes(run_dir: Path, receipt: dict[str, Any]) -> None
         raise ValueError("Warmup request records changed after generation")
 
 
+def _validate_static_compile_run_path(run_dir: Path) -> None:
+    # CANN's static compiler embeds the absolute build path into a single
+    # generated filename. At 117 bytes of run path it exceeded NAME_MAX on
+    # the tested stack; leave margin for operator-specific suffixes.
+    if len(os.fsencode(str(run_dir.resolve()))) > 96:
+        raise ValueError(
+            "Run path is too long for CANN static compilation; use a short --private-root"
+        )
+
+
 def run(args: argparse.Namespace) -> None:
     setup = _load_setup(existing_path(args.setup, "setup file"))
     arm, dataset = args.arm, args.dataset
@@ -1171,14 +1194,20 @@ def run(args: argparse.Namespace) -> None:
     run_dir = root / "runs" / dataset / arm / args.tag
     if run_dir.exists():
         raise FileExistsError("Use a new run tag; results are never overwritten")
+    _validate_static_compile_run_path(run_dir)
     config = root / "server-config" / f"{arm}.yaml"
     if not config.is_file():
         raise FileNotFoundError(config)
     python = setup["paths"][f"{arm}_python"]
     backend = setup["paths"][f"{arm}_backend_package"]
     vllm_cli = Path(python).parent / "vllm"
-    if not vllm_cli.is_file():
-        raise FileNotFoundError(f"Installed vLLM console script missing: {vllm_cli}")
+    # Editable vLLM installations may expose the CLI module without writing
+    # their console script into the virtual environment. Both forms run with
+    # the same verified interpreter and installed backend.
+    vllm_command = (
+        [str(vllm_cli)] if vllm_cli.is_file()
+        else [python, "-m", "vllm.entrypoints.cli.main"]
+    )
     server_cmd = [
         python,
         "-m",
@@ -1187,7 +1216,7 @@ def run(args: argparse.Namespace) -> None:
         backend,
         "--qwen35-mtp-compat",
         "--",
-        str(vllm_cli),
+        *vllm_command,
         "serve",
         "--config",
         str(config),

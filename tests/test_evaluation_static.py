@@ -82,6 +82,63 @@ def test_hot_shapes_preserve_supplied_options_and_validate_contract():
         hot.select(bad)
 
 
+def test_single_hot_shape_preserves_all_capture_keys(monkeypatch):
+    monkeypatch.setenv("HUST_VSPEC_HOT_STATIC_SHAPES", "70")
+    hot = _load("hot_static_options")
+    assert hot.HOT == (70,)
+    options = {
+        "options": {
+            "force_eager": True,
+            "inplace_pass": False,
+            "clone_input": False,
+            "clone_output": False,
+            "static_kernel_compile": True,
+            "_vllm_aclnn_static_kernel_sym_range": [1, 14, 35, 70, 126, 208],
+        }
+    }
+    selected = hot.select(options)
+    assert selected["options"]["_vllm_aclnn_static_kernel_sym_range"] == [70]
+    assert options["options"]["_vllm_aclnn_static_kernel_sym_range"] == [1, 14, 35, 70, 126, 208]
+
+
+def test_vendored_single_hot_shape_matches_evaluation_rule(monkeypatch):
+    monkeypatch.setenv("HUST_VSPEC_HOT_STATIC_SHAPES", "70")
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src/vllm_hust_vspec/_vendor/runtime/hot_static_options.py"
+    )
+    spec = importlib.util.spec_from_file_location("test_vendor_hot_static_options", source)
+    assert spec is not None and spec.loader is not None
+    vendor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vendor)
+    assert vendor.HOT == (70,)
+    assert vendor.select(
+        {
+            "options": {
+                "force_eager": True,
+                "inplace_pass": False,
+                "clone_input": False,
+                "clone_output": False,
+                "static_kernel_compile": True,
+                "_vllm_aclnn_static_kernel_sym_range": [1, 14, 35, 70, 126, 208],
+            }
+        }
+    )["options"]["_vllm_aclnn_static_kernel_sym_range"] == [70]
+
+
+def test_v0152_vendored_default_hot_shape(monkeypatch):
+    monkeypatch.delenv("HUST_VSPEC_HOT_STATIC_SHAPES", raising=False)
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src/vllm_hust_vspec/_vendor/runtime/hot_static_options.py"
+    )
+    spec = importlib.util.spec_from_file_location("test_vendor_default_hot_static_options", source)
+    assert spec is not None and spec.loader is not None
+    vendor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vendor)
+    assert vendor.HOT == (70,)
+
+
 def test_static_install_snapshot_proves_coordinator_and_receiver(tmp_path):
     metadata = _load("static_install_metadata")
     install_dir = tmp_path / "static_kernel_install" / "sample_1234"

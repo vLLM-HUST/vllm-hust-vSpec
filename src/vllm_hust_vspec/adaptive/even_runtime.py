@@ -12,6 +12,11 @@ class EvenPhase:
         self.ticket=self.active=self.ready=None
         self.pending_since=None;self.bridge_wait=False;self.bridge_roster=None
         self.admission_rpc_ms=0.0
+        self.archived_timing=os.environ.get('HUST_VSPEC_EVEN_POLICY_PROFILE')=='archived-20261103'
+    def transition_cost_ms(self):
+        if self.archived_timing:
+            return (time.monotonic()-self.pending_since)*1000
+        return self.admission_rpc_ms
     def check_thread(self):
         current=threading.get_ident()
         if self.owner is None:self.owner=current
@@ -53,10 +58,10 @@ class EvenPhase:
         physical_roster=self.bridge_roster if stage=='wide' else roster
         if stage=='wide' and (physical_roster is None or not set(roster).issubset(physical_roster)):
             raise RuntimeError('No new request can enter a partially admitted bridge')
-        rpc_start=time.monotonic()
+        if not self.archived_timing:rpc_start=time.monotonic()
         receipts=core.model_executor.collective_rpc('fence_private_even_mtp_transition',
                      args=(ticket.sequence,ticket.old,ticket.new,stage,physical_roster))
-        self.admission_rpc_ms+=(time.monotonic()-rpc_start)*1000
+        if not self.archived_timing:self.admission_rpc_ms+=(time.monotonic()-rpc_start)*1000
         eligible=(len(receipts)==2 and len({r.get('pid') for r in receipts})==2
                   and all(r.get('eligible') and r.get('device_fenced')
                     and r.get('transition_id')==ticket.sequence and r.get('stage')==stage
@@ -75,19 +80,20 @@ class EvenPhase:
                         old_gamma=ticket.old,new_gamma=ticket.new,queue_depth=0,
                         placeholders_zero=True,roster=list(physical_roster),
                         scheduled_survivor_roster=list(roster),worker_receipts=receipts)
-        self.ready['policy_cost_metadata']=dict(admission_rpc_wall_ms_accumulated_for_ticket=self.admission_rpc_ms,
-            elapsed_since_most_recent_ready_ms=(time.monotonic()-self.pending_since)*1000,
-            measured_generation_wall_NOT_modified=True,
-            useful_queue_and_bridge_work_NOT_counted_as_exclusive_admission_cost=True)
+        if not self.archived_timing:
+            self.ready['policy_cost_metadata']=dict(admission_rpc_wall_ms_accumulated_for_ticket=self.admission_rpc_ms,
+                elapsed_since_most_recent_ready_ms=(time.monotonic()-self.pending_since)*1000,
+                measured_generation_wall_NOT_modified=True,
+                useful_queue_and_bridge_work_NOT_counted_as_exclusive_admission_cost=True)
         if stage=='shrink':
             # Discard ONLY unverified CPU candidate suffixes. Native GPU previous
             # tensor/stride and all accepted states remain untouched for gather.
             for r in requests:r.spec_token_ids=r.spec_token_ids[:ticket.new]
         if stage in ('bridge','shrink'):
-            controller.commit_even(ticket,len(requests),self.admission_rpc_ms)
+            controller.commit_even(ticket,len(requests),self.transition_cost_ms())
         if stage=='bridge':self.active=ticket;self.bridge_roster=roster
         if stage=='wide':
-            controller.even.switch_cost_ms=self.admission_rpc_ms
+            controller.even.switch_cost_ms=self.transition_cost_ms()
             self.active=None
         self.bridge_wait=False
         print('[vspec-even-fence-admitted] '+json.dumps(self.ready),flush=True)
@@ -128,7 +134,13 @@ def install(settings):
             or os.environ.get('HUST_VSPEC_MTP_ASYNC_RUNTIME_SWITCH','0')=='1'):
         raise RuntimeError('Even rounds require dedicated even-gamma/max8 async lane, old4to6 growth OFF')
     from . import runtime
-    from .even_online import EvenRoundOnlineController
+    profile=os.environ.get('HUST_VSPEC_EVEN_POLICY_PROFILE','current')
+    if profile=='archived-20261103':
+        from .legacy_even_online import EvenRoundOnlineController
+    elif profile=='current':
+        from .even_online import EvenRoundOnlineController
+    else:
+        raise RuntimeError('Unsupported HUST_VSPEC_EVEN_POLICY_PROFILE')
     runtime.OnlineGammaController=EvenRoundOnlineController
     from ..backends.q35_even_fence import install as install_rpc
     install_rpc()

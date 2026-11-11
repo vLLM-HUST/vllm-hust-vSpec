@@ -13,7 +13,7 @@ VENV=${VENV:-/opt/vllm-hust-cann91}
 CANN_ENV=${CANN_ENV:-${VENV}/Ascend/cann-9.1.0/set_env.sh}
 MODEL=${MODEL:-/workspace/models/Qwen3.5-35B-A3B}
 DATASET_DIR=${DATASET_DIR:-/tmp/vspec-speedbench-data}
-NPU_IDS=${NPU_IDS:-0,1}
+NPU_IDS=${NPU_IDS:-}
 PORT=${PORT:-18185}
 OUTPUT_DIR=${OUTPUT_DIR:-${ROOT}/benchmark_results/qwen35_speedbench_al/$(date -u +%Y%m%d-%H%M%S)-${THINKING_MODE}}
 STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-1800}
@@ -38,7 +38,9 @@ source "${CANN_ENV}"
 mkdir -p "${OUTPUT_DIR}"
 export PATH="${VENV}/bin:${PATH}"
 export PYTHONPATH="${ROOT}/src:/root/data/vllm-hust-latest:/root/data/vllm-ascend-hust-latest${PYTHONPATH:+:${PYTHONPATH}}"
-export ASCEND_RT_VISIBLE_DEVICES="${NPU_IDS}"
+if [[ -n "${NPU_IDS}" ]]; then
+  export ASCEND_RT_VISIBLE_DEVICES="${NPU_IDS}"
+fi
 export PYTHONUNBUFFERED=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_USE_AOT_COMPILE=0
@@ -67,11 +69,13 @@ SERVER_CMD=(
   --target-model "${MODEL}"
   --served-model-name "${SERVED_MODEL_NAME}"
   --host 127.0.0.1 --port "${PORT}"
-  --device "${NPU_IDS}"
   --vllm-source /root/data/vllm-hust-latest
   --ascend-source /root/data/vllm-ascend-hust-latest
   --vllm-executable "${VLLM_BIN}"
 )
+if [[ -n "${NPU_IDS}" ]]; then
+  SERVER_CMD+=(--device "${NPU_IDS}")
+fi
 BENCH_CMD=(
   "${VLLM_BIN}" bench serve
   --model "${SERVED_MODEL_NAME}"

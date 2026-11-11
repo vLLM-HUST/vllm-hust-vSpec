@@ -50,6 +50,13 @@ def warmup_manifest(dataset: str, plan: Path, case_ids: list[str]) -> dict:
 
 
 class PublicExampleTests(unittest.TestCase):
+    def test_static_compiler_rejects_overlong_private_run_path(self):
+        paired._validate_static_compile_run_path(Path("/root/h2/runs/hle-verified/dynamic/r1"))
+        with self.assertRaisesRegex(ValueError, "short --private-root"):
+            paired._validate_static_compile_run_path(
+                Path("/root") / ("long-private-root-" * 6) / "runs" / "hle-verified" / "dynamic" / "r1"
+            )
+
     def test_native_operator_preflight_does_not_claim_dynamic_counter_snapshot(self):
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)
@@ -101,7 +108,7 @@ class PublicExampleTests(unittest.TestCase):
             (opp / "built-in" / "op_impl" / "ai_core" / "tbe").mkdir(parents=True)
             setup = {
                 "common_env": common,
-                "dynamic_env": {},
+                "dynamic_env": {"HUST_VSPEC_HOT_STATIC_SHAPES": "70"},
                 "evaluation_token": "test-only-private-token",
                 "paths": {
                     "native_python": sys.executable,
@@ -126,6 +133,10 @@ class PublicExampleTests(unittest.TestCase):
                 for arm in ("native", "dynamic"):
                     run_dir = root / arm
                     env = paired._server_env(setup, arm, run_dir)
+                    self.assertEqual(
+                        env["HUST_VSPEC_HOT_STATIC_SHAPES"],
+                        "70" if arm == "dynamic" else "14,42,70,98,126",
+                    )
                     self.assertNotIn("ASCEND_API_KEY", env)
                     self.assertEqual(env["VLLM_ALLOW_INSECURE_SERIALIZATION"], "0")
                     for key, value in paired.COMMON_VLLM_FLAGS.items():
@@ -662,12 +673,11 @@ class PublicExampleTests(unittest.TestCase):
             dump(
                 common_env,
                 {
-                    "ASCEND_RT_VISIBLE_DEVICES": "0,1",
                     "HUST_VSPEC_CAPTURE_SAFE_STATIC": "1",
                     "HUST_VSPEC_HOT_STATIC_SHAPES": "14,42,70,98,126",
                 },
             )
-            dump(dynamic_env, {})
+            dump(dynamic_env, {"HUST_VSPEC_HOT_STATIC_SHAPES": "70"})
             work = root / "private-run"
             setup_args = Namespace(
                 private_root=str(work),
@@ -689,6 +699,23 @@ class PublicExampleTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     paired.prepare(setup_args)
             setup = paired.read_json(work / "setup.json")
+            self.assertEqual(setup["dynamic_env"]["HUST_VSPEC_HOT_STATIC_SHAPES"], "70")
+            bound_common = {
+                **paired.read_json(common_env),
+                "ASCEND_RT_VISIBLE_DEVICES": "0,1",
+            }
+            dump(common_env, bound_common)
+            rejected_binding = Namespace(
+                **{**vars(setup_args), "private_root": str(root / "rejected-binding")}
+            )
+            with self.assertRaisesRegex(ValueError, "host allocation"):
+                paired.prepare(rejected_binding)
+            bound_common.pop("ASCEND_RT_VISIBLE_DEVICES")
+            dump(common_env, bound_common)
+            dump(dynamic_env, {"HUST_VSPEC_HOT_STATIC_SHAPES": "14,70"})
+            rejected_args = Namespace(**{**vars(setup_args), "private_root": str(root / "rejected")})
+            with self.assertRaisesRegex(ValueError, "override must be 70"):
+                paired.prepare(rejected_args)
             self.assertEqual(setup["paths"]["native_python"], str(python))
             self.assertEqual(setup["paths"]["dynamic_python"], str(python))
             self.assertEqual(setup["paths"]["client_python"], str(python))
@@ -718,6 +745,15 @@ class PublicExampleTests(unittest.TestCase):
             self.assertEqual(command["warmup_case_count"], 0)
             self.assertEqual(command["case_count"], 1)
             self.assertFalse((work / "runs").exists())
+            vllm.unlink()
+            module_capture = io.StringIO()
+            with contextlib.redirect_stdout(module_capture):
+                paired.run(run_args)
+            module_command = json.loads(module_capture.getvalue())["server"]
+            self.assertIn(
+                [str(python), "-m", "vllm.entrypoints.cli.main", "serve"],
+                [module_command[i:i + 4] for i in range(len(module_command) - 3)],
+            )
             warmup = root / "warmup.json"
             dump(warmup, warmup_manifest("mmlu-pro", plan, ["one"]))
             run_args.warmup_selection = str(warmup)
@@ -769,6 +805,8 @@ class PublicExampleTests(unittest.TestCase):
                 [str(backend), str(static), str(evaluation), str(cann_site), str(opp_tbe)],
             )
             self.assertEqual(server_env["VLLM_PLUGINS"], "ascend,vspec_eval")
+            self.assertNotIn("ASCEND_RT_VISIBLE_DEVICES", server_env)
+            self.assertNotIn("ASCEND_VISIBLE_DEVICES", server_env)
             self.assertNotIn("/sensitive/inherited/path", server_env["PYTHONPATH"])
             probe = subprocess.run(
                 [str(python), "-B", "-c", "import acl; print(acl.__file__)"],
@@ -795,7 +833,6 @@ class PublicExampleTests(unittest.TestCase):
             (opp / "built-in" / "op_impl" / "ai_core" / "tbe").mkdir(parents=True)
             setup = {
                 "common_env": {
-                    "ASCEND_RT_VISIBLE_DEVICES": "0,1",
                     "HUST_VSPEC_CAPTURE_SAFE_STATIC": "1",
                     "HUST_VSPEC_HOT_STATIC_SHAPES": "14,42,70,98,126",
                 },

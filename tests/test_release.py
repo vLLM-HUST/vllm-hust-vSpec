@@ -3,6 +3,7 @@ from __future__ import annotations
 import configparser
 import io
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "vllm_hust_vspec"
-VERSION = "0.15.1"
+VERSION = runpy.run_path(str(PACKAGE / "_version.py"))["__version__"]
 STALE_FILE = "adaptive/runtime.py"
 
 
@@ -67,6 +68,7 @@ def _write_test_artifacts(dist_dir: Path, stale_artifact: str | None = None) -> 
             "configs",
             "docs",
             "examples/qwen35_three_datasets",
+            "examples/issue18_frozen56",
             "scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh",
             "scripts/verify_release.py",
             "scripts/verify_model_acceptance.py",
@@ -98,7 +100,7 @@ def test_release_source_metadata_is_consistent() -> None:
         text=True,
     )
 
-    assert "source_version=0.15.1" in result.stdout
+    assert f"source_version={VERSION}" in result.stdout
 
 
 def test_release_accepts_matching_runtime_package_bytes(tmp_path: Path) -> None:
@@ -149,8 +151,8 @@ def test_release_build_removes_uv_dist_gitignore(tmp_path: Path) -> None:
         "set -euo pipefail\n"
         f"mkdir -p {dist_dir}\n"
         f"printf '*' > {dist_dir / '.gitignore'}\n"
-        f"touch {dist_dir / 'vllm_hust_vspec-0.15.1-py3-none-any.whl'}\n"
-        f"touch {dist_dir / 'vllm_hust_vspec-0.15.1.tar.gz'}\n",
+        f"touch {dist_dir / f'vllm_hust_vspec-{VERSION}-py3-none-any.whl'}\n"
+        f"touch {dist_dir / f'vllm_hust_vspec-{VERSION}.tar.gz'}\n",
         encoding="utf-8",
     )
     fake_uv.chmod(0o755)

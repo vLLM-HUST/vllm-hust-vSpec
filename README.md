@@ -56,8 +56,7 @@ Qwen3.5 的 Ascend 自定义算子必须使用与 `vllm-ascend` 二进制构建�
 # FULL_AND_PIECEWISE + 256K + adaptive MTP2 (gamma 2/4/6 + refill)
 vllm-hust-vspec \
   --protocol qwen35-frontier-mtp2 \
-  --target-model /workspace/models/Qwen3.5-35B-A3B \
-  --device 0,1
+  --target-model /workspace/models/Qwen3.5-35B-A3B
 
 # 同配置 GSM8K target-only / adaptive MTP2 配对回归；默认门槛 1.10x
 scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh pair

@@ -1377,6 +1377,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(options.method, "mtp")
         self.assertEqual(options.gamma, 6)
         self.assertEqual(options.tensor_parallel_size, 2)
+        self.assertIsNone(options.device)
         self.assertEqual(options.max_model_len, 262144)
         self.assertEqual(options.graph_mode, "full-and-piecewise")
         self.assertTrue(options.prefix_caching)
@@ -1416,6 +1417,7 @@ class LauncherTest(unittest.TestCase):
         self.assertIn(112, capture_sizes)
         environment = build_environment(options, configured_environment, {})
         self.assertEqual(environment["HUST_VSPEC_MTP_COHORT_REFILL"], "1")
+        self.assertNotIn("ASCEND_RT_VISIBLE_DEVICES", environment)
 
     def test_qwen35_frontier_b16_performance_preset(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -1881,6 +1883,8 @@ class LauncherTest(unittest.TestCase):
         environment = build_environment(options, {}, {})
         self.assertEqual(environment[ENV_MTP_STRICT_GRAPH], "1")
         self.assertEqual(environment["HUST_VSPEC_MTP_COHORT_REFILL"], "1")
+        self.assertNotIn("ASCEND_RT_VISIBLE_DEVICES", environment)
+        self.assertNotIn("ASCEND_VISIBLE_DEVICES", environment)
 
     def test_mtp_local_argmax_can_be_enabled(self) -> None:
         options, _ = parse_args(

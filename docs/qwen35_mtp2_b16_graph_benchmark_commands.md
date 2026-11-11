@@ -43,7 +43,6 @@ export TASK_QUEUE_ENABLE=1
   --served-model-name qwen3.5-35b-a3b-mtp2-vspec \
   --host 127.0.0.1 \
   --port 18180 \
-  --device 0,1 \
   --max-num-seqs 16
 ```
 

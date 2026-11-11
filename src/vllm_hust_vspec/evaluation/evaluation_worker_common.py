@@ -17,11 +17,14 @@ class EvaluationMetadataMixin:
             raise RuntimeError("VSPEC_EVAL_ARM must identify the evaluation arm")
         speculative = config.speculative_config
         capacity = None if speculative is None else speculative.num_speculative_tokens
+        native_capacity = int(os.environ.get("VSPEC_EVAL_NATIVE_CAPACITY", "4"))
+        if native_capacity not in (4, 6, 8):
+            raise RuntimeError("VSPEC_EVAL_NATIVE_CAPACITY must be 4, 6, or 8")
         loaded = any(
             name == "vllm_hust_vspec" or name.startswith("vllm_hust_vspec.") for name in sys.modules
         )
-        if arm == "native" and (loaded or capacity != 4):
-            raise RuntimeError("Native evaluation loaded vSpec or is not MTP4")
+        if arm == "native" and (loaded or capacity != native_capacity):
+            raise RuntimeError(f"Native evaluation loaded vSpec or is not MTP{native_capacity}")
         if arm == "dynamic" and (not loaded or capacity != 8):
             raise RuntimeError("Dynamic evaluation did not load vSpec capacity 8")
         cache = config.cache_config

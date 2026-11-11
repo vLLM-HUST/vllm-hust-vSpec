@@ -134,7 +134,8 @@ def select_mmlu(plan: Path, output: Path, count: int | None, seed: str) -> dict[
 
 
 def select_judged(
-    dataset: str, plan: Path, output: Path, count: int | None, seed: str
+    dataset: str, plan: Path, output: Path, count: int | None, seed: str,
+    existing_selection: Path | None = None,
 ) -> dict[str, Any]:
     contract = json.loads((plan / "contract.json").read_text(encoding="utf-8"))
     tasks = json.loads((plan / "tasks.json").read_text(encoding="utf-8"))
@@ -142,8 +143,30 @@ def select_judged(
         raise ValueError("Invalid client plan")
     if contract.get("tasks_sha256") != sha256(plan / "tasks.json"):
         raise ValueError("Client plan task hash mismatch")
-    ids = choose_ids(dataset, tasks, count, seed)
+    if existing_selection is None:
+        ids = choose_ids(dataset, tasks, count, seed)
+    else:
+        source = json.loads(existing_selection.read_text(encoding="utf-8"))
+        source_ids = source.get("case_ids") if isinstance(source, dict) else None
+        if (not isinstance(source_ids, list) or not source_ids
+                or not all(isinstance(case_id, str) for case_id in source_ids)):
+            raise ValueError("Existing selection has invalid or duplicate case IDs")
+        selected = set(source_ids)
+        if len(selected) != len(source_ids):
+            raise ValueError("Existing selection has invalid or duplicate case IDs")
+        source_plan_hash = (source.get("source_plan_contract_sha256")
+                            or source.get("official_plan_contract_sha256"))
+        if source_plan_hash != sha256(plan / "contract.json"):
+            raise ValueError("Existing selection does not belong to this plan")
+        if count is not None and len(source_ids) != count:
+            raise ValueError("Existing selection count does not match --count")
+        plan_ids = [task["case_id"] for task in tasks]
+        if not selected <= set(plan_ids):
+            raise ValueError("Existing selection contains IDs absent from this plan")
+        ids = [case_id for case_id in plan_ids if case_id in selected]
     selection = _selection(dataset, plan, tasks, ids, seed)
+    if existing_selection is not None:
+        selection["imported_selection_sha256"] = sha256(existing_selection)
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     write_json(output, selection)
     return selection
@@ -155,15 +178,21 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--count", type=int, help="omit for the full selected plan")
+    parser.add_argument("--existing-selection", type=Path,
+                        help="preserve case IDs from a verified prior judged-dataset selection")
     parser.add_argument("--seed", required=True)
     args = parser.parse_args(argv)
     os.umask(0o077)
     plan = args.plan.expanduser().resolve(strict=True)
     output = private_output(args.output)
     if args.dataset == "mmlu-pro":
+        if args.existing_selection is not None:
+            raise ValueError("--existing-selection is only for judged datasets")
         result = select_mmlu(plan, output, args.count, args.seed)
     else:
-        result = select_judged(args.dataset, plan, output, args.count, args.seed)
+        source = (args.existing_selection.expanduser().resolve(strict=True)
+                  if args.existing_selection is not None else None)
+        result = select_judged(args.dataset, plan, output, args.count, args.seed, source)
     print(json.dumps({key: result[key] for key in ("dataset", "count", "case_ids_sha256")}))
 
 

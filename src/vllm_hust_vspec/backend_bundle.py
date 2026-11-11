@@ -18,6 +18,11 @@ THIRD_PARTY_ARCHIVES = {
     'protobuf-25.1.tar.gz': '9bd87b8280ef720d3240514f884e56a712f2218f0d693b48050c836028940a42',
     'include.zip': 'a22461d13119ac5c78f205d3df1db13403e58ce1bb1794edc9313677313f4a9d',
 }
+MAKESELF_FILES = {
+    'makeself.sh': 'ea025ed0be9996885e873e0eafff475ebd5e85cb77dbff858e0c34bd9a1aa85c',
+    'makeself-header.sh': 'c5d9b4372167ab7f0c5fb04d9ab03f1dfa49ed999a99f5f8cc6d4962a6e4b5ee',
+    'COPYING': '8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643',
+}
 
 
 def verified_archives(source: Path) -> list[tuple[Path, str]]:
@@ -34,6 +39,20 @@ def verified_archives(source: Path) -> list[tuple[Path, str]]:
     return archives
 
 
+def verified_makeself(source: Path) -> list[tuple[Path, str]]:
+    """Stage the pinned offline copy instead of fetching it during CMake."""
+    directory = source / 'csrc' / 'third_party' / 'makeself'
+    files = []
+    for name, digest in MAKESELF_FILES.items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise FileNotFoundError(f'missing offline makeself dependency: {path}')
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f'offline makeself dependency hash mismatch: {path}')
+        files.append((path, name))
+    return files
+
+
 def prepare(source: Path, destination: Path) -> None:
     source = source.resolve(strict=True)
     if destination.exists() or destination.is_symlink():
@@ -42,6 +61,7 @@ def prepare(source: Path, destination: Path) -> None:
     if destination.is_relative_to(source):
         raise ValueError('destination must not be inside the source checkout')
     archives = verified_archives(source)
+    makeself = verified_makeself(source)
     subprocess.run(['git', '-C', str(source), 'cat-file', '-e', f'{BASE_COMMIT}^{{commit}}'], check=True)
     subprocess.run(['git', 'clone', '--quiet', '--no-hardlinks', '--no-checkout', str(source), str(destination)], check=True)
     subprocess.run(['git', '-C', str(destination), 'checkout', '--quiet', '--detach', BASE_COMMIT], check=True)
@@ -65,6 +85,14 @@ def prepare(source: Path, destination: Path) -> None:
         if target.exists() or target.is_symlink():
             raise FileExistsError(f'offline dependency would overwrite an existing file: {target}')
         shutil.copyfile(origin, target)
+    makeself_dir = destination / 'csrc' / 'third_party' / 'makeself'
+    makeself_dir.mkdir(parents=True, exist_ok=True)
+    for origin, name in makeself:
+        target = makeself_dir / name
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(f'offline dependency would overwrite an existing file: {target}')
+        shutil.copyfile(origin, target)
+        target.chmod(origin.stat().st_mode & 0o777)
 
 
 def main() -> None:
