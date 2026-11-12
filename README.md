@@ -4,7 +4,7 @@
 
 ## 当前实测与适用范围
 
-- **FrontierScience / HLE-Verified 四组对照（历史 0.15.1）**：在两张 910B2、并发 16、自动 KV、无额外数据集预热题的单轮测试中，vSpec 对各自的原生 MTP4、MTP6、MTP8 输出吞吐均高于 20%。[参数、吞吐与质量](docs/v0.15.1-local-retest.md)、[脱敏计时收据索引](docs/v0.15.1-local-timing-receipts.csv)及[评测入口](examples/qwen35_three_datasets/README.md)均已公开。这不是 0.15.2 的四组配对结果，也不是多轮稳定性保证；HLE-Verified Gold 中 vSpec 正确率 25.00%，低于原生 MTP4 的 28.50%，不能宣称性能与质量同时通过验收。
+- **FrontierScience / HLE-Verified 四组对照（历史 0.15.1）**：在两张 910B2、并发 16、自动 KV、无额外数据集预热题的单轮测试中，vSpec 对各自的原生 MTP4、MTP6、MTP8 输出吞吐均高于 10%。[参数、吞吐与质量](docs/v0.15.1-local-retest.md)、[脱敏计时收据索引](docs/v0.15.1-local-timing-receipts.csv)及[评测入口](examples/qwen35_three_datasets/README.md)均已公开。这不是 0.15.2 的四组配对结果，也不是多轮稳定性保证；HLE-Verified Gold 中 vSpec 正确率 25.00%，低于原生 MTP4 的 28.50%，不能宣称性能与质量同时通过验收。
 - **Issue #18 冻结 56 题（当前安装包 0.15.2.post1）**：同机连续三组原生 MTP4 / vSpec 配对的输出吞吐倍率为 1.189×、1.185×、1.194×。[输入、参数、聚合结果和与老师原始环境的差异](docs/v0.15.2-issue18-frozen56-current-host-paired.md)单独记录；不能将其与前述两个数据集的结果拼接成同一轮实验。
 - **冷启动和跨数据集安装诊断（0.15.2 候选包）**：本机全新私有编译目录下，FrontierScience、HLE-Verified 的动态臂服务就绪分别为 794.23 秒、806.21 秒；对应求解吞吐为 1229.39、1383.13 输出 token/s。[完整记录与复测参数](docs/v0.15.2-cold-start.md)说明了缓存边界。这两轮没有同轮原生 MTP4/6/8 配对或重新判分，不能用来声称 0.15.2 在这两个数据集上仍保持上述加速比。
 
