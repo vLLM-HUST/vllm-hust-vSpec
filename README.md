@@ -1,14 +1,16 @@
 # vllm-hust-vSpec
 
-> **v0.15.1 开发分支：尚未完成模型级发布验收。** Qwen3.5 实验性复现路径所需的后端补丁、算子源码与组件验证命令已随包提供，仍需匹配的 Ascend 驱动、CANN、已编译后端和本机验证材料。完整模型级正确性与性能复现尚待验证，不能据此宣称正式版本已通过验收。新环境 MMLU-Pro 固定 200 题的无额外预热对照中，观察输出吞吐为 vSpec 643.90、原生 MTP4 626.64 token/s，约 1.03×，未达到预设的 1.10× 加速目标；该单次结果不代表其他任务或设备配置。
+`vSpec-0.15.2` 分支当前源码版本为 `0.15.2.post1`。Qwen3.5 实验路径随插件提供后端补丁、算子源码及安装/验证入口；目标机器仍须准备兼容的驱动、CANN、Python 栈、模型、数据集和两张可用 NPU。单独执行 `pip install` 不会编译设备算子。完整安装步骤见[复现准备指南](docs/v0.15.1-reproduction.md)，其中底层依赖要求也适用于 0.15.2；安装包不包含模型、数据集或已针对其他机器编译的缓存。
 
-当前实验配置的服务冷启动较慢，首次编译与解码图捕获可能耗费数十分钟。启动时间不计入上述运行期输出吞吐；缩短冷启动是后续优化项，复测时应单独记录启动耗时和缓存使用情况。
+## 当前实测与适用范围
 
-复现路径所需的本地验证材料目录见 [v0.15.1 复现准备指南](docs/v0.15.1-reproduction.md)；实际测试参数、脱敏聚合结果及其适用范围见 [本地复测记录](docs/v0.15.1-local-retest.md)。官方 `install.sh` 安装插件时会同时构建并安装匹配后端与所需算子、完成本机验证，生成私有目录下的 `runtime.env`。需要预先具备兼容的驱动、CANN、Python 依赖、只读模型和空闲 NPU；仅执行 `pip install` 无法触发设备编译。路径未配置或校验不通过时，相应实验性功能应拒绝启用。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不属于该复现路径，其 `VSPEC_NATIVE_CONV_TILE_DIR` 不能用卷积参考组件的目录替代。原始评测记录、模型权重和验证材料不得上传到此仓库。
+- **FrontierScience / HLE-Verified 四组对照（历史 0.15.1）**：在两张 910B2、并发 16、自动 KV、无额外数据集预热题的单轮测试中，vSpec 对各自的原生 MTP4、MTP6、MTP8 输出吞吐均高于 20%。[参数、吞吐与质量](docs/v0.15.1-local-retest.md)、[脱敏计时收据索引](docs/v0.15.1-local-timing-receipts.csv)及[评测入口](examples/qwen35_three_datasets/README.md)均已公开。这不是 0.15.2 的四组配对结果，也不是多轮稳定性保证；HLE-Verified Gold 中 vSpec 正确率 25.00%，低于原生 MTP4 的 28.50%，不能宣称性能与质量同时通过验收。
+- **Issue #18 冻结 56 题（当前安装包 0.15.2.post1）**：同机连续三组原生 MTP4 / vSpec 配对的输出吞吐倍率为 1.189×、1.185×、1.194×。[输入、参数、聚合结果和与老师原始环境的差异](docs/v0.15.2-issue18-frozen56-current-host-paired.md)单独记录；不能将其与前述两个数据集的结果拼接成同一轮实验。
+- **冷启动和跨数据集安装诊断（0.15.2 候选包）**：本机全新私有编译目录下，FrontierScience、HLE-Verified 的动态臂服务就绪分别为 794.23 秒、806.21 秒；对应求解吞吐为 1229.39、1383.13 输出 token/s。[完整记录与复测参数](docs/v0.15.2-cold-start.md)说明了缓存边界。这两轮没有同轮原生 MTP4/6/8 配对或重新判分，不能用来声称 0.15.2 在这两个数据集上仍保持上述加速比。
 
-开发包包含基于 vLLM-Ascend-HUST 固定提交 `4e57439e58ed3d78e675f9fd7b4614fb183c5394` 的实验性后端补丁、附加源码与本次复现路径所需的算子源码。可使用 `vllm-hust-vspec-prepare-backend --source <本地后端Git目录> --destination <新的私有目录>` 在不修改原后端的情况下准备源码副本。**该命令不会编译或安装后端，也不会生成算子的验证材料**；后端构建和组件验证须按指南在目标机器上执行。用户仍需具备兼容的 Ascend 驱动、CANN 及工具链。
+所有吞吐均为正式求解阶段的实际输出 token 数除以客户端墙钟时间，**不包含服务启动、缓存清理和判分**；自然停止导致各组输出 token 数可能不同。历史逐题题单和答案未公开，因此公开入口支持同口径复测，不保证逐题复刻或跨机器获得同一数值。
 
-固定源码版本、后端构建、组件验证和发布验收步骤见 [v0.15.1 复现准备指南](docs/v0.15.1-reproduction.md)。
+完整安装入口 `./install.sh` 会在目标机器构建并安装匹配后端和所需算子、完成本机验证，并在私有目录生成 `runtime.env`。安装失败或证明路径缺失时，不应启用相应实验性功能。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不在该复现路径内。后端源码准备命令 `vllm-hust-vspec-prepare-backend` 只生成打补丁的源码副本，**不会**自行编译安装。底层源码版本和完整要求见[复现准备指南](docs/v0.15.1-reproduction.md)。
 
 内置的部分算子含 CANN 衍生源码，除本项目 Apache-2.0 许可证外，还须遵循对应目录中的 CANN Open Software License Agreement 2.0；构建和本机组件验证入口见 [实验性后端说明](docs/experimental-backend-bundle.md)。
 
@@ -157,7 +159,7 @@ vllm-hust-vSpec/
 
 ## 安装
 
-统一管理入口默认安装当前版本 wheel；需要继续开发源码时使用 editable 模式：
+只需注册基础插件时，可用 Extension Manager 管理入口安装当前版本 wheel；开发源码可用 editable 模式：
 
 ```bash
 cd /path/to/vllm-hust-vSpec
@@ -166,7 +168,18 @@ cd /path/to/vllm-hust-vSpec
 ./manage.sh install --enable
 ```
 
-`./install.sh` 等价于 `./manage.sh install --editable`。安装会注册名为 `vspec` 的
+**这两种安装不会构建 Qwen3.5 实验路径所需的 Ascend 后端和算子。** 完整运行时安装使用独立入口，按目标机器填写路径，并预先安装[指定版本的底层依赖](docs/v0.15.1-reproduction.md)：
+
+```bash
+source <CANN_ROOT>/set_env.sh
+./install.sh --python <VENV_PYTHON> --wheel <VSPEC_WHEEL> \
+  --ascend-source <ASCEND_GIT_CHECKOUT> --vllm-source <PINNED_VLLM_SOURCE> \
+  --cann-root <CANN_ROOT> --model-dir <MODEL_DIR> \
+  --private-dir <NEW_PRIVATE_INSTALL_DIR>
+source <NEW_PRIVATE_INSTALL_DIR>/runtime.env
+```
+
+已有 wheel 安装、但没有仓库 checkout 时，可使用包内的 `vllm-hust-vspec-install-runtime` 命令执行同样的后端/算子安装步骤；此时不需要再传 `--wheel`。两个入口都会要求本机验证所需的可用 NPU。基础插件安装会注册名为 `vspec` 的
 `vllm.general_plugins` entry point 和 ID 为 `org.vllm-hust.vspec` 的
 `vllm_hust.extension_bundles` entry point。默认安装不会自动启用；`--enable` 会在
 Manager 完成静态发现和兼容性检查后显式启用。
@@ -190,7 +203,7 @@ Qwen3.5 MTP2 只需要 `Qwen/Qwen3.5-35B-A3B`，MTP head 已包含在 target che
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.15.1-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.15.2.post1-py3-none-any.whl
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
 
@@ -298,10 +311,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.15.1 --enable
+./manage.sh upgrade --version 0.15.2.post1 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.15.1-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.15.2.post1-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -325,12 +338,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.15.1` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由匹配源码版本的 Git tag（例如 `v0.15.2.post1`）触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.15.1
+export VSPEC_RELEASE_CONFIRM=0.15.2.post1
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```
