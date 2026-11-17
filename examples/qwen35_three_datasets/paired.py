@@ -250,8 +250,8 @@ def aligned_configs(
     kv_budget = common["kv_cache_memory_bytes"]
     if kv_budget is not None and (type(kv_budget) is not int or kv_budget <= 0):
         raise ValueError("Use null for automatic KV allocation or a positive byte budget")
-    if native_capacity not in (4, 6, 8):
-        raise ValueError("Native MTP candidate capacity must be 4, 6 or 8")
+    if native_capacity not in (2, 4, 6, 8):
+        raise ValueError("Native MTP candidate capacity must be 2, 4, 6 or 8")
     if not isinstance(common["compilation_config"], dict):
         raise ValueError("compilation_config must be identical JSON for both arms")
     if (
@@ -502,6 +502,10 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
             setup["paths"]["native_evaluation_static_dir"],
             setup["paths"]["native_evaluation_dir"],
         )
+        # Native's standalone backend assets live in the Python 3.11 venv.
+        # CANN's op_compiler inherits that PYTHONPATH, so use the matching
+        # interpreter instead of the host's Python 3.12 for static kernels.
+        env["HI_PYTHON"] = setup["paths"]["native_python"]
     else:
         # The dynamic backend is already in dynamic_python's site-packages.
         # Do not expose Python 3.11 packages to CANN's Python 3.12 compiler.
@@ -1410,12 +1414,44 @@ def _quality_from_summary(
 
     if summary.get("contract_sha256") != solver["plan_contract_sha256"]:
         raise RuntimeError("Judge summary belongs to a different frozen plan")
-    track = "gold" if dataset == "hle-verified" else "olympiad"
     tracks = summary["tracks"]
     if dataset == "hle-verified":
-        if tracks[track]["total"] != solver["case_count"]:
-            raise RuntimeError("HLE Gold score does not cover the complete solver selection")
+        if set(tracks) != {"gold", "revision"} or sum(
+            stats["total"] for stats in tracks.values()
+        ) != solver["case_count"]:
+            raise RuntimeError("HLE score does not cover the complete mixed selection")
+        for stats in tracks.values():
+            if (
+                type(stats["total"]) is not int
+                or type(stats["successes"]) is not int
+                or type(stats["unresolved"]) is not int
+                or stats["total"] <= 0
+                or stats["successes"] < 0
+                or stats["unresolved"] < 0
+                or stats["successes"] + stats["unresolved"] > stats["total"]
+            ):
+                raise RuntimeError("HLE judge summary contains invalid track counts")
+        total = solver["case_count"]
+        successes = sum(stats["successes"] for stats in tracks.values())
+        unresolved = sum(stats["unresolved"] for stats in tracks.values())
+        return {
+            "track": "mixed",
+            "tracks": {
+                name: {
+                    "successes": tracks[name]["successes"],
+                    "total": tracks[name]["total"],
+                    "unresolved": tracks[name]["unresolved"],
+                }
+                for name in ("gold", "revision")
+            },
+            "successes": successes,
+            "total": total,
+            "unresolved": unresolved,
+            "observed_lower_bound": successes / total,
+            "scoring_policy": summary["scoring_policy"],
+        }
     else:
+        track = "olympiad"
         selected_tracks = solver["selected_tracks"]
         if not isinstance(selected_tracks, dict) or sum(selected_tracks.values()) != solver[
             "case_count"
@@ -1498,14 +1534,18 @@ def score(args: argparse.Namespace) -> None:
             "--output",
             str(grades),
         ]
-        with (run_dir / "judge.log").open("x", encoding="utf-8") as log:
-            subprocess.run(
-                judge_cmd,
-                env=_client_env(args.client_source),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=True,
-            )
+        if not (grades / "index.json").is_file():
+            resume_judge = (grades / "run.json").is_file()
+            if resume_judge:
+                judge_cmd.append("--resume")
+            with (run_dir / "judge.log").open("a" if resume_judge else "x", encoding="utf-8") as log:
+                subprocess.run(
+                    judge_cmd,
+                    env=_client_env(args.client_source),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=True,
+                )
         summary_cmd = prefix + [
             "summary",
             "--plan",
@@ -1517,15 +1557,31 @@ def score(args: argparse.Namespace) -> None:
             "--output",
             str(summary_path),
         ]
-        with (run_dir / "summary.log").open("x", encoding="utf-8") as log:
-            subprocess.run(
-                summary_cmd,
-                env=_client_env(args.client_source),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=True,
-            )
+        if not (summary_path / "summary.json").is_file():
+            with (run_dir / "summary.log").open("x", encoding="utf-8") as log:
+                subprocess.run(
+                    summary_cmd,
+                    env=_client_env(args.client_source),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=True,
+                )
         summary = read_json(summary_path / "summary.json")
+        if (
+            summary.get("solver_index_sha256") != sha256(Path(receipt["solver_output"]) / "index.json")
+            or summary.get("judge_index_sha256") != sha256(grades / "index.json")
+        ):
+            raise RuntimeError("Judge summary index hashes differ from saved solver/judge records")
+        tracks = summary.get("tracks", {})
+        transport_failures = sum(
+            int(stats.get("judge_transport_failures", 0))
+            for stats in tracks.values()
+        )
+        if transport_failures:
+            raise RuntimeError(
+                f"Judge transport failed for {transport_failures} cases; "
+                "refusing to write a quality receipt"
+            )
     quality = _quality_from_summary(dataset, summary, receipt)
     result = {
         "schema_version": 1,
@@ -1707,7 +1763,7 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         p.add_argument("--" + name, required=True)
     p.add_argument("--port", type=int, required=True)
-    p.add_argument("--native-capacity", type=int, choices=(4, 6, 8), default=4)
+    p.add_argument("--native-capacity", type=int, choices=(2, 4, 6, 8), default=4)
     p.set_defaults(fn=prepare)
     p = sub.add_parser("run", help="start one arm, time one frozen solver selection, then stop it")
     p.add_argument("--setup", required=True)

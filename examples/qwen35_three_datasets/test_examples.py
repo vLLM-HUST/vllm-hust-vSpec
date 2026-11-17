@@ -206,7 +206,7 @@ class PublicExampleTests(unittest.TestCase):
     def test_auto_kv_and_native_depth_variants(self):
         config = common_config()
         config["kv_cache_memory_bytes"] = None
-        for capacity in (4, 6, 8):
+        for capacity in (2, 4, 6, 8):
             pair = paired.aligned_configs(
                 config, "/models/qwen", "test-solver", 18080, capacity
             )
@@ -600,13 +600,16 @@ class PublicExampleTests(unittest.TestCase):
         hle_summary = {
             "contract_sha256": "plan",
             "scoring_policy": "strict_json",
-            "tracks": {"gold": {"total": 2, "successes": 1, "unresolved": 1}},
+            "tracks": {
+                "gold": {"total": 1, "successes": 1, "unresolved": 0},
+                "revision": {"total": 1, "successes": 0, "unresolved": 1},
+            },
         }
         hle_quality = paired._quality_from_summary("hle-verified", hle_summary, hle_solver)
         self.assertEqual(hle_quality["observed_lower_bound"], 0.5)
         self.assertEqual(hle_quality["unresolved"], 1)
-        hle_summary["tracks"]["gold"]["total"] = 1
-        with self.assertRaisesRegex(RuntimeError, "complete solver selection"):
+        hle_summary["tracks"]["gold"]["total"] = 0
+        with self.assertRaisesRegex(RuntimeError, "complete mixed selection"):
             paired._quality_from_summary("hle-verified", hle_summary, hle_solver)
 
         frontier_solver = {

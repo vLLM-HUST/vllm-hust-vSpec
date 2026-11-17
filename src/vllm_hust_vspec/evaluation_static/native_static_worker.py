@@ -1,4 +1,4 @@
-"""Standalone native MTP4 worker extension for matched evaluation.
+"""Standalone native fixed-depth MTP worker extension for matched evaluation.
 
 The native child imports this file from its installed asset directory on
 PYTHONPATH. Keep every import here top-level so loading this extension never
@@ -31,7 +31,7 @@ _ORIGINAL_COMPILE, _STATISTICS = install_capture_guard(
 _ORIGINAL_OPTIONS = install_hot_options(compiler_config)
 
 
-def _require_native_mtp4(worker):
+def _require_native_mtp_depth(worker):
     import torch.distributed as dist
 
     root = Path(os.environ["HUST_VSPEC_PRIVATE_COMPILER_ROOT"]).resolve(strict=True)
@@ -41,9 +41,13 @@ def _require_native_mtp4(worker):
         name == "vllm_hust_vspec" or name.startswith("vllm_hust_vspec.") for name in sys.modules
     ):
         raise RuntimeError("Native worker imported the vSpec plugin")
-    if worker.vllm_config.speculative_config.num_speculative_tokens != 4:
-        raise RuntimeError("Native evaluation must use MTP4")
-    return root, dist.get_rank()
+    depth = worker.vllm_config.speculative_config.num_speculative_tokens
+    if depth not in (2, 4, 6, 8):
+        raise RuntimeError("Native evaluation requires fixed MTP2, MTP4, MTP6 or MTP8")
+    expected = int(os.environ["VSPEC_EVAL_NATIVE_CAPACITY"])
+    if depth != expected:
+        raise RuntimeError("Native MTP depth differs from the frozen run setup")
+    return root, dist.get_rank(), depth
 
 
 class NativeEvaluationWorker(EvaluationMetadataMixin, ReadOnlyStaticKernelWorkerObserver):
@@ -51,7 +55,7 @@ class NativeEvaluationWorker(EvaluationMetadataMixin, ReadOnlyStaticKernelWorker
         return self.get_vspec_readonly_compiler_state()
 
     def get_eval_static_state(self):
-        root, rank = _require_native_mtp4(self)
+        root, rank, depth = _require_native_mtp_depth(self)
         if _STATISTICS["static_compilation_deferred_inside_capture"] <= 0 or not CALLS:
             raise RuntimeError("Native capture-safe static compilation was not exercised")
         for row in CALLS:
@@ -64,7 +68,7 @@ class NativeEvaluationWorker(EvaluationMetadataMixin, ReadOnlyStaticKernelWorker
             "static_install": snapshot(static_kernel, root, rank, os.getpid()),
             "capture_safe_statistics": dict(_STATISTICS),
             "compiler_option_calls": deepcopy(CALLS),
-            "fixed_gamma": 4,
+            "fixed_gamma": depth,
             "vspec_plugin_absent": True,
             "common_hot_shape_rule": list(HOT),
             "FX_math_and_all_capture_keys_unmodified": True,

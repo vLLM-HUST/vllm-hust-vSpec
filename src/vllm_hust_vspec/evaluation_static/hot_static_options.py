@@ -36,11 +36,13 @@ def select(kwargs):
         or any(type(value) is not int or not 1 <= value <= 208 for value in existing)
         or existing != sorted(set(existing))
         or 14 not in existing
-        or 70 not in existing
+        or (max(existing) >= 70 and 70 not in existing)
     ):
-        raise ValueError("Unexpected static shape range")
+        raise ValueError(f"Unexpected static shape range: {existing}")
     result = deepcopy(kwargs)
     result["options"][_RANGE_KEY] = [value for value in HOT if value in existing]
+    if not result["options"][_RANGE_KEY]:
+        raise ValueError("No selected static shape is valid for this MTP depth")
     return result
 
 

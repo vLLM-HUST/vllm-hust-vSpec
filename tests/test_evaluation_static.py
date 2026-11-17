@@ -82,6 +82,21 @@ def test_hot_shapes_preserve_supplied_options_and_validate_contract():
         hot.select(bad)
 
 
+def test_hot_shapes_allow_native_mtp2_capture_range():
+    hot = _load("hot_static_options")
+    options = {
+        "options": {
+            "force_eager": True,
+            "inplace_pass": False,
+            "clone_input": False,
+            "clone_output": False,
+            "static_kernel_compile": True,
+            "_vllm_aclnn_static_kernel_sym_range": [3, 4, 8, 14, 35, 42, 48],
+        }
+    }
+    assert hot.select(options)["options"]["_vllm_aclnn_static_kernel_sym_range"] == [14, 42]
+
+
 def test_single_hot_shape_preserves_all_capture_keys(monkeypatch):
     monkeypatch.setenv("HUST_VSPEC_HOT_STATIC_SHAPES", "70")
     hot = _load("hot_static_options")

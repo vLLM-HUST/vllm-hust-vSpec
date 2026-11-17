@@ -7,12 +7,13 @@ import os
 from pathlib import Path
 
 import torch
-from vllm_hust_vspec.backends.experimental_paths import require_current_npu_proof
 
 PRIMITIVE = Path(os.environ.get('VSPEC_NATIVE_FIA_ARTIFACT_DIR', '/__vspec_artifacts_not_configured__'))
 
 
 def verify_primitive():
+    from vllm_hust_vspec.backends.experimental_paths import require_current_npu_proof
+
     proof_path = PRIMITIVE / 'primitive-native-audit-r1.json'
     proof = json.loads(proof_path.read_text())
     require_current_npu_proof(proof)

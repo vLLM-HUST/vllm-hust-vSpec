@@ -26,7 +26,7 @@ class Worker(common.EvaluationMetadataMixin):
         return {}
 
 
-@pytest.mark.parametrize("width", [4, 6, 8])
+@pytest.mark.parametrize("width", [2, 4, 6, 8])
 def test_native_capacity_matches_declared_arm(monkeypatch, width):
     monkeypatch.setenv("VSPEC_EVAL_ARM", "native")
     monkeypatch.setenv("VSPEC_EVAL_NATIVE_CAPACITY", str(width))
@@ -38,5 +38,5 @@ def test_native_capacity_mismatch_is_rejected(monkeypatch):
     monkeypatch.setenv("VSPEC_EVAL_ARM", "native")
     monkeypatch.setenv("VSPEC_EVAL_NATIVE_CAPACITY", "6")
     monkeypatch.setattr(common, "sys", NS(modules={}))
-    with pytest.raises(RuntimeError, match="not MTP6"):
+    with pytest.raises(RuntimeError, match="capacity=4, expected=6"):
         Worker(4).get_eval_metadata()
