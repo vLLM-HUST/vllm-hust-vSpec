@@ -2,7 +2,7 @@
 
 `vSpec-0.15.2` 分支当前源码版本为 `0.15.2.post1`。Qwen3.5 实验路径随插件提供后端补丁、算子源码及安装/验证入口；目标机器仍须准备兼容的驱动、CANN、Python 栈、模型、数据集和两张可用 NPU。单独执行 `pip install` 不会编译设备算子。完整安装步骤见[复现准备指南](docs/v0.15.1-reproduction.md)，其中底层依赖要求也适用于当前版本；安装包不包含模型、数据集或已针对其他机器编译的缓存。
 
-此版本补齐 Qwen3.5 MTP 的后端兼容与算子构建入口、目标机器上的验证流程，以及动态候选深度和静态图形状的配置支持。仓库保留[冻结题单评测入口](examples/issue18_frozen56/README.md)和[多数据集配对入口](examples/qwen35_three_datasets/README.md)；实测结果与收据由 benchmark 仓库单独托管，不纳入插件源码包。
+此版本补齐 Qwen3.5 MTP 的后端兼容与算子构建入口、目标机器上的验证流程，以及动态候选深度和静态图形状的配置支持。仓库保留[冻结题单评测入口](examples/issue18_frozen56/README.md)和[多数据集配对入口](examples/qwen35_three_datasets/README.md)；实测结果与收据应单独保存在 benchmark 仓库，不纳入插件源码包。
 
 完整安装入口 `./install.sh` 会在目标机器构建并安装匹配后端和所需算子、完成本机验证，并在私有目录生成 `runtime.env`。安装失败或证明路径缺失时，不应启用相应实验性功能。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不在该复现路径内。后端源码准备命令 `vllm-hust-vspec-prepare-backend` 只生成打补丁的源码副本，**不会**自行编译安装。底层源码版本和完整要求见[复现准备指南](docs/v0.15.1-reproduction.md)。
 
