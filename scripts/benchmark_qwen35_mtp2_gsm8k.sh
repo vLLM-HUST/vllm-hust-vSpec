@@ -28,7 +28,7 @@ ASCEND_SOURCE=${ASCEND_SOURCE:-/root/data/vllm-ascend-hust-latest}
 MODEL=${MODEL:-/workspace/models/Qwen3.5-35B-A3B}
 DATASET=${DATASET:-/root/data/vllm-ascend-hust/benchmark_results/gsm8k-baseline-20260901-vllm-hust/materialized.jsonl}
 CONFIG=${CONFIG:-${ROOT}/configs/qwen35-35b-a3b-mtp2.toml}
-NPU_IDS=${NPU_IDS:-0,1}
+NPU_IDS=${NPU_IDS:-}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-18185}
 BATCH_SIZE=${BATCH_SIZE:-16}
@@ -88,7 +88,9 @@ mkdir -p "${OUTPUT_DIR}"
 
 export PATH="${VENV}/bin:${PATH}"
 export PYTHONPATH="${ROOT}/src:${VLLM_SOURCE}:${ASCEND_SOURCE}${PYTHONPATH:+:${PYTHONPATH}}"
-export ASCEND_RT_VISIBLE_DEVICES="${NPU_IDS}"
+if [[ -n "${NPU_IDS}" ]]; then
+  export ASCEND_RT_VISIBLE_DEVICES="${NPU_IDS}"
+fi
 export PYTHONUNBUFFERED=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_USE_AOT_COMPILE=0
@@ -148,7 +150,6 @@ else
     --served-model-name "${SERVED_MODEL_NAME}"
     --host "${HOST}"
     --port "${PORT}"
-    --device "${NPU_IDS}"
     --gamma "${GAMMA}"
     "${LOCAL_ARGMAX_FLAG}"
     --max-num-seqs "${BATCH_SIZE}"
@@ -157,6 +158,9 @@ else
     --enable-expert-parallel
     --additional-config "${ASCEND_ADDITIONAL_CONFIG}"
   )
+  if [[ -n "${NPU_IDS}" ]]; then
+    SERVER_CMD+=(--device "${NPU_IDS}")
+  fi
 fi
 
 BENCHMARK_COMMON=(

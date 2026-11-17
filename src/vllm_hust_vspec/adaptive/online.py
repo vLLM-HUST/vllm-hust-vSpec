@@ -13,15 +13,18 @@ from .controller import ControllerDecision
 class _ArmWindow:
     useful_tokens: deque[float]
     latency_ms: deque[float]
+    batch_sizes: deque[float]
     total_observations: int = 0
     prior_reward: float = 0.0
     prior_weight: int = 0
+    expected_tokens_per_request: float | None = None
 
     @classmethod
     def create(cls, window_size: int) -> _ArmWindow:
         return cls(
             useful_tokens=deque(maxlen=window_size),
             latency_ms=deque(maxlen=window_size),
+            batch_sizes=deque(maxlen=window_size),
         )
 
     @property
@@ -36,6 +39,8 @@ class _ArmWindow:
     def mean_reward(self) -> float:
         total_latency = sum(self.latency_ms)
         measured_reward = sum(self.useful_tokens) / total_latency if total_latency else 0.0
+        if self.expected_tokens_per_request is not None and total_latency:
+            measured_reward = self.expected_tokens_per_request * sum(self.batch_sizes) / total_latency
         if not self.prior_weight:
             return measured_reward
         if not self.total_observations:
@@ -44,9 +49,10 @@ class _ArmWindow:
             measured_reward * self.total_observations + self.prior_reward * self.prior_weight
         ) / self.effective_observations
 
-    def record(self, useful_tokens: int, latency_ms: float) -> None:
+    def record(self, useful_tokens: int, latency_ms: float, *, batch_size: int = 1) -> None:
         self.useful_tokens.append(float(useful_tokens))
         self.latency_ms.append(latency_ms)
+        self.batch_sizes.append(float(batch_size))
         self.total_observations += 1
 
 
@@ -64,6 +70,14 @@ class _BatchBucket:
     seed_initialized: bool = False
     frontier_deferred_at_observations: int | None = None
     anchor_revalidation_at_observations: int | None = None
+    boundary_probed_arms: set[int] = field(default_factory=set)
+
+
+@dataclass
+class _PendingBoundaryProbe:
+    source_bucket_key: int
+    gamma: int
+    started: bool = False
 
 
 class OnlineGammaController:
@@ -94,6 +108,8 @@ class OnlineGammaController:
         probe_shared_cost_units: float = 2.0,
         candidate_stride: int = 1,
         candidate_batch_limits: dict[int, int] | None = None,
+        boundary_frontier_probe_after_observations: int = 0,
+        reward_normalization: bool = False,
     ) -> None:
         if not 0 <= min_gamma <= max_gamma:
             raise ValueError("min_gamma must be in [0, max_gamma]")
@@ -119,10 +135,16 @@ class OnlineGammaController:
             raise ValueError("candidate_stride must be positive")
         if (max_gamma - min_gamma) % candidate_stride:
             raise ValueError("candidate_stride must include max_gamma")
+        if boundary_frontier_probe_after_observations < 0:
+            raise ValueError("boundary frontier probe observations must be nonnegative")
         if max_gamma > min_gamma and max_gamma_step < candidate_stride:
             raise ValueError("max_gamma_step must reach the next candidate gamma")
 
         self.candidate_gammas = tuple(range(min_gamma, max_gamma + 1, candidate_stride))
+        if boundary_frontier_probe_after_observations and (
+            len(self.candidate_gammas) != 2 or self.candidate_gammas[0] != 4 or initial_gamma != 4
+        ):
+            raise ValueError("boundary frontier probing requires two MTP candidates anchored at gamma4")
         batch_limits = dict(candidate_batch_limits or {})
         invalid_limits = set(batch_limits).difference(self.candidate_gammas)
         if invalid_limits:
@@ -136,6 +158,11 @@ class OnlineGammaController:
         self.min_gamma = min_gamma
         self.candidate_stride = candidate_stride
         self.candidate_batch_limits = batch_limits
+        self.boundary_frontier_probe_after_observations = (
+            boundary_frontier_probe_after_observations
+        )
+        self._pending_boundary_probe: _PendingBoundaryProbe | None = None
+        self._boundary_probe_used = False
         numeric_midpoint = (min_gamma + max_gamma + 1) // 2
         midpoint_gamma = min(
             self.candidate_gammas,
@@ -154,6 +181,7 @@ class OnlineGammaController:
         self.warmup_return = warmup_return
         self.inflight_warmup_padding = inflight_warmup_padding
         self.probe_shared_cost_units = probe_shared_cost_units
+        self.reward_normalization = reward_normalization
         self.model_probe_min_observations = window_size
         self.deferred_exploration_observations = (
             window_size * 8 if min_gamma == 0 and max_gamma - min_gamma >= 4 else 0
@@ -348,6 +376,21 @@ class OnlineGammaController:
         latency_scale = (candidate_gamma + shared_cost_units) / (anchor_gamma + shared_cost_units)
         return anchor_reward * (candidate_tokens / anchor_tokens) / latency_scale
 
+    def _refresh_normalized_rewards(self) -> None:
+        """Compare measured costs under one CURRENT prefix-yield estimate.
+
+        Different cohorts need not have equal acceptance difficulty. Raw useful
+        tokens and latencies remain untouched. Only the measured component of
+        the selection score uses current expected yield; existing cold priors
+        and exploration/feasibility/cohort-lock rules are preserved.
+        """
+        if not self.reward_normalization:
+            return
+        expected = {gamma: self._expected_useful_tokens(gamma) for gamma in self.candidate_gammas}
+        for bucket in self._buckets.values():
+            for gamma, arm in bucket.arms.items():
+                arm.expected_tokens_per_request = expected[gamma]
+
     def candidate_is_feasible(self, gamma: int, batch_size: int) -> bool:
         if gamma not in self.candidate_gammas:
             return False
@@ -436,7 +479,7 @@ class OnlineGammaController:
             self.begin_step_feedback()
             return
         arm = self._bucket(batch_size).arms[gamma]
-        arm.record(useful_tokens, latency_ms)
+        arm.record(useful_tokens, latency_ms, batch_size=batch_size)
         self.latency_observations[gamma] += 1
         self._latency_sums[gamma] += latency_ms
         self.begin_step_feedback()
@@ -459,6 +502,7 @@ class OnlineGammaController:
         del context_tokens
         if gamma not in self.candidate_gammas:
             raise ValueError("gamma is outside the candidate set")
+        self._refresh_normalized_rewards()
         bucket = self._bucket(batch_size)
         arm = bucket.arms[gamma]
         if arm.observations:
@@ -514,6 +558,7 @@ class OnlineGammaController:
         )
 
     def summary(self) -> dict[str, object]:
+        self._refresh_normalized_rewards()
         buckets: dict[str, object] = {}
         for batch_size, bucket in sorted(self._buckets.items()):
             arms = {
@@ -521,6 +566,11 @@ class OnlineGammaController:
                     "observations": arm.observations,
                     "prior_weight": arm.prior_weight,
                     "mean_reward": round(arm.mean_reward, 6),
+                    **({"raw_useful_tokens": sum(arm.useful_tokens),
+                        "raw_latency_ms": sum(arm.latency_ms),
+                        "observed_batch_sizes": sum(arm.batch_sizes),
+                        "expected_tokens_per_request": arm.expected_tokens_per_request}
+                       if self.reward_normalization else {}),
                 }
                 for gamma, arm in sorted(bucket.arms.items())
                 if arm.observations
@@ -542,6 +592,7 @@ class OnlineGammaController:
                 "seeded_from_bucket": bucket.seeded_from_bucket,
                 "frontier_deferred_at_observations": (bucket.frontier_deferred_at_observations),
                 "anchor_revalidation_at_observations": (bucket.anchor_revalidation_at_observations),
+                "boundary_probed_arms": sorted(bucket.boundary_probed_arms),
                 "modeled_rewards": modeled_rewards,
                 "arms": arms,
             }
@@ -553,8 +604,22 @@ class OnlineGammaController:
             return round(row[1] / total, 6) if total else None
 
         return {
+            **({"reward_normalization": True} if self.reward_normalization else {}),
             "candidate_gammas": list(self.candidate_gammas),
             "candidate_batch_limits": dict(sorted(self.candidate_batch_limits.items())),
+            "boundary_frontier_probe_after_observations": (
+                self.boundary_frontier_probe_after_observations
+            ),
+            "boundary_probe_used": self._boundary_probe_used,
+            "boundary_probe_pending": (
+                None
+                if self._pending_boundary_probe is None
+                else {
+                    "source_bucket_key": self._pending_boundary_probe.source_bucket_key,
+                    "gamma": self._pending_boundary_probe.gamma,
+                    "started": self._pending_boundary_probe.started,
+                }
+            ),
             "initial_gamma": self.initial_gamma,
             "warmup_return": self.warmup_return,
             "model_probe_min_observations": self.model_probe_min_observations,
@@ -581,10 +646,23 @@ class OnlineGammaController:
             "batch_buckets": buckets,
         }
 
-    def choose(self, batch_size: int, context_tokens: int) -> ControllerDecision:
+    def mark_boundary_probe_started(self, gamma: int) -> None:
+        """Mark that the selected probe actually scheduled nonempty work."""
+        pending = self._pending_boundary_probe
+        if pending is not None and gamma == pending.gamma:
+            pending.started = True
+
+    def choose(
+        self,
+        batch_size: int,
+        context_tokens: int,
+        *,
+        at_cohort_boundary: bool = False,
+    ) -> ControllerDecision:
         if batch_size <= 0 or context_tokens < 0:
             raise ValueError("batch_size must be positive and context_tokens nonnegative")
         self._apply_pending_acceptance()
+        self._refresh_normalized_rewards()
         feasible = [
             gamma
             for gamma in self.candidate_gammas
@@ -607,6 +685,56 @@ class OnlineGammaController:
             )
 
         bucket_key = self.batch_bucket(batch_size)
+        pending_probe = self._pending_boundary_probe
+        if at_cohort_boundary and pending_probe is not None:
+            if not pending_probe.started:
+                return self._decision(
+                    previous_gamma,
+                    previous_gamma,
+                    0.0,
+                    0.0,
+                    "online_ucb_boundary_probe_wait_for_work",
+                )
+            source = self._buckets[pending_probe.source_bucket_key]
+            probe_gamma = pending_probe.gamma
+            measured_probe = (
+                source.arms[probe_gamma].observations >= self.warmup_samples
+            )
+            preferred = (
+                self._preferred_measured_gamma(source, [self.anchor_gamma, probe_gamma])
+                if measured_probe
+                else self.anchor_gamma
+            )
+            if measured_probe and preferred != previous_gamma:
+                # A completed boundary probe is an incumbent too. Applying
+                # the same configured relative deadband as steady state avoids
+                # reversing the entire next cohort for a near-tied old mean.
+                # No-feedback probes still return to the safe anchor below.
+                previous_reward = source.arms[previous_gamma].mean_reward
+                measured_gain = source.arms[preferred].mean_reward - previous_reward
+                if measured_gain < abs(previous_reward) * self.hysteresis:
+                    preferred = previous_gamma
+            selected = self._step_toward(previous_gamma, preferred, feasible)
+            source.warmup_return_completed = True
+            source.selected_gamma = preferred
+            source.selected_at_observations = source.arms[preferred].observations
+            source.scheduled_since_selection = 0
+            self._pending_boundary_probe = None
+            bucket = self._bucket(batch_size)
+            self._active_bucket_key = bucket_key
+            self._activate_bucket_gamma(bucket, selected)
+            self.current_gamma = selected
+            return self._decision(
+                selected,
+                previous_gamma,
+                source.arms[selected].mean_reward,
+                source.arms[previous_gamma].mean_reward,
+                (
+                    "online_ucb_boundary_probe_measured"
+                    if measured_probe
+                    else "online_ucb_boundary_probe_no_feedback"
+                ),
+            )
         bucket = self._bucket(batch_size)
         safe_anchor = min(
             feasible,
@@ -729,7 +857,17 @@ class OnlineGammaController:
         required_window = self.control_interval
         if previous_gamma not in bucket.launched_arms:
             required_window = self.warmup_samples + self.inflight_warmup_padding
-        if bucket.scheduled_since_selection < required_window:
+        # A cohort-locked async scheduler may execute hundreds of steps while
+        # calling choose() only at the next empty-engine boundary. Completed
+        # rewards are stronger evidence than scheduled (possibly in-flight)
+        # decisions, so let fresh observations satisfy the residence window.
+        # This changes *when* the next choice is eligible, not the chosen
+        # width of any in-flight cohort.
+        observed_since_selection = (
+            bucket.arms[previous_gamma].observations
+            - bucket.selected_at_observations
+        )
+        if max(bucket.scheduled_since_selection, observed_since_selection) < required_window:
             bucket.scheduled_since_selection += 1
             reason = (
                 "online_ucb_warmup_window"
@@ -821,6 +959,33 @@ class OnlineGammaController:
                     "online_ucb_probe_feedback_wait",
                 )
         unlaunched = [gamma for gamma in feasible if gamma not in bucket.launched_arms]
+        frontier = self.candidate_gammas[-1]
+        if (
+            self.boundary_frontier_probe_after_observations
+            and at_cohort_boundary
+            and not self._boundary_probe_used
+            and previous_gamma == self.anchor_gamma
+            and frontier in unlaunched
+            and frontier not in bucket.boundary_probed_arms
+            and bucket.arms[self.anchor_gamma].observations
+            >= self.boundary_frontier_probe_after_observations
+        ):
+            # One full drained cohort supplies a measured frontier reward.
+            # It is a bounded experiment, not a prior that permanently favors
+            # the frontier; the next empty boundary chooses observed goodput.
+            bucket.boundary_probed_arms.add(frontier)
+            bucket.launched_arms.add(frontier)
+            self._boundary_probe_used = True
+            self._pending_boundary_probe = _PendingBoundaryProbe(bucket_key, frontier)
+            self._activate_bucket_gamma(bucket, frontier)
+            self.current_gamma = frontier
+            return self._decision(
+                frontier,
+                previous_gamma,
+                bucket.arms[frontier].mean_reward,
+                previous_goodput,
+                "online_ucb_boundary_probe",
+            )
         if unlaunched and self.initial_gamma is not None:
             measured = [
                 gamma

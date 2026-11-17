@@ -55,7 +55,6 @@ SERVE_PROTOCOLS: dict[str, dict[str, Any]] = {
         "gpu_memory_utilization": 0.90,
         "host": "127.0.0.1",
         "port": 18185,
-        "device": "0,1",
         "graph_mode": "full-and-piecewise",
         "generation_config": "vllm",
         "async_scheduling": True,

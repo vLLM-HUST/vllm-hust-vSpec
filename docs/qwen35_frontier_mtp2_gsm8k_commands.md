@@ -115,7 +115,6 @@ vllm-hust-vspec \
   --served-model-name qwen3.5-35b-a3b-frontier-mtp2 \
   --host 127.0.0.1 \
   --port 18185 \
-  --device 0,1 \
   --max-num-seqs 16 \
   --no-mtp-local-argmax-reduction
 ```

@@ -1,12 +1,20 @@
 # vllm-hust-vSpec
 
+`vSpec-0.15.2` 分支当前源码版本为 `0.15.2.post1`。Qwen3.5 实验路径随插件提供后端补丁、算子源码及安装/验证入口；目标机器仍须准备兼容的驱动、CANN、Python 栈、模型、数据集和两张可用 NPU。单独执行 `pip install` 不会编译设备算子。完整安装步骤见[复现准备指南](docs/v0.15.1-reproduction.md)，其中底层依赖要求也适用于当前版本；安装包不包含模型、数据集或已针对其他机器编译的缓存。
+
+此版本补齐 Qwen3.5 MTP 的后端兼容与算子构建入口、目标机器上的验证流程，以及动态候选深度和静态图形状的配置支持。仓库保留[冻结题单评测入口](examples/issue18_frozen56/README.md)和[多数据集配对入口](examples/qwen35_three_datasets/README.md)；实测结果与收据应单独保存在 benchmark 仓库，不纳入插件源码包。
+
+完整安装入口 `./install.sh` 会在目标机器构建并安装匹配后端和所需算子、完成本机验证，并在私有目录生成 `runtime.env`。安装失败或证明路径缺失时，不应启用相应实验性功能。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不在该复现路径内。后端源码准备命令 `vllm-hust-vspec-prepare-backend` 只生成打补丁的源码副本，**不会**自行编译安装。底层源码版本和完整要求见[复现准备指南](docs/v0.15.1-reproduction.md)。
+
+内置的部分算子含 CANN 衍生源码，除本项目 Apache-2.0 许可证外，还须遵循对应目录中的 CANN Open Software License Agreement 2.0；构建和本机组件验证入口见 [实验性后端说明](docs/experimental-backend-bundle.md)。
+
 历史原件下载与校验见 [benchmark custody guide](docs/benchmark-originals.md)。
 
 `vllm-hust-vSpec` 是面向 vLLM-HUST + vLLM-Ascend-HUST 的独立
 `vllm.general_plugins` 投机解码插件。插件支持动态 gamma，并提供已验证的 Draft 、EAGLE 和 MTP 投机解码方案。
 
 Extension Manager ID：`org.vllm-hust.vspec`。插件遵循 Manifest
-`0.2-experimental` 的 `in_process_plugin` 边界，同时注册
+`0.3-experimental` 的 `in_process_plugin` 边界，同时注册
 `vllm.general_plugins` 运行入口和 `vllm_hust.extension_bundles` 静态发现入口。
 
 当前物理迁移范围、干净宿主 NPU 结果和剩余 ABI 边界见
@@ -44,8 +52,7 @@ Qwen3.5 的 Ascend 自定义算子必须使用与 `vllm-ascend` 二进制构建�
 # FULL_AND_PIECEWISE + 256K + adaptive MTP2 (gamma 2/4/6 + refill)
 vllm-hust-vspec \
   --protocol qwen35-frontier-mtp2 \
-  --target-model /workspace/models/Qwen3.5-35B-A3B \
-  --device 0,1
+  --target-model /workspace/models/Qwen3.5-35B-A3B
 
 # 同配置 GSM8K target-only / adaptive MTP2 配对回归；默认门槛 1.10x
 scripts/benchmark_qwen35_frontier_mtp2_gsm8k.sh pair
@@ -146,7 +153,7 @@ vllm-hust-vSpec/
 
 ## 安装
 
-统一管理入口默认安装当前版本 wheel；需要继续开发源码时使用 editable 模式：
+只需注册基础插件时，可用 Extension Manager 管理入口安装当前版本 wheel；开发源码可用 editable 模式：
 
 ```bash
 cd /path/to/vllm-hust-vSpec
@@ -155,7 +162,18 @@ cd /path/to/vllm-hust-vSpec
 ./manage.sh install --enable
 ```
 
-`./install.sh` 等价于 `./manage.sh install --editable`。安装会注册名为 `vspec` 的
+**这两种安装不会构建 Qwen3.5 实验路径所需的 Ascend 后端和算子。** 完整运行时安装使用独立入口，按目标机器填写路径，并预先安装[指定版本的底层依赖](docs/v0.15.1-reproduction.md)：
+
+```bash
+source <CANN_ROOT>/set_env.sh
+./install.sh --python <VENV_PYTHON> --wheel <VSPEC_WHEEL> \
+  --ascend-source <ASCEND_GIT_CHECKOUT> --vllm-source <PINNED_VLLM_SOURCE> \
+  --cann-root <CANN_ROOT> --model-dir <MODEL_DIR> \
+  --private-dir <NEW_PRIVATE_INSTALL_DIR>
+source <NEW_PRIVATE_INSTALL_DIR>/runtime.env
+```
+
+已有 wheel 安装、但没有仓库 checkout 时，可使用包内的 `vllm-hust-vspec-install-runtime` 命令执行同样的后端/算子安装步骤；此时不需要再传 `--wheel`。两个入口都会要求本机验证所需的可用 NPU。基础插件安装会注册名为 `vspec` 的
 `vllm.general_plugins` entry point 和 ID 为 `org.vllm-hust.vspec` 的
 `vllm_hust.extension_bundles` entry point。默认安装不会自动启用；`--enable` 会在
 Manager 完成静态发现和兼容性检查后显式启用。
@@ -179,7 +197,7 @@ Qwen3.5 MTP2 只需要 `Qwen/Qwen3.5-35B-A3B`，MTP head 已包含在 target che
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.14.3-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.15.2.post1-py3-none-any.whl
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
 
@@ -287,10 +305,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.14.3 --enable
+./manage.sh upgrade --version 0.15.2.post1 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.14.3-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.15.2.post1-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -314,12 +332,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由 `v0.14.3` 形式的 Git tag 触发 `.github/workflows/release.yml`。手工发布
+正式发布由匹配源码版本的 Git tag（例如 `v0.15.2.post1`）触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.14.3
+export VSPEC_RELEASE_CONFIRM=0.15.2.post1
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```

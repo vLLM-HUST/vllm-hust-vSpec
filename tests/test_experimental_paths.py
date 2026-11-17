@@ -1,0 +1,57 @@
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from vllm_hust_vspec.backends.experimental_paths import artifact_dir, configure_custom_opp, require_current_npu_proof
+
+
+def test_custom_ops_use_selected_installed_backend(tmp_path):
+    vendor = tmp_path / 'vllm_ascend/_cann_ops_custom/vendors/custom_transformer'
+    library = vendor / 'op_api/lib/libcust_opapi.so'
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b'test')
+    env = {'ASCEND_CUSTOM_OPP_PATH': '/old/backend', 'LD_LIBRARY_PATH': '/system/lib'}
+    configure_custom_opp(env, tmp_path)
+    assert env['ASCEND_CUSTOM_OPP_PATH'] == str(vendor)
+    assert env['LD_LIBRARY_PATH'] == f'{library.parent}:/system/lib'
+
+
+def test_custom_ops_fail_closed_when_not_installed(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        configure_custom_opp({}, tmp_path)
+
+
+def test_artifact_directory_defaults_to_unconfigured(monkeypatch):
+    monkeypatch.delenv('VSPEC_TEST_ARTIFACT_DIR', raising=False)
+    path = artifact_dir('VSPEC_TEST_ARTIFACT_DIR')
+    assert path == Path('/__vspec_artifacts_not_configured__/VSPEC_TEST_ARTIFACT_DIR')
+    assert not path.exists()
+
+
+def test_artifact_directory_uses_explicit_setting(monkeypatch, tmp_path):
+    monkeypatch.setenv('VSPEC_TEST_ARTIFACT_DIR', str(tmp_path))
+    assert artifact_dir('VSPEC_TEST_ARTIFACT_DIR') == tmp_path
+
+
+def test_proof_must_match_detected_allocation(monkeypatch):
+    monkeypatch.delenv('ASCEND_RT_VISIBLE_DEVICES', raising=False)
+    monkeypatch.delenv('ASCEND_VISIBLE_DEVICES', raising=False)
+    monkeypatch.setattr(subprocess, 'check_output', lambda *a, **kw:
+        ' 7 0 1 Ascend 910B2\n 3 0 0 Ascend 910B2\n 3 1 - Mcu\n')
+    require_current_npu_proof({'physical_npus': [3, 7]})
+    monkeypatch.setenv('ASCEND_RT_VISIBLE_DEVICES', '0,1')
+    require_current_npu_proof({'physical_npus': [3, 7]})
+    with pytest.raises(RuntimeError, match='does not match'):
+        require_current_npu_proof({'physical_npus': [3, 8]})
+
+
+def test_proof_rejects_ambiguous_allocation(monkeypatch):
+    monkeypatch.delenv('ASCEND_VISIBLE_DEVICES', raising=False)
+    monkeypatch.setenv('ASCEND_RT_VISIBLE_DEVICES', '1,0')
+    with pytest.raises(RuntimeError, match='prevents validating'):
+        require_current_npu_proof({'physical_npus': [3, 7]})
+    monkeypatch.delenv('ASCEND_RT_VISIBLE_DEVICES')
+    monkeypatch.setattr(subprocess, 'check_output', lambda *a, **kw: ' 3 0 0 Ascend 910B2\n')
+    with pytest.raises(RuntimeError, match='exactly two'):
+        require_current_npu_proof({'physical_npus': [3, 7]})

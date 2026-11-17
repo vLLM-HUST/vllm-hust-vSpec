@@ -1,0 +1,838 @@
+diff --git a/vllm_ascend/attention/attention_v1.py b/vllm_ascend/attention/attention_v1.py
+index bfa4d2556..97899f0f4 100644
+--- a/vllm_ascend/attention/attention_v1.py
++++ b/vllm_ascend/attention/attention_v1.py
+@@ -24,6 +24,7 @@ import torch_npu
+ import vllm.envs as envs_vllm
+ from vllm.config import VllmConfig, get_current_vllm_config
+ from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
++from vllm.forward_context import get_forward_context
+ from vllm.utils.math_utils import cdiv
+ from vllm.utils.torch_utils import get_dtype_size
+ from vllm.v1.attention.backend import (  # type: ignore
+@@ -601,6 +602,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
+         speculative_config=None,
+         draft_attn_metadatas=None,
+     ):
++        if not _EXTRA_CTX.is_draft_model:
++            for metadata in forward_context.attn_metadata.values():
++                masked = getattr(metadata, 'q35_masked_fia', None)
++                if masked is not None and masked.has_capture(forward_context, num_tokens):
++                    masked.update(update_stream, num_tokens, forward_context)
++                    return
+         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
+         if using_paged_attention(num_tokens, vllm_config):
+             # Paged Attention update logic
+@@ -850,6 +857,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
+                 attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
+             attn_count = 0
+             layer_count = 0
++            host_batch = getattr(forward_context, 'q35_native_fia_host_batch', None)
++            if host_batch is not None and host_batch.try_update(
++                update_stream, forward_context, num_tokens, graph_params, attn_keys,
++                captured_attn_params, handles, events, workspace, attn_metadata,
++                draft_attn_key_steps if _EXTRA_CTX.is_draft_model else None, _EXTRA_CTX.is_draft_model,
++            ):
++                return
+             with torch.npu.stream(update_stream):
+                 for key, param, handle, event in zip(
+                     attn_keys,
+@@ -976,6 +990,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
+         output: torch.Tensor,
+         layer=None,
+     ) -> torch.Tensor:
++        masked = getattr(attn_metadata, 'q35_masked_fia', None)
++        if masked is not None and not _EXTRA_CTX.is_draft_model:
++            return masked.capture(self, query, key, value, attn_metadata, output, get_forward_context())
+         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+ 
+         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+diff --git a/vllm_ascend/compilation/acl_graph.py b/vllm_ascend/compilation/acl_graph.py
+index 09a044aac..32f73f23b 100644
+--- a/vllm_ascend/compilation/acl_graph.py
++++ b/vllm_ascend/compilation/acl_graph.py
+@@ -21,6 +21,8 @@ from vllm.logger import logger
+ from vllm.platforms import current_platform
+ 
+ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
++from vllm_ascend.compilation.q35_replay_tail import Q35ReplayTail
++from vllm_ascend.compilation.q35_twin_graph import Q35TwinGraph, route_params
+ 
+ from ..utils import vllm_version_is, weak_ref_tensors
+ 
+@@ -114,6 +116,10 @@ class ACLGraphWrapper:
+         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
+         self.enable_enpu = enable_enpu
+         self.use_eagle = use_eagle
++        self._q35_replay_tail = Q35ReplayTail(vllm_config, runtime_mode == CUDAGraphMode.FULL,
++                                              use_eagle, enable_enpu)
++        self._q35_twin_graph = Q35TwinGraph(vllm_config, runtime_mode == CUDAGraphMode.FULL,
++                                          use_eagle, enable_enpu)
+         _acl_graph_wrappers.add(self)
+ 
+     def __getattr__(self, key: str):
+@@ -131,11 +137,15 @@ class ACLGraphWrapper:
+         return self.runnable
+ 
+     def __call__(self, *args, **kwargs):
++        return self._q35_twin_graph.call(self, self._q35_native_call, *args, **kwargs)
++
++    def _q35_native_call(self, *args, **kwargs):
+         forward_context = get_forward_context()
+         batch_descriptor = forward_context.batch_descriptor
+         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
+ 
+         if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
++            self._q35_replay_tail.invalidate()
+             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
+             # running without aclgraphs.
+             # We do not trigger capture/replay if the runtime mode is not
+@@ -151,6 +161,7 @@ class ACLGraphWrapper:
+         entry = self.concrete_aclgraph_entries[batch_descriptor]
+ 
+         if entry.aclgraph is None:
++            self._q35_replay_tail.invalidate()
+             if self.aclgraph_options.debug_log_enable:
+                 # Since we capture aclgraph for many different shapes and
+                 # capturing is fast, we don't need to log it for every
+@@ -261,9 +272,20 @@ class ACLGraphWrapper:
+         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+-        if not self.enable_enpu and need_sync:
+-            torch.npu.current_stream().synchronize()
++        need_tail = self._q35_replay_tail.enabled
++        need_twin = self._q35_twin_graph.active_entry(forward_context, entry)
++        # The old target full-stream barrier also protected the preceding
++        # merged-draft graph's mutable attention handles. If shortened, each
++        # wrapper must independently wait for its own preceding replay.
++        if not self.enable_enpu and (need_sync or need_tail or need_twin):
++            self._q35_replay_tail.bind_role(is_draft_eagle)
++            stream = torch.npu.current_stream()
++            if (not self._q35_twin_graph.consume_verified_fence(forward_context, entry)
++                    and not self._q35_replay_tail.before(stream, batch_descriptor)):
++                stream.synchronize()
+         entry.aclgraph.replay()
++        if not self.enable_enpu and (need_sync or need_tail or need_twin):
++            self._q35_replay_tail.after(stream)
+         return entry.output
+ 
+ 
+@@ -339,11 +361,11 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
+ def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
+     global _graph_params
+     if _graph_params is not None:
+-        _graph_params.workspaces[num_tokens] = workspace
++        get_graph_params().workspaces[num_tokens] = workspace
+ 
+ 
+ def get_graph_params():
+-    return _graph_params
++    return route_params(_graph_params, 'target')
+ 
+ 
+ _draft_graph_params: GraphParams | None = None
+@@ -364,11 +386,11 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
+ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
+     global _draft_graph_params
+     if _draft_graph_params is not None:
+-        _draft_graph_params.workspaces[num_tokens] = workspace
++        get_draft_graph_params().workspaces[num_tokens] = workspace
+ 
+ 
+ def get_draft_graph_params():
+-    return _draft_graph_params
++    return route_params(_draft_graph_params, 'draft')
+ 
+ 
+ _draft_graph_prefill_params: GraphParams | None = None
+diff --git a/vllm_ascend/envs.py b/vllm_ascend/envs.py
+index 022a9585b..535dee0dc 100644
+--- a/vllm_ascend/envs.py
++++ b/vllm_ascend/envs.py
+@@ -28,6 +28,72 @@ from typing import Any
+ # begin-env-vars-definition
+ 
+ env_variables: dict[str, Callable[[], Any]] = {
++    # Private BF16 Q35 serial MoE immutable ND router cache and exact gate.
++    # off(default), validate(bitwise native shadows), on; non-sensitive.
++    # Native FP32 router arithmetic and BF16 sigmoid rounding are retained;
++    # unsupported layouts, communication modes and batches fall back.
++    "VLLM_ASCEND_Q35_MOE_IMMUTABLE_CACHE": lambda: os.getenv("VLLM_ASCEND_Q35_MOE_IMMUTABLE_CACHE", "off"),
++    # Private BF16 Q35 TP2/DP1/PP1 native rotary lookup reuse, non-sensitive.
++    # off(default), validate(per-layer native bitwise shadows), on.
++    # Original native bounds check is retained; only same-forward target
++    # lookups sharing identical immutable cache storage may reuse a tensor.
++    "VLLM_ASCEND_Q35_NATIVE_LOOKUP": lambda: os.getenv("VLLM_ASCEND_Q35_NATIVE_LOOKUP", "off"),
++    # Private exact BF16 Q35 immutable convolution-weight layout cache.
++    # off(default), validate(bitwise output/full-state shadows), on; non-sensitive.
++    "VLLM_ASCEND_Q35_CACHED_CONV": lambda: os.getenv("VLLM_ASCEND_Q35_CACHED_CONV", "off"),
++    # Private native-arithmetic Q35 fourteen-request RGDR buffer reuse.
++    # off(default), validate(output/full-FP32-state replay shadows), on; non-sensitive.
++    "VLLM_ASCEND_Q35_RGDR_REUSE": lambda: os.getenv("VLLM_ASCEND_Q35_RGDR_REUSE", "off"),
++    # Private native-top8 expert-map gather/predicate/multiply fusion.
++    # off(default), validate(captured bitwise shadow), on; non-sensitive.
++    "VLLM_ASCEND_Q35_EXPERT_MASK": lambda: os.getenv("VLLM_ASCEND_Q35_EXPERT_MASK", "off"),
++    # Private BF16 Q35 TP2 MTP4/6 owned twin FULL graphs; non-sensitive.
++    # off(default), validate(resource/fence coverage), on. Each graph's own
++    # previous generation must complete before mutable FIA task updates.
++    "VLLM_ASCEND_Q35_TWIN_GRAPH": lambda: os.getenv("VLLM_ASCEND_Q35_TWIN_GRAPH", "off"),
++    # Private unquantized Q35 TP2/EP2 single-stream MoE event elision.
++    # off(default), validate(native-shadow admission lane), on. Non-sensitive.
++    # Only removes same-stream events/waits, never cross-stream collectives.
++    "VLLM_ASCEND_Q35_SINGLE_STREAM_MOE_EVENTS": lambda: os.getenv("VLLM_ASCEND_Q35_SINGLE_STREAM_MOE_EVENTS", "off"),
++    # Private Q35 BF16 TP2 async monotonic live4->6 growth, non-sensitive.
++    # off(default); validate(forced coverage plus native tensor shadows); on
++    # (periodicity-triggered). Two drained queue/device fences are mandatory:
++    # one before old-width bridge, one before the first actual wide frame.
++    "VLLM_ASCEND_Q35_QUIESCENT_GROWTH": lambda: os.getenv("VLLM_ASCEND_Q35_QUIESCENT_GROWTH", "off"),
++    # Private BF16 Q35 TP2 pure-spec GDN input fusion, non-sensitive.
++    # off(default), validate(captured native-shadow GPU comparisons), on.
++    # Recurrence/state/weights/sampling unchanged; stats reset after capture.
++    "VLLM_ASCEND_Q35_GDN_INPUT_FUSION": lambda: os.getenv("VLLM_ASCEND_Q35_GDN_INPUT_FUSION", "off"),
++    # Private exact Q35 integer-position preparation, non-sensitive. "0"
++    # (default) preserves the original per-length specialization; "1" makes
++    # only TOKENS runtime/unspecialized. Other values fail initialization.
++    "VLLM_ASCEND_Q35_RUNTIME_POSITION_LENGTH": lambda: os.getenv("VLLM_ASCEND_Q35_RUNTIME_POSITION_LENGTH", "0"),
++    # Private Q35 async-MTP target replay ordering experiment; non-sensitive.
++    # off (default), validate (assert prior graph event completion), or on.
++    # Retains independent target/draft prior-graph waits and native per-layer
++    # update events; never removes the draft task-handle ordering guarantee.
++    "VLLM_ASCEND_Q35_REPLAY_TAIL": lambda: os.getenv("VLLM_ASCEND_Q35_REPLAY_TAIL", "off"),
++    # Private accepted-count CPU wait placement, non-sensitive. off (default),
++    # validate (native GDN and TND shadows with corrected counts), or on.
++    # Only admitted pure-decode exact-masked attention/device GDN may defer.
++    "VLLM_ASCEND_Q35_LATE_CORRECTION": lambda: os.getenv("VLLM_ASCEND_Q35_LATE_CORRECTION", "off"),
++    # Private exact device-masked target FIA experiment, non-sensitive.
++    # off (default), validate (native TND shadow on every full-graph layer),
++    # or on. Keeps native CPU correction and strict rejection unchanged.
++    "VLLM_ASCEND_Q35_MASKED_FIA": lambda: os.getenv("VLLM_ASCEND_Q35_MASKED_FIA", "off"),
++    # Private Qwen3.5 async-MTP preparation experiment; non-sensitive.
++    # off (default), validate (compare cached indices with native results),
++    # or on. Reuses immutable uniform gamma4/gamma6 decode indices and moves
++    # the existing CPU count wait after independent input preparation.
++    "VLLM_ASCEND_Q35_PREPARE_OPTIMIZATIONS": lambda: os.getenv(
++        "VLLM_ASCEND_Q35_PREPARE_OPTIMIZATIONS", "off"
++    ),
++    # Private Qwen3.5 MTP6 experiment. Non-sensitive; off (default), validate
++    # (compare each fused refresh with native builders), or on. Never enabled
++    # for capture, prefill, padded/ubatched frames, or other model families.
++    "VLLM_ASCEND_Q35_GDN_FUSED_REFRESH": lambda: os.getenv(
++        "VLLM_ASCEND_Q35_GDN_FUSED_REFRESH", "off"
++    ),
+     # max compile thread number for package building. Usually, it is set to
+     # the number of CPU cores. If not set, the default value is None, which
+     # means all number of CPU cores will be used.
+diff --git a/vllm_ascend/ops/fused_moe/fused_moe.py b/vllm_ascend/ops/fused_moe/fused_moe.py
+index 24f30b4d3..d3a50dac8 100644
+--- a/vllm_ascend/ops/fused_moe/fused_moe.py
++++ b/vllm_ascend/ops/fused_moe/fused_moe.py
+@@ -34,6 +34,8 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
+     SharedExpertParallelMode,
+ )
+ from vllm_ascend.utils import vllm_version_is
++from vllm_ascend.ops.fused_moe.q35_single_stream_events import admit, skip_events
++from vllm_ascend.ops.fused_moe.q35_immutable_cache import router_linear
+ 
+ 
+ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+@@ -87,6 +89,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+             )
+ 
+         setup_moe_comm_method(self.moe_config)
++        self._q35_single_stream_events = admit(self)
++        if self.ascend_shared_experts is not None:
++            self.ascend_shared_experts._q35_single_stream_events = self._q35_single_stream_events
++        allgather_comm = get_moe_comm_method(MoECommType.ALLGATHER)
++        if allgather_comm is not None:
++            allgather_comm._q35_single_stream_events = self._q35_single_stream_events
+         alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+         if alltoall_comm is not None:
+             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
+@@ -241,12 +249,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+                     # linear is unquantized so that we the weight is pre-casted in
+                     # process_weights_after_loading of AscendUnquantizedLinearMethod.
+                     hidden_states_fp32 = shared_hidden_states.float()
+-                    before_routed_experts = torch.npu.current_stream().record_event()
++                    before_routed_experts = None if skip_events(self) else torch.npu.current_stream().record_event()
+                     # v0.27.1: weight_fp32 is guaranteed by is_internal_router.
+-                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+-                    after_routed_experts = torch.npu.current_stream().record_event()
++                    router_logits = router_linear(self, hidden_states_fp32, gate)
++                    after_routed_experts = None if skip_events(self) else torch.npu.current_stream().record_event()
+                 else:
+-                    before_routed_experts = torch.npu.current_stream().record_event()
++                    before_routed_experts = None if skip_events(self) else torch.npu.current_stream().record_event()
+                     after_routed_experts = None
+ 
+                 if shared_input_all_gather_done is not None:
+@@ -284,10 +292,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+                         gate = self.gate
+                         assert gate is not None
+                         hidden_states_fp32 = hidden_states.float()
+-                        router_logits = F.linear(
+-                            hidden_states_fp32,
+-                            gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
+-                        )
++                        router_logits = router_linear(self, hidden_states_fp32, gate)
+                     return self.routed_experts.forward_impl(
+                         hidden_states=hidden_states,
+                         router_logits=router_logits,
+@@ -304,16 +309,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+                     # linear is unquantized so that we the weight is pre-casted in
+                     # process_weights_after_loading of AscendUnquantizedLinearMethod.
+                     hidden_states_fp32 = shared_hidden_states.float()
+-                    before_routed_experts = torch.npu.current_stream().record_event()
++                    before_routed_experts = None if skip_events(self) else torch.npu.current_stream().record_event()
+                     # main (cdc4824a21): is_internal_router only checks self.gate,
+                     # weight_fp32 may be absent, fall back to gate.weight.
+-                    router_logits = F.linear(
+-                        hidden_states_fp32,
+-                        gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
+-                    )
+-                    after_routed_experts = torch.npu.current_stream().record_event()
++                    router_logits = router_linear(self, hidden_states_fp32, gate)
++                    after_routed_experts = None if skip_events(self) else torch.npu.current_stream().record_event()
+                 else:
+-                    before_routed_experts = torch.npu.current_stream().record_event()
++                    before_routed_experts = None if skip_events(self) else torch.npu.current_stream().record_event()
+                     after_routed_experts = None
+ 
+                 if shared_input_all_gather_done is not None:
+diff --git a/vllm_ascend/ops/fused_moe/moe_comm_method.py b/vllm_ascend/ops/fused_moe/moe_comm_method.py
+index cac278191..81c11570f 100644
+--- a/vllm_ascend/ops/fused_moe/moe_comm_method.py
++++ b/vllm_ascend/ops/fused_moe/moe_comm_method.py
+@@ -31,6 +31,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, buil
+ from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+ from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
++from vllm_ascend.ops.fused_moe.q35_single_stream_events import skip_events
+ from vllm_ascend.ops.fused_moe.prepare_finalize import (
+     PrepareAndFinalize,
+     PrepareAndFinalizeWithAll2All,
+@@ -131,7 +132,7 @@ class MoECommMethod(ABC):
+         moe_comm_method = _EXTRA_CTX.moe_comm_method
+         assert moe_comm_method is not None, "Missing communication context"
+ 
+-        before_dispatch_evt = torch.npu.current_stream().record_event()
++        before_dispatch_evt = None if skip_events(self) else torch.npu.current_stream().record_event()
+ 
+         token_dispatch_input = build_token_dispatch_input(
+             fused_experts_input=fused_experts_input,
+@@ -146,7 +147,7 @@ class MoECommMethod(ABC):
+ 
+         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
+ 
+-        before_combine_evt = torch.npu.current_stream().record_event()
++        before_combine_evt = None if skip_events(self) else torch.npu.current_stream().record_event()
+         routed_out = self.token_dispatcher.token_combine(
+             hidden_states=mlp_output,
+             combine_metadata=token_dispatch_output.combine_metadata,
+diff --git a/vllm_ascend/ops/fused_moe/shared_experts.py b/vllm_ascend/ops/fused_moe/shared_experts.py
+index 3dfc78d8f..56ca737ff 100644
+--- a/vllm_ascend/ops/fused_moe/shared_experts.py
++++ b/vllm_ascend/ops/fused_moe/shared_experts.py
+@@ -30,6 +30,7 @@ from vllm_ascend.ascend_config import get_ascend_config
+ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+ from vllm_ascend.lora.fused_moe import has_lora
+ from vllm_ascend.quantization.quant_type import QuantType
++from vllm_ascend.ops.fused_moe.q35_single_stream_events import skip_events
+ from vllm_ascend.utils import (
+     AscendDeviceType,
+     get_ascend_device_type,
+@@ -162,7 +163,9 @@ class AscendSharedExperts:
+         # Qwen3-Next specific gating mechanism
+         if hasattr(self.layer, "expert_gate") and self.layer.expert_gate is not None:
+             gate_out, _ = self.layer.expert_gate(hidden_states)  # type: ignore
+-            shared_out = F.sigmoid(gate_out) * shared_out
++            cache_helper = getattr(self, '_q35_immutable_cache', None)
++            fused_gate = cache_helper.shared_gate(gate_out, shared_out) if cache_helper is not None else None
++            shared_out = F.sigmoid(gate_out) * shared_out if fused_gate is None else fused_gate
+         return shared_out
+ 
+     def parallel_mode(self) -> SharedExpertParallelMode:
+@@ -390,7 +393,8 @@ class AscendSharedExperts:
+                 shared_out = self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+             else:
+                 # Ensure the shared experts wait for hidden_states to be ready.
+-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
++                if not skip_events(self):
++                    torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                 # Execute the gate projection and activation concurrently with the
+                 # dispatch communication.
+                 maybe_wait_event(fused_moe_evts.before_dispatch)
+diff --git a/vllm_ascend/ops/fused_moe/token_dispatcher.py b/vllm_ascend/ops/fused_moe/token_dispatcher.py
+index 066b033be..f2368872e 100644
+--- a/vllm_ascend/ops/fused_moe/token_dispatcher.py
++++ b/vllm_ascend/ops/fused_moe/token_dispatcher.py
+@@ -48,6 +48,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
+     TMoECombineMetadata,
+ )
+ from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
++from vllm_ascend.ops.fused_moe.q35_expert_mask import Q35ExpertMask
+ from vllm_ascend.quantization.quant_type import QuantType
+ from vllm_ascend.utils import (
+     AscendDeviceType,
+@@ -338,6 +339,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
+         self.num_experts_local = (
+             num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
+         )
++        self._q35_expert_mask = Q35ExpertMask(self.top_k, self.num_experts_local)
+ 
+     def token_dispatch(
+         self,
+@@ -388,8 +390,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
+             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
+         if expert_map is not None:
+             global_num_experts = len(expert_map) + global_redundant_expert_num
+-            mask = expert_map[topk_ids] != -1
+-            topk_weights = topk_weights * mask
++            fused_weights = self._q35_expert_mask.apply(topk_ids, topk_weights, expert_map)
++            if fused_weights is None:
++                mask = expert_map[topk_ids] != -1
++                topk_weights = topk_weights * mask
++            else:
++                topk_weights = fused_weights
+             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
+             last_expert_idx = first_expert_idx + self.num_experts_local
+         else:
+diff --git a/vllm_ascend/ops/gdn.py b/vllm_ascend/ops/gdn.py
+index 798353b3e..831519a58 100644
+--- a/vllm_ascend/ops/gdn.py
++++ b/vllm_ascend/ops/gdn.py
+@@ -321,20 +321,26 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
+             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
+             output_spec = torch.empty_like(mixed_qkv_spec)
+-            torch.ops._C_ascend.npu_causal_conv1d_custom(
+-                output_spec,
+-                mixed_qkv_spec,
+-                conv_weights_T,
+-                conv_state=self_kv_cache[0],
+-                bias_opt=self.conv1d.bias,
+-                query_start_loc_opt=spec_query_start_loc_device,
+-                cache_indices_opt=spec_causal_conv1d_meta.cache_indices,
+-                initial_state_mode_opt=None,
+-                num_accepted_tokens_opt=spec_causal_conv1d_meta.num_accepted_tokens,
+-                activation_mode=activation_num,
+-                pad_slot_id=PAD_SLOT_ID,
+-                run_mode=1,
+-            )
++            cached_conv = getattr(self, '_q35_cached_conv', None)
++            cached_applied = cached_conv is not None and cached_conv.apply(
++                output_spec, mixed_qkv_spec, conv_weights_T, self_kv_cache[0], self.conv1d.bias,
++                spec_query_start_loc_device, spec_causal_conv1d_meta.cache_indices,
++                spec_causal_conv1d_meta.num_accepted_tokens, attn_metadata, activation_num)
++            if not cached_applied:
++                torch.ops._C_ascend.npu_causal_conv1d_custom(
++                    output_spec,
++                    mixed_qkv_spec,
++                    conv_weights_T,
++                    conv_state=self_kv_cache[0],
++                    bias_opt=self.conv1d.bias,
++                    query_start_loc_opt=spec_query_start_loc_device,
++                    cache_indices_opt=spec_causal_conv1d_meta.cache_indices,
++                    initial_state_mode_opt=None,
++                    num_accepted_tokens_opt=spec_causal_conv1d_meta.num_accepted_tokens,
++                    activation_mode=activation_num,
++                    pad_slot_id=PAD_SLOT_ID,
++                    run_mode=1,
++                )
+             mixed_qkv_spec = output_spec
+ 
+         # 1.2: Process the remaining part
+@@ -430,11 +436,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+         else:
+             mixed_qkv_non_spec = None
+ 
+-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
++        fusion_helper = getattr(self, '_q35_input_fusion', None)
++        fused_inputs = fusion_helper.apply(attn_metadata, mixed_qkv_spec, a, b) if fusion_helper is not None else None
++        if fused_inputs is None:
++            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
++            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+ 
+-        # 2. Recurrent attention
+-        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
++            # 2. Recurrent attention
++            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
++        else:
++            query_spec, key_spec, value_spec, g, beta = fused_inputs
++            query_non_spec = key_non_spec = value_non_spec = None
+         if spec_sequence_masks is not None:
+             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                 g_spec = g
+@@ -460,13 +472,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+         # 2.1: Process the multi-query part
+         if spec_sequence_masks is not None:
+             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+-            query_spec = l2norm_fwd(query_spec)
+-            key_spec = l2norm_fwd(key_spec)
++            if fused_inputs is None:
++                query_spec = l2norm_fwd(query_spec)
++                key_spec = l2norm_fwd(key_spec)
+             # Dispatches to the vllm-ascend AscendC custom operator
+             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+             # The custom op extends dtype support (e.g. float32 state) and is
+             # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
+-            core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
++            rgdr_reuse = getattr(self, '_q35_rgdr_reuse', None)
++            reused = rgdr_reuse.apply(
++                attn_metadata,
++                (query_spec.squeeze(0), key_spec.squeeze(0), value_spec.squeeze(0),
++                 g_spec.squeeze(0), beta_spec.squeeze(0)),
++                ssm_state, actual_seq_lengths, spec_state_indices_tensor.flatten(),
++                spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32), fused_inputs is not None,
++            ) if rgdr_reuse is not None else None
++            core_attn_out_spec = (reused if reused is not None else torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                 query=query_spec.squeeze(0),
+                 key=key_spec.squeeze(0),
+                 value=value_spec.squeeze(0),
+@@ -477,7 +498,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+                 actual_seq_lengths=actual_seq_lengths,
+                 ssm_state_indices=spec_state_indices_tensor.flatten(),
+                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+-            ).unsqueeze(0)
++            )).unsqueeze(0)
+         else:
+             core_attn_out_spec, last_recurrent_state = None, None
+ 
+diff --git a/vllm_ascend/patch/worker/patch_qwen3_5.py b/vllm_ascend/patch/worker/patch_qwen3_5.py
+index ea2a5dd16..de892256f 100644
+--- a/vllm_ascend/patch/worker/patch_qwen3_5.py
++++ b/vllm_ascend/patch/worker/patch_qwen3_5.py
+@@ -66,16 +66,22 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
+     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
+         qkv, _ = self.qkv_proj(hidden_states)
+         if _uses_multimodal_rope(self):
+-            cos_sin = self.rotary_emb.cos_sin_cache[positions]
+-            if cos_sin.device != qkv.device:
+-                cos_sin = cos_sin.to(qkv.device)
+-            if cos_sin.dtype != qkv.dtype:
+-                cos_sin = cos_sin.to(qkv.dtype)
++            lookup_helper = getattr(self, '_q35_lookup_cache', None)
++            if lookup_helper is not None:
++                cos_sin = torch.ops.vllm.q35_native_rotary_lookup(positions, self.attn.layer_name)
++                q_weight, k_weight = lookup_helper.q_weight, lookup_helper.k_weight
++            else:
++                cos_sin = self.rotary_emb.cos_sin_cache[positions]
++                if cos_sin.device != qkv.device:
++                    cos_sin = cos_sin.to(qkv.device)
++                if cos_sin.dtype != qkv.dtype:
++                    cos_sin = cos_sin.to(qkv.dtype)
++                q_weight, k_weight = 1.0 + self.q_norm.weight, 1.0 + self.k_norm.weight
+ 
+             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+                 qkv=qkv,
+-                q_weight=1.0 + self.q_norm.weight,
+-                k_weight=1.0 + self.k_norm.weight,
++                q_weight=q_weight,
++                k_weight=k_weight,
+                 cos_sin=cos_sin,
+                 num_q_heads=self.num_heads,
+                 num_kv_heads=self.num_kv_heads,
+diff --git a/vllm_ascend/spec_decode/llm_base_proposer.py b/vllm_ascend/spec_decode/llm_base_proposer.py
+index 3a5494396..341d4e79a 100644
+--- a/vllm_ascend/spec_decode/llm_base_proposer.py
++++ b/vllm_ascend/spec_decode/llm_base_proposer.py
+@@ -2253,6 +2253,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
+     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
+         assert len(self.draft_attn_groups) > 0
+         attn_backend = self.draft_attn_groups[0].backend
++        helper = getattr(self.runner, '_q35_native_fia_host_batch', None)
++        if helper is not None and helper.enabled:
++            forward_context.q35_native_fia_host_batch = helper
+         update_full_graph_params(
+             attn_backend,
+             self.update_stream,
+diff --git a/vllm_ascend/worker/model_runner_v1.py b/vllm_ascend/worker/model_runner_v1.py
+index 7efa02caf..4fe084e86 100644
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -117,6 +117,7 @@ from vllm.v1.worker.utils import (
+ )
+ 
+ # yapf: enable
++from vllm_ascend import envs as ascend_envs
+ from vllm_ascend.ascend_config import get_ascend_config
+ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+@@ -199,6 +200,16 @@ from vllm_ascend.utils import (
+ )
+ from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
++from vllm_ascend.worker.q35_fused_gdn import FusedGDNRefresh
++from vllm_ascend.worker.q35_prepare import Q35PrepareOptimizations
++from vllm_ascend.ops.gdn_input_fusion import GDNInputFusionManager
++from vllm_ascend.ops.q35_cached_conv import CachedConvManager
++from vllm_ascend.ops.q35_rgdr_reuse import RGDRReuseManager
++from vllm_ascend.attention.q35_native_host_batch import NativeFIAHostBatch
++from vllm_ascend.ops.q35_lookup_cache import NativeLookupManager
++from vllm_ascend.ops.fused_moe.q35_immutable_cache import ImmutableMoEManager
++from vllm_ascend.worker.q35_masked_fia import Q35MaskedFIA
++from vllm_ascend.worker.q35_late_correction import Q35LateCorrection
+ from vllm_ascend.worker.utils import AscendKVBlockZeroer
+ 
+ from vllm_ascend.ascend_forward_context import (  # isort: skip
+@@ -459,6 +470,12 @@ class NPUModelRunner(GPUModelRunner):
+         self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
+ 
+         self._set_up_drafter()
++        self._q35_gdn_input_manager = GDNInputFusionManager(self, ascend_envs.VLLM_ASCEND_Q35_GDN_INPUT_FUSION)
++        self._q35_cached_conv_manager = CachedConvManager(self, ascend_envs.VLLM_ASCEND_Q35_CACHED_CONV)
++        self._q35_rgdr_reuse_manager = RGDRReuseManager(self, ascend_envs.VLLM_ASCEND_Q35_RGDR_REUSE)
++        self._q35_native_fia_host_batch = NativeFIAHostBatch(self, ascend_envs.VLLM_ASCEND_Q35_TWIN_GRAPH)
++        self._q35_native_lookup_manager = NativeLookupManager(self, ascend_envs.VLLM_ASCEND_Q35_NATIVE_LOOKUP)
++        self._q35_immutable_moe_manager = ImmutableMoEManager(self, ascend_envs.VLLM_ASCEND_Q35_MOE_IMMUTABLE_CACHE)
+ 
+         # Backends that consume CPU seq_lens (AscendAttentionBackend,
+         # AscendMLABackend, and DSV4 compressed attention metadata) need
+@@ -467,6 +484,13 @@ class NPUModelRunner(GPUModelRunner):
+         self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
+             self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+         )
++        self._q35_prepare = Q35PrepareOptimizations(
++            self, ascend_envs.VLLM_ASCEND_Q35_PREPARE_OPTIMIZATIONS, SpecDecodeMetadata
++        )
++        self._q35_masked_fia = Q35MaskedFIA(self, ascend_envs.VLLM_ASCEND_Q35_MASKED_FIA)
++        self._q35_late_correction = Q35LateCorrection(
++            self, ascend_envs.VLLM_ASCEND_Q35_LATE_CORRECTION, ascend_envs.VLLM_ASCEND_Q35_GDN_FUSED_REFRESH
++        )
+ 
+         # kv role
+         self.is_kv_producer = False
+@@ -1446,10 +1470,15 @@ class NPUModelRunner(GPUModelRunner):
+                 non_blocking=True,
+             )
+         else:
+-            self.positions[:total_num_scheduled_tokens] = (
+-                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+-                + self.query_pos.gpu[:total_num_scheduled_tokens]
+-            )
++            if not self._q35_prepare.build_positions(
++                req_indices_gpu,
++                self.query_pos.gpu[:total_num_scheduled_tokens],
++                self.positions[:total_num_scheduled_tokens],
++            ):
++                self.positions[:total_num_scheduled_tokens] = (
++                    self.num_computed_tokens[req_indices_gpu].to(torch.int64)
++                    + self.query_pos.gpu[:total_num_scheduled_tokens]
++                )
+ 
+         self.seq_lens[:num_reqs] = (
+             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+@@ -1467,7 +1496,9 @@ class NPUModelRunner(GPUModelRunner):
+             and valid_sampled_token_count_gpu is not None
+             and prev_req_id_to_index
+         )
+-        if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
++        need_cpu_correction = self._needs_seq_lens_cpu_sync and async_spec_decode_active
++        defer_cpu_correction = need_cpu_correction and self._q35_prepare.enabled
++        if need_cpu_correction and not defer_cpu_correction:
+             self._correct_optimistic_seq_lens_cpu(num_reqs)
+ 
+         self.input_batch.block_table.compute_slot_mapping(
+@@ -1538,6 +1569,12 @@ class NPUModelRunner(GPUModelRunner):
+             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
+             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+ 
++        # No operation between the original wait and here reads the corrected
++        # optimistic CPU lengths or mutates its correction inputs. Submit the
++        # independent slot/mrope/spec-index work before the same required wait.
++        if defer_cpu_correction:
++            if not self._q35_late_correction.defer(num_reqs, num_draft_tokens, num_scheduled_tokens):
++                self._correct_optimistic_seq_lens_cpu(num_reqs)
+         return (
+             logits_indices,
+             spec_decode_metadata,
+@@ -1595,6 +1632,9 @@ class NPUModelRunner(GPUModelRunner):
+         num_draft_tokens: np.ndarray,
+         cu_num_scheduled_tokens: np.ndarray,
+     ) -> SpecDecodeMetadata:
++        cached = self._q35_prepare.build(num_draft_tokens, cu_num_scheduled_tokens)
++        if cached is not None and self._q35_prepare.mode == "on":
++            return cached
+         # Inputs:
+         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
+         # num_draft_tokens:         [  3,   0,   2,   0,   1]
+@@ -1646,7 +1686,7 @@ class NPUModelRunner(GPUModelRunner):
+         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
+         draft_token_ids = self.input_ids.gpu[logits_indices]
+         draft_token_ids = draft_token_ids[target_logits_indices + 1]
+-        return SpecDecodeMetadata(
++        result = SpecDecodeMetadata(
+             draft_token_ids=draft_token_ids,
+             num_draft_tokens=num_draft_tokens.tolist(),
+             cu_num_draft_tokens=cu_num_draft_tokens,
+@@ -1655,6 +1695,9 @@ class NPUModelRunner(GPUModelRunner):
+             bonus_logits_indices=bonus_logits_indices,
+             logits_indices=logits_indices,
+         )
++        if cached is not None:
++            self._q35_prepare.validate(cached, result)
++        return result
+ 
+     def _correct_optimistic_seq_lens_cpu(self, num_reqs: int) -> None:
+         """Correct ``optimistic_seq_lens_cpu`` for async spec-decode drift.
+@@ -2313,6 +2356,7 @@ class NPUModelRunner(GPUModelRunner):
+                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                     num_scheduled_tokens_np=num_scheduled_tokens_np,
+                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
++                    q35_full_runtime=pad_attn,
+                 )
+ 
+                 self._sanitize_placeholder_input_ids_for_forward(
+@@ -2895,6 +2939,8 @@ class NPUModelRunner(GPUModelRunner):
+             if self.enable_enpu:
+                 torch.npu.current_stream().synchronize()
+ 
++            if self._q35_native_fia_host_batch.enabled:
++                forward_context.q35_native_fia_host_batch = self._q35_native_fia_host_batch
+             update_full_graph_params(
+                 self.attn_backend,
+                 self.update_stream,
+@@ -2934,6 +2980,8 @@ class NPUModelRunner(GPUModelRunner):
+             hidden_states = run_model()
+             self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+ 
++        self._q35_late_correction.flush('after_target_forward')
++        self._q35_masked_fia.check(forward_context, num_tokens_padded)
+         return hidden_states
+ 
+     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+@@ -3104,6 +3152,7 @@ class NPUModelRunner(GPUModelRunner):
+         num_scheduled_tokens: dict[str, int] | None = None,
+         num_scheduled_tokens_np: np.ndarray | None = None,
+         cascade_attn_prefix_lens: list[list[int]] | None = None,
++        q35_full_runtime: bool = False,
+     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
+         """
+         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
+@@ -3113,6 +3162,16 @@ class NPUModelRunner(GPUModelRunner):
+             return {}, None
+         num_tokens_padded = num_tokens_padded or num_tokens
+         num_reqs_padded = num_reqs_padded or num_reqs
++        if not hasattr(self, "_q35_fused_gdn_refresh"):
++            self._q35_fused_gdn_refresh = FusedGDNRefresh(self)
++        fused_gdn = self._q35_fused_gdn_refresh
++        defer_gdn = fused_gdn.eligible(
++            full=q35_full_runtime, capture=for_cudagraph_capture,
++            ubatches=ubatch_slices, spec=use_spec_decode, n=num_reqs,
++            padded_n=num_reqs_padded, tokens=num_tokens, padded_tokens=num_tokens_padded,
++        ) and not cascade_attn_prefix_lens
++        self._q35_late_correction.before_metadata(defer_gdn)
++        pending_gdn = []
+         if self.sparse_kv_offload_enabled:
+             update_sparse_kv_offload_metadata(
+                 num_tokens,
+@@ -3181,8 +3240,10 @@ class NPUModelRunner(GPUModelRunner):
+                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
+                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
+                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
+-                slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
+-                blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
++                if num_tokens < num_tokens_padded:
++                    slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
++                if num_reqs < num_reqs_padded:
++                    blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
+             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
+                 if self.routed_experts_initialized:
+                     # snapshot slot_mapping into a private device
+@@ -3310,6 +3371,11 @@ class NPUModelRunner(GPUModelRunner):
+             if isinstance(builder, AscendDSAMetadataBuilder):
+                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+ 
++            if kv_cache_gid == 0 and ubid is None and (for_cudagraph_capture or q35_full_runtime):
++                self._q35_masked_fia.prepare(
++                    attn_metadata_i, common_attn_metadata, num_reqs, for_cudagraph_capture
++                )
++
+             if ubid is None:
+                 assert isinstance(attn_metadata, dict)
+                 attn_metadata_dict = attn_metadata
+@@ -3366,12 +3432,25 @@ class NPUModelRunner(GPUModelRunner):
+                 else:
+                     spec_decode_common_attn_metadata = cm
+             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
++                if defer_gdn and kv_cache_gid in (1, 2, 3):
++                    pending_gdn.append((kv_cache_gid, cm))
++                    continue
+                 _build_attn_group_metadata(
+                     kv_cache_gid,
+                     attn_gid,
+                     cm,
+                     common_ratio_to_sas_metadata,
+                 )
++        if pending_gdn:
++            fused_results = fused_gdn.build(pending_gdn)
++            for index, (gid, cm) in enumerate(pending_gdn):
++                if fused_results is None:
++                    self._q35_late_correction.flush('native_gdn_fallback')
++                    _build_attn_group_metadata(gid, 0, cm, common_ratio_to_sas_metadata)
++                else:
++                    for layer_name in self.attn_groups[gid][0].layer_names:
++                        attn_metadata[layer_name] = fused_results[index]
++        self._q35_late_correction.after_metadata(pending_gdn, fused_results if pending_gdn else None, attn_metadata)
+         if self.is_mm_prefix_lm:
+             req_doc_ranges = {}
+             for req_id in self.input_batch.req_ids:
+@@ -3924,6 +4003,11 @@ class NPUModelRunner(GPUModelRunner):
+         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+             self._start_dump_data()
+ 
++        self._q35_gdn_input_manager.bind_model(self.model)
++        self._q35_cached_conv_manager.bind_model(self.model)
++        self._q35_rgdr_reuse_manager.bind_model()
++        self._q35_native_lookup_manager.bind_model()
++        self._q35_immutable_moe_manager.bind_model()
+         load_model_total_time = time.perf_counter() - load_model_start_time
+         logger.info(
+             "Model runner load_model total time: %.2f seconds",
+diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
+index 84becb832..172590fc5 100644
+--- a/vllm_ascend/worker/worker.py
++++ b/vllm_ascend/worker/worker.py
+@@ -851,6 +851,41 @@ class NPUWorker(WorkerBase):
+         c = torch.rand((4, 4), dtype=torch.float32).npu()
+         torch_npu._npu_matmul_add_fp32(x, weight, c)
+ 
++    def reset_private_q35_gdn_input_stats(self) -> dict:
++        """Reset debug/cost counters after capture, before timed generation."""
++        from vllm_ascend.ascend_forward_context import MoECommType
++        from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
++        self.model_runner._q35_cached_conv_manager.reset()
++        self.model_runner._q35_rgdr_reuse_manager.reset()
++        self.model_runner._q35_native_fia_host_batch.reset()
++        self.model_runner._q35_native_lookup_manager.reset()
++        self.model_runner._q35_immutable_moe_manager.reset()
++        method = get_moe_comm_method(MoECommType.ALLGATHER)
++        if method is not None:
++            method.token_dispatcher._q35_expert_mask.reset()
++        return self.model_runner._q35_gdn_input_manager.reset_stats()
++
++    def get_private_q35_gdn_input_metrics(self) -> list:
++        """Named read-only RPC; called only after generation timers stop."""
++        from vllm_ascend.ascend_forward_context import MoECommType
++        from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
++        records = self.model_runner._q35_cached_conv_manager.attach_metrics(
++            self.model_runner._q35_gdn_input_manager.metrics())
++        records = self.model_runner._q35_native_lookup_manager.attach_metrics(records)
++        records = self.model_runner._q35_rgdr_reuse_manager.attach_metrics(records)
++        records = self.model_runner._q35_immutable_moe_manager.attach_metrics(records)
++        if records and self.model_runner._q35_native_fia_host_batch.enabled:
++            records[0]['native_fia_host_batch'] = self.model_runner._q35_native_fia_host_batch.metrics()
++        method = get_moe_comm_method(MoECommType.ALLGATHER)
++        if records and method is not None:
++            records[0]['expert_mask'] = method.token_dispatcher._q35_expert_mask.metrics()
++        return records
++
++    def fence_private_q35_phase_growth(self, transition_id, stage, expected_roster) -> dict:
++        """One quiescent boundary RPC, included in generation timers, not hot-loop D2H."""
++        from vllm_ascend.worker.q35_quiescent_fence import prepare_growth_fence
++        return prepare_growth_fence(self.model_runner, transition_id, stage, expected_roster)
++
+     def get_model(self) -> nn.Module:
+         return self.model_runner.get_model()
+ 

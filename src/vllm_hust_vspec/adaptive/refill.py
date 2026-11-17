@@ -237,6 +237,22 @@ def _predicted_goodput(scheduler: Any, gamma: int, batch_size: int) -> float:
         return 0.0
 
 
+def _needs_refill_prediction(
+    *,
+    running_count: int,
+    target_count: int,
+    waiting_count: int,
+    cohort_gated: bool,
+) -> bool:
+    """Only a real admission choice needs the gamma controller's scores."""
+    return (
+        waiting_count > 0
+        and target_count > running_count
+        and running_count > 0
+        and not cohort_gated
+    )
+
+
 def install_online_refill_patch(
     *,
     method: str,
@@ -287,13 +303,27 @@ def install_online_refill_patch(
         gamma_controller = getattr(self, "_vspec_adaptive_controller", None)
         gamma = int(getattr(gamma_controller, "current_gamma", self.num_spec_tokens))
         controller = get_controller(self)
+        needs_prediction = _needs_refill_prediction(
+            running_count=running_count,
+            target_count=target_count,
+            waiting_count=waiting_count,
+            cohort_gated=controller.cohort_gated,
+        )
         decision = controller.choose(
             running_count=running_count,
             target_count=target_count,
             waiting_count=waiting_count,
             gamma=gamma,
-            current_goodput=_predicted_goodput(self, gamma, running_count),
-            target_goodput=_predicted_goodput(self, gamma, target_count),
+            current_goodput=(
+                _predicted_goodput(self, gamma, running_count)
+                if needs_prediction
+                else 0.0
+            ),
+            target_goodput=(
+                _predicted_goodput(self, gamma, target_count)
+                if needs_prediction
+                else 0.0
+            ),
         )
 
         original_limit = self.max_num_running_reqs

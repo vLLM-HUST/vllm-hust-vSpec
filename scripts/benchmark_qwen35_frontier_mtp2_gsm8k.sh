@@ -87,7 +87,7 @@ VLLM_SOURCE=${VLLM_SOURCE:-/root/data/vllm-hust-latest}
 ASCEND_SOURCE=${ASCEND_SOURCE:-/root/data/vllm-ascend-hust-latest}
 MODEL=${MODEL:-/workspace/models/Qwen3.5-35B-A3B}
 DATASET=${DATASET:-/root/data/vllm-ascend-hust/benchmark_results/gsm8k-baseline-20260901-vllm-hust/materialized.jsonl}
-NPU_IDS=${NPU_IDS:-0,1}
+NPU_IDS=${NPU_IDS:-}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-18185}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
@@ -128,7 +128,9 @@ mkdir -p "${OUTPUT_DIR}"
 
 export PATH="${VENV}/bin:${PATH}"
 export PYTHONPATH="${ROOT}/src:${VLLM_SOURCE}:${ASCEND_SOURCE}${PYTHONPATH:+:${PYTHONPATH}}"
-export ASCEND_RT_VISIBLE_DEVICES="${NPU_IDS}"
+if [[ -n "${NPU_IDS}" ]]; then
+  export ASCEND_RT_VISIBLE_DEVICES="${NPU_IDS}"
+fi
 export PYTHONUNBUFFERED=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_USE_AOT_COMPILE=0
@@ -207,13 +209,15 @@ else
     --served-model-name "${SERVED_MODEL_NAME}"
     --host "${HOST}"
     --port "${PORT}"
-    --device "${NPU_IDS}"
     --max-num-seqs "${MAX_NUM_SEQS}"
     "${MTP_ARGMAX_FLAG}"
     --vllm-source "${VLLM_SOURCE}"
     --ascend-source "${ASCEND_SOURCE}"
     --vllm-executable "${VLLM_BIN}"
   )
+  if [[ -n "${NPU_IDS}" ]]; then
+    SERVER_CMD+=(--device "${NPU_IDS}")
+  fi
 fi
 
 if [[ "${MODE}" != baseline && ( "${ENABLE_PROFILE}" == 1 || "${ASCEND_ADDITIONAL_CONFIG}" != '{"enable_cpu_binding":true}' ) ]]; then

@@ -8,8 +8,8 @@ dynamic = ["version"]
 description = "Out-of-tree speculative decoding plugin for vLLM-HUST on Ascend"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "Apache-2.0 AND LicenseRef-CANN-OSL-2.0"
+license-files = ["LICENSE", "src/vllm_hust_vspec/_vendor/native/*/CANN-LICENSE"]
 authors = [{name = "vLLM-HUST"}]
 dependencies = []
 
@@ -20,23 +20,40 @@ benchmark = [
 test = [
     "pytest>=8",
     "ruff>=0.12",
-    "vllm-hust-ext==0.2.0.dev0",
+    "vllm-hust-ext>=0.3.1.dev1",
 ]
 
 [project.entry-points."vllm.general_plugins"]
 vspec = "vllm_hust_vspec:register"
 vspec_school028_argmax = "vllm_hust_vspec.school028:register"
 
+[project.entry-points."vllm.endpoint_plugins"]
+vspec_eval = "evaluation_endpoint:EvaluationEndpointPlugin"
+
 [project.entry-points."vllm_hust.extension_bundles"]
 "org.vllm-hust.vspec" = "vllm_hust_vspec.manifests"
 "org.vllm-hust.vspec-school028-argmax" = "vllm_hust_vspec.school028"
 
 [project.scripts]
+vllm-hust-vspec-install-runtime = "vllm_hust_vspec.runtime_installer:main"
 vllm-hust-vspec = "vllm_hust_vspec.cli:main"
 vllm-hust-vspec-doctor = "vllm_hust_vspec.compatibility:main"
 vllm-hust-vspec-fit-profile = "vllm_hust_vspec.adaptive.fitting:main"
 vllm-hust-vspec-profile = "vllm_hust_vspec.adaptive.profiling:main"
 vllm-hust-vspec-bench = "vllm_hust_vspec.online_benchmark:main"
+vllm-hust-vspec-prepare-backend = "vllm_hust_vspec.backend_bundle:main"
+vllm-hust-vspec-build-operator = "vllm_hust_vspec.native_operator_build:main"
+vllm-hust-vspec-validate-mask = "vllm_hust_vspec.validate_mask:main"
+vllm-hust-vspec-validate-tail-conv = "vllm_hust_vspec.validate_tail_conv:main"
+vllm-hust-vspec-validate-gdn-input = "vllm_hust_vspec.validate_gdn_input:main"
+vllm-hust-vspec-validate-rgdr = "vllm_hust_vspec.validate_rgdr:main"
+vllm-hust-vspec-validate-rgdr-state-pipeline = "vllm_hust_vspec.validate_rgdr_state_pipeline:main"
+vllm-hust-vspec-validate-conv = "vllm_hust_vspec.validate_conv:main"
+vllm-hust-vspec-validate-prefix-clip = "vllm_hust_vspec.validate_prefix_clip:main"
+vllm-hust-vspec-validate-two-bank = "vllm_hust_vspec.validate_two_bank:main"
+vllm-hust-vspec-validate-fia-host = "vllm_hust_vspec.validate_fia_host:main"
+vllm-hust-vspec-run-with-backend = "vllm_hust_vspec.run_with_backend:main"
+vllm-hust-vspec-validate-inplace-head = "vllm_hust_vspec.validate_inplace_head:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -45,7 +62,35 @@ where = ["src"]
 version = {attr = "vllm_hust_vspec._version.__version__"}
 
 [tool.setuptools.package-data]
-vllm_hust_vspec = ["manifests/*.json", "school028/*.json"]
+vllm_hust_vspec = [
+    "manifests/*.json",
+    "school028/*.json",
+    "_vendor/ascend_hust/*.patch",
+    "_vendor/ascend_hust/overlay/vllm_ascend/*/*.py",
+    "_vendor/ascend_hust/overlay/vllm_ascend/*/*/*.py",
+    "_vendor/operators/*/*.py",
+    "_vendor/experimental_hooks/*.py",
+    "_vendor/runtime/*.py",
+    "_vendor/qwen35_mtp_compat/*.py",
+    "_vendor/native/gamma6_tail/*",
+    "_vendor/native/gamma6_tail/native-kernel/*",
+    "_vendor/native/gamma6_tail/native-kernel/arch35/*",
+    "_vendor/native/gamma6_rgdr/*",
+    "_vendor/native/gamma6_rgdr_reference/*",
+    "_vendor/native/gamma6_rgdr_packed_reference/*",
+    "_vendor/native/gamma8_rgdr/*",
+    "_vendor/native/rgdr_state_pipeline/*",
+    "_vendor/native/fia_host/*",
+    "_vendor/native/conv_reference/*",
+    "_vendor/native/conv_reference/native-kernel/*",
+    "_vendor/native/conv_reference/native-kernel/arch35/*",
+    "_vendor/native/conv_stride/*",
+    "_vendor/native/conv_stride/native-kernel/*",
+    "_vendor/native/conv_stride/native-kernel/arch35/*",
+    "_vendor/native/conv_edge/*",
+    "_vendor/native/conv_edge/native-kernel/*",
+    "_vendor/native/conv_edge/native-kernel/arch35/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
