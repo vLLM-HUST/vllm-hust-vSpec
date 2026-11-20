@@ -65,7 +65,7 @@ def prepare(source: Path, destination: Path) -> None:
     subprocess.run(['git', '-C', str(source), 'cat-file', '-e', f'{BASE_COMMIT}^{{commit}}'], check=True)
     subprocess.run(['git', 'clone', '--quiet', '--no-hardlinks', '--no-checkout', str(source), str(destination)], check=True)
     subprocess.run(['git', '-C', str(destination), 'checkout', '--quiet', '--detach', BASE_COMMIT], check=True)
-    for name in ('tracked-changes.patch', 'build-python.patch'):
+    for name in ('tracked-changes.patch', 'build-python.patch', 'gdn-spec-history.patch'):
         patch = BUNDLE / name
         subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(patch)], check=True)
         subprocess.run(['git', '-C', str(destination), 'apply', str(patch)], check=True)

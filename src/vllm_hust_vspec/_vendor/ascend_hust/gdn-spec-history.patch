@@ -1,0 +1,67 @@
+diff --git a/vllm_ascend/ops/gdn_attn_builder.py b/vllm_ascend/ops/gdn_attn_builder.py
+--- a/vllm_ascend/ops/gdn_attn_builder.py
++++ b/vllm_ascend/ops/gdn_attn_builder.py
+@@ -535,24 +535,30 @@
+         spec_sequence_indices: torch.Tensor | None = None
+         non_spec_sequence_indices: torch.Tensor | None = None
+         non_spec_conv1d_cache_indices: torch.Tensor | None = None
+-        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
++        if not self.use_spec_decode or (num_decode_draft_tokens_cpu is None and num_accepted_tokens is None):
+             spec_sequence_masks = None
+             num_spec_decodes = 0
+         else:
+-            num_reqs = num_decode_draft_tokens_cpu.numel()
++            num_reqs = m.num_reqs if num_decode_draft_tokens_cpu is None else num_decode_draft_tokens_cpu.numel()
+             spec_sequence_masks_cpu = self.spec_sequence_masks_cpu[:num_reqs]
+-            runtime_draft_tokens = num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
+-            if runtime_draft_tokens.sum().item() > 0:
+-                torch.ge(
+-                    num_decode_draft_tokens_cpu,
+-                    0,
+-                    out=spec_sequence_masks_cpu,
+-                )
++            if num_decode_draft_tokens_cpu is None:
++                spec_sequence_masks_cpu.fill_(False)
+             else:
+-                # Dynamic speculative decoding can be enabled while this batch
+-                # carries no draft tokens. Treat it as ordinary decode unless a
+-                # stateful spec-width prompt chunk must use the spec branch.
+-                spec_sequence_masks_cpu.zero_()
++                runtime_draft_tokens = num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
++                if runtime_draft_tokens.sum().item() > 0:
++                    torch.ge(
++                        num_decode_draft_tokens_cpu,
++                        0,
++                        out=spec_sequence_masks_cpu,
++                    )
++                else:
++                    # Keep the existing no-draft handling, then restore rows
++                    # whose previous accepted state still requires spec history.
++                    spec_sequence_masks_cpu.zero_()
++            if m.is_prefilling is not None and m.seq_lens_cpu_upper_bound is not None and num_accepted_tokens is not None:
++                query_lens_cpu = torch.diff(query_start_loc_cpu)[:num_reqs]
++                has_history = m.seq_lens_cpu_upper_bound[:num_reqs] > query_lens_cpu
++                spec_sequence_masks_cpu |= ~m.is_prefilling[:num_reqs] & (query_lens_cpu == 1) & has_history
+             spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
+                 m,
+                 spec_sequence_masks_cpu,
+diff --git a/vllm_ascend/worker/model_runner_v1.py b/vllm_ascend/worker/model_runner_v1.py
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -3334,11 +3334,14 @@
+             )
+ 
+             extra_attn_metadata_args = {}
+-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
++            gdn_needs_spec_history = self.speculative_config is not None and num_scheduled_tokens is not None
++            if (use_spec_decode or gdn_needs_spec_history) and isinstance(builder, GDNAttentionMetadataBuilder):
+                 assert ubid is None, "UBatching not supported with GDN yet"
+                 extra_attn_metadata_args = dict(
+                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+-                    num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
++                    num_decode_draft_tokens_cpu=(
++                        self.num_decode_draft_tokens.cpu[:num_reqs_padded] if use_spec_decode else None
++                    ),
+                 )
+ 
+             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):

@@ -8,7 +8,7 @@
 
 - 使用锁定版本的干净 Python 环境、vLLM、vllm-ascend、CANN、torch-npu、插件 wheel 和匹配的 custom OPP。两臂可以分别使用隔离环境；空间受限时，也可以在同一个干净环境中顺序运行，给原生臂指定独立的只读原生后端覆盖层。此时必须用 worker 记录证明原生子进程未导入 vSpec，且两臂确实使用各自指定的后端和 OPP。`run_with_backend` 会检查实际导入路径；仅复制旧工作目录或设置历史 `SOURCE` 不符合此条件。
 - 同一份有固定 revision/hash 的 Qwen3.5 模型、同一对物理 NPU、BF16、同一份共享服务配置。原生服务的 `VLLM_PLUGINS` 为 `ascend,vspec_eval`；动态服务为 `ascend,vspec,vspec_eval`。两臂都启用插件包中独立的 Qwen3.5 MTP KV/Mamba 兼容启动钩子；原生服务的子进程不应导入 `vllm_hust_vspec`。
-- 一个干净的评测客户端 Python 环境，安装并固定对应版本的 `hust-eval-client-mmlu-pro`、`hust-eval-client-hle-verified`、`hust-eval-client-frontierscience`。按各客户端文档准备受许可的数据资产、solver/judge 配置和冻结计划。HLE-Verified 用 Gold；FrontierScience 计时覆盖 olympiad 与 research，质量只按 olympiad 的评分定义。切勿将 MMLU 或 SWE-bench Verified 代替相应数据集。
+- 一个干净的评测客户端 Python 环境，安装并固定对应版本的 `hust-eval-client-mmlu-pro`、`hust-eval-client-hle-verified`、`hust-eval-client-frontierscience`。按各客户端文档准备受许可的数据资产、solver/judge 配置和冻结计划。HLE-Verified 可按标准配置冻结 Gold 与 Revision 混合题单；配对两臂须使用同一题单。FrontierScience 计时覆盖 olympiad 与 research，质量只按 olympiad 的评分定义。切勿将 MMLU 或 SWE-bench Verified 代替相应数据集。
 - 插件安装包内的独立原生编译适配/观察类与通用评测端点。原生子进程仅将安装包的独立 `evaluation_static`、`evaluation` 文件目录加入 Python 模块搜索路径，端点与原生 worker 均不导入 vSpec 插件；`VLLM_PLUGINS` 只显式加载 Ascend 和 `vspec_eval`。动态子进程加载 Ascend、vSpec 与 `vspec_eval`。不要用私有旧 `SOURCE` 覆盖这两个目录。
 - 动态 worker 所需的 proof/构建产物路径由操作者在私有 `dynamic-env.json` 中提供。`*_DIR`、`*_ROOT`、`*_PATH` 键必须指向存在的绝对路径。请先执行插件的发行校验与目标机器上的模型级验收，确认 wheel/sdist、后端覆盖层、算子和 worker 的版本、路径与哈希吻合。
 
@@ -22,7 +22,7 @@
 
 本入口只允许在 `dynamic-env.json` 中显式设置列入白名单的 `VLLM_ASCEND_Q35_*` 开关；`common-env.json` 不接受这些键，原生臂使用所选原生后端的默认值。这些开关也不会从当前 shell 隐式继承。因此，同一共享服务配置和公共编译设置不表示两臂的 Qwen3.5 后端优化相同。历史三数据集对照中的原生与动态实现也有逐臂差异；复核历史配置时应在私有启动记录中核对各臂实际开关、后端和算子，不能把整体生成速率差异单独归因于动态控制器。`VLLM_ALLOW_INSECURE_SERIALIZATION=0` 由入口对两臂强制设置，不需要写进私有环境文件。
 
-当前版本可在 `dynamic-env.json` 中显式覆盖 `HUST_VSPEC_HOT_STATIC_SHAPES` 为 `70`，减少动态臂首次静态编译；原生臂仍使用公共五形状设置。此优化不删减解码图，正式比较需记录两臂的实际编译范围及启动耗时。
+当前版本可在 `dynamic-env.json` 中显式覆盖 `HUST_VSPEC_HOT_STATIC_SHAPES` 为 `70` 或 `14,70`，减少动态臂首次静态编译；原生臂仍使用公共五形状设置。此优化不删减解码图，正式比较需记录两臂的实际编译范围、启动耗时、吞吐与正确率。MMLU-Pro 长推理负载应优先验证 `14,70`，不能把 `70` 的冷启动收益视为质量无损。
 
 ## 冻结题目与准备配对配置
 
@@ -101,6 +101,6 @@ PLAN="$PRIVATE_ROOT/mmlu/plan200"
   --output "$PRIVATE_ROOT/pair-mmlu/comparison.json"
 ```
 
-HLE/FrontierScience 的 `run` 命令还需 `--selection /path/to/selection.json`。两个 solver run 完成后，按冻结配置在独立服务上启动 judge，再执行各自的 `score`。`score` 和 `compare` 会重验计时请求文件及计划题目清单的哈希。`compare` 核对同一 plan、题目清单、共享服务配置、评分范围和规则；HLE/FrontierScience 把未决评分按最不利情况计算质量下降界，不把未决题自动判为正确。`performance_quality_scope_pass` 仅表示生成速率、质量与样本范围三项通过：MMLU-Pro/HLE-Verified 至少 200 题，FrontierScience 至少 160 题且覆盖完整双轨计划；任一项不满足时仍打印诊断结果，但非零退出。它不代表完整发布验收，后者仍需独立算子数值证明并运行 `scripts/verify_model_acceptance.py`。MMLU-Pro 按客户端的完整总结评分；截断题仍按规则计入分母。
+HLE/FrontierScience 的 `run` 命令还需 `--selection /path/to/selection.json`。两个 solver run 完成后，按冻结配置在独立服务上启动 judge，再执行各自的 `score`。Qwen3.5 的 target-only judge 服务也须通过 `run_with_backend --qwen35-mtp-compat` 启动并选中同一后端环境，但不加载动态 vSpec；否则该后端的 Mamba 状态接口可能与上游服务入口不匹配。`score` 和 `compare` 会重验计时请求文件及计划题目清单的哈希。`compare` 核对同一 plan、题目清单、共享服务配置、评分范围和规则；HLE/FrontierScience 把未决评分按最不利情况计算质量下降界，不把未决题自动判为正确。`performance_quality_scope_pass` 仅表示生成速率、质量与样本范围三项通过：MMLU-Pro/HLE-Verified 至少 200 题，FrontierScience 至少 160 题且覆盖完整双轨计划；任一项不满足时仍打印诊断结果，但非零退出。它不代表完整发布验收，后者仍需独立算子数值证明并运行 `scripts/verify_model_acceptance.py`。MMLU-Pro 按客户端的完整总结评分；截断题仍按规则计入分母。
 
 运行日志、计划、选题、请求记录、评分和配置会包含模型路径或题目内容，**不要上传到公开仓库或共享目录**。脚本在正式运行时从 `npu-smi` 记录逻辑 0/1 对应的两块物理 910B2，`compare` 仅在两臂映射一致时继续；但仍须独立保存设备租用和真实 worker/算子证据。公开报告仅可发布脱敏后的聚合结果，并应附版本/哈希、硬件分配、两臂运行时 worker/算子证明、客户端/模型/计划修订及完整计分口径。没有这些证据，就只能称为本地诊断，不应宣称复现了既有吞吐或正确率。

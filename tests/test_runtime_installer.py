@@ -3,12 +3,18 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
-from vllm_hust_vspec.runtime_installer import EXPORTS, OPERATORS, commands
+from vllm_hust_vspec.runtime_installer import (
+    EXPORTS,
+    OPERATORS,
+    bootstrap_steps,
+    commands,
+)
 
 
 def test_full_install_plan_builds_and_validates_each_operator(tmp_path: Path) -> None:
     args = Namespace(
         wheel=tmp_path / "vspec.whl",
+        prebuilt_backend_wheel=None,
         plugin_source=None,
         ascend_source=tmp_path / "ascend",
         vllm_source=tmp_path / "vllm",
@@ -40,3 +46,22 @@ def test_full_install_plan_builds_and_validates_each_operator(tmp_path: Path) ->
         in {"gdn-input-6", "gdn-input-8", "mask", "prefix-clip", "two-bank", "inplace-head"}
         for component in EXPORTS.values()
     )
+
+
+def test_prebuilt_backend_wheel_skips_cpu_rebuild(tmp_path: Path) -> None:
+    args = Namespace(
+        wheel=tmp_path / "vspec.whl",
+        prebuilt_backend_wheel=tmp_path / "vllm_ascend-0.25.whl",
+        plugin_source=None,
+        ascend_source=tmp_path / "ascend",
+        vllm_source=tmp_path / "vllm",
+        cann_root=tmp_path / "cann",
+        model_dir=tmp_path / "model",
+        private_dir=tmp_path / "private",
+        jobs=8,
+    )
+    assert [name for name, _ in bootstrap_steps(args, tmp_path / "site")] == ["plugin"]
+    args.prebuilt_backend_wheel = None
+    assert [name for name, _ in bootstrap_steps(args, tmp_path / "site")] == [
+        "plugin", "backend-source", "backend-wheel",
+    ]

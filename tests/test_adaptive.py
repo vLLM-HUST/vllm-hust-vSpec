@@ -51,6 +51,7 @@ from vllm_hust_vspec.adaptive.runtime import (
     _draft_capture_runnable,
     _draft_entropy_matrix,
     _draft_full_graph_batch_matches_capture,
+    _effective_adaptive_refill_batch,
     _eagle3_cohort_refill_enabled,
     _eagle3_native_anchor_query_width,
     _force_eagle3_non_decode_target_eager,
@@ -132,6 +133,13 @@ def profile_document(default_acceptance_rate: float = 0.9) -> dict[str, object]:
 
 
 class AdaptiveControllerTest(unittest.TestCase):
+    def test_mtp_refill_defaults_to_native_admission_cadence(self) -> None:
+        self.assertEqual(_effective_adaptive_refill_batch("mtp", 0, False), 1)
+        self.assertEqual(_effective_adaptive_refill_batch("mtp", 4, False), 4)
+        self.assertEqual(_effective_adaptive_refill_batch("mtp", 4, True), 1)
+        self.assertEqual(_effective_adaptive_refill_batch("draft_model", 0, False), 8)
+        self.assertEqual(_effective_adaptive_refill_batch("eagle3", 0, False), 4)
+
     def test_runtime_proposal_width_uses_next_frame_gamma(self) -> None:
         scheduler_output = SimpleNamespace(num_spec_tokens_to_schedule=5)
         self.assertEqual(_runtime_proposal_query_width(scheduler_output), 6)

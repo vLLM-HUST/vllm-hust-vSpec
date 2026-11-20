@@ -82,6 +82,8 @@ def install_core_step():
 
 def install(settings):
     if os.environ.get('HUST_ISSUE18_VERIFIED_PREFIX_BRIDGE')!='1':return False
+    # A fixed gamma never has an even-round transition to bridge.
+    if os.environ.get('HUST_VSPEC_ADAPTIVE_SPECULATION')!='1':return False
     if os.environ.get('HUST_ISSUE18_B16_ARM')=='fixed4':return False
     if settings.method!='mtp' or os.environ.get('HUST_VSPEC_EVEN_ROUND_ENABLE')!='1':
         raise RuntimeError('Prefix bridge requires existing even-round MTP runtime')

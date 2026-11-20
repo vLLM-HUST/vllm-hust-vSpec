@@ -1,8 +1,31 @@
 # vllm-hust-vSpec
 
-`vSpec-0.15.2` 分支当前源码版本为 `0.15.2.post1`。Qwen3.5 实验路径随插件提供后端补丁、算子源码及安装/验证入口；目标机器仍须准备兼容的驱动、CANN、Python 栈、模型、数据集和两张可用 NPU。单独执行 `pip install` 不会编译设备算子。完整安装步骤见[复现准备指南](docs/v0.15.1-reproduction.md)，其中底层依赖要求也适用于当前版本；安装包不包含模型、数据集或已针对其他机器编译的缓存。
+`vSpec-0.15.3` 分支的源码版本为 `0.15.3`，尚未发布到 PyPI。Qwen3.5 实验路径随插件提供后端补丁、算子源码及安装/验证入口；目标机器仍须准备兼容的驱动、CANN、Python 栈、模型、数据集和两张可用 NPU。单独执行 `pip install` 不会编译设备算子。完整安装步骤见[复现准备指南](docs/v0.15.1-reproduction.md)，其中底层依赖要求也适用于当前版本；安装包不包含模型、数据集或已针对其他机器编译的缓存。
 
-此版本补齐 Qwen3.5 MTP 的后端兼容与算子构建入口、目标机器上的验证流程，以及动态候选深度和静态图形状的配置支持。仓库保留[冻结题单评测入口](examples/issue18_frozen56/README.md)和[多数据集配对入口](examples/qwen35_three_datasets/README.md)；实测结果与收据应单独保存在 benchmark 仓库，不纳入插件源码包。
+相比 `0.15.2.post1`，此版本修复了自适应路径的正确率下降问题：MTP 默认逐个补入等待请求，显式配置的补位批量仍生效；GDN 在无 draft 的解码步保留必要的投机历史，固定深度不再启用仅供动态切档使用的 prefix bridge。多数据集配对入口允许动态臂按需预编译 `70`、`70,98` 或 `14,70`，不减少解码图捕获尺寸。仓库保留[冻结题单评测入口](examples/issue18_frozen56/README.md)和[多数据集配对入口](examples/qwen35_three_datasets/README.md)。
+
+## B0/B1 复测结果
+
+按[标准测试指南](https://vllm-hust.sage.org.ai/dataset-standard.html)冻结题单和参数，在同一对 910B2 上分别运行原生 B0（MTP2/4/6）和开启自适应的 vSpec B1（候选 2/4/6/8）；B1 设 `HUST_VSPEC_HOT_STATIC_SHAPES=70,98`。每行均为一次完整运行，求解请求失败数均为 0；输出吞吐按实际生成 token 数除以完整客户端计时窗口，**不含冷启动和判分**。自然停止导致各臂输出量不同，下表不是同工作量端到端加速比。
+
+| 数据集 | 运行臂 | 输出吞吐（token/s） | 评分 |
+| --- | --- | ---: | ---: |
+| MMLU-Pro（200 题） | 原生 MTP2 | 696.25 | 145/200 |
+|  | 原生 MTP4 | 864.40 | 140/200 |
+|  | 原生 MTP6 | 901.33 | 140/200 |
+|  | vSpec B1 | 982.82 | 142/200 |
+| FrontierScience（160 题） | 原生 MTP2 | 755.57 | Olympiad 63/100 |
+|  | 原生 MTP4 | 970.70 | Olympiad 61/100 |
+|  | 原生 MTP6 | 1,032.27 | Olympiad 63/100 |
+|  | vSpec B1 | 1,228.10 | Olympiad 61/100 |
+| HLE-Verified（200 题） | 原生 MTP2 | 803.55 | 49/200 |
+|  | 原生 MTP4 | 1,032.04 | 58/200 |
+|  | 原生 MTP6 | 1,145.52 | 59/200 |
+|  | vSpec B1 | 1,389.23 | 61/200 |
+
+相对同轮原生 MTP6，vSpec 的输出吞吐在 MMLU-Pro、FrontierScience、HLE-Verified 上分别高约 9.04%、18.97%、21.27%；对应正确数分别多 2 题、少 2 题、多 2 题，不能称为逐题完全一致。FrontierScience 的 Research 轨另有 60 题，四臂正确数依次为 3、3、4、3；主表按标准协议展示 Olympiad 正确数。HLE 使用同一 Gold＋Revision 混合 200 题题单，vSpec 评分有 5 个未决样本，按分母 200 计入。MMLU-Pro 由冻结客户端内置评分器计分，其余两组在求解服务退出后由独立 judge 服务评分。
+
+vSpec 三组冷启动分别为 1,060、988、1,020 秒，均低于 20 分钟。上述数字来自当前目标机器的单轮 B0/B1 配对，不代表不同机器、不同模型权重或合并后安装包上的保证值；冻结题号、原始请求、评分和设备证明保存在本地证据库，不随插件源码公开。
 
 完整安装入口 `./install.sh` 会在目标机器构建并安装匹配后端和所需算子、完成本机验证，并在私有目录生成 `runtime.env`。安装失败或证明路径缺失时，不应启用相应实验性功能。默认关闭的 `HUST_ISSUE18_Q35_NATIVE_CONV_TILE` direct-stride 实验不在该复现路径内。后端源码准备命令 `vllm-hust-vspec-prepare-backend` 只生成打补丁的源码副本，**不会**自行编译安装。底层源码版本和完整要求见[复现准备指南](docs/v0.15.1-reproduction.md)。
 
@@ -197,7 +220,7 @@ Qwen3.5 MTP2 只需要 `Qwen/Qwen3.5-35B-A3B`，MTP head 已包含在 target che
 ```bash
 python -m pip install \
   "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@main"
-python -m pip install /path/to/vllm_hust_vspec-0.15.2.post1-py3-none-any.whl
+python -m pip install /path/to/vllm_hust_vspec-0.15.3-py3-none-any.whl
 vllm-hust-ext extension inspect org.vllm-hust.vspec
 ```
 
@@ -305,10 +328,10 @@ vLLM-Ascend、CANN、模型、KV 数据、NPU 驱动或共享服务。可使用
 
 ```bash
 # 发布到 PyPI 后按版本升级
-./manage.sh upgrade --version 0.15.2.post1 --enable
+./manage.sh upgrade --version 0.15.3 --enable
 
 # 本地 wheel 升级或回退
-./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.15.2.post1-py3-none-any.whl
+./manage.sh upgrade --wheel dist/vllm_hust_vspec-0.15.3-py3-none-any.whl
 ./manage.sh rollback --wheel dist/vllm_hust_vspec-0.12.1-py3-none-any.whl --enable
 ```
 
@@ -332,12 +355,12 @@ check。它们不会停止现有 vLLM 进程，必须重启服务才能加载新
 当前版本的两个产物，并校验 Manifest、entry points、METADATA、RECORD、sdist 管理
 脚本和 SHA256。
 
-正式发布由匹配源码版本的 Git tag（例如 `v0.15.2.post1`）触发 `.github/workflows/release.yml`。手工发布
+正式发布由匹配源码版本的 Git tag（例如 `v0.15.3`）触发 `.github/workflows/release.yml`。手工发布
 要求干净 Git 工作树、PyPI Token 和精确版本二次确认：
 
 ```bash
 export UV_PUBLISH_TOKEN='<PyPI project token>'
-export VSPEC_RELEASE_CONFIRM=0.15.2.post1
+export VSPEC_RELEASE_CONFIRM=0.15.3
 ./release.sh publish
 unset UV_PUBLISH_TOKEN VSPEC_RELEASE_CONFIRM
 ```

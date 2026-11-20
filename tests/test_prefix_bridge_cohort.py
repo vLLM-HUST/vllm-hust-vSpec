@@ -1,7 +1,14 @@
 from functools import wraps
 from types import SimpleNamespace
 
-from vllm_hust_vspec.adaptive.prefix_bridge_runtime import basic_ready, install_core_step
+from vllm_hust_vspec.adaptive.prefix_bridge_runtime import basic_ready, install, install_core_step
+
+
+def test_fixed_gamma_does_not_install_transition_bridge(monkeypatch):
+    monkeypatch.setenv("HUST_ISSUE18_VERIFIED_PREFIX_BRIDGE", "1")
+    monkeypatch.setenv("HUST_VSPEC_ADAPTIVE_SPECULATION", "0")
+    monkeypatch.setenv("HUST_VSPEC_EVEN_ROUND_ENABLE", "1")
+    assert install(SimpleNamespace(method="mtp")) is False
 
 
 def test_prefix_bridge_arms_only_uniform_old_width():

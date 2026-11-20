@@ -7,6 +7,7 @@ Generated sources, wheels and device proofs are kept in private storage.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -54,6 +55,10 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--plugin-source", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--wheel", type=Path, help="Plugin wheel; optional when already installed")
     parser.add_argument(
+        "--prebuilt-backend-wheel", type=Path,
+        help="Backend wheel built from the matched staged source; skip CPU rebuild",
+    )
+    parser.add_argument(
         "--ascend-source",
         required=True,
         type=Path,
@@ -100,6 +105,14 @@ def preflight(args: argparse.Namespace) -> None:
         args.plugin_source is None and importlib.metadata.version("vllm-hust-vspec") != __version__
     ):
         raise RuntimeError("Installed plugin does not match this installer")
+    if args.prebuilt_backend_wheel is not None:
+        args.prebuilt_backend_wheel = args.prebuilt_backend_wheel.resolve(strict=True)
+        if (
+            not args.prebuilt_backend_wheel.is_file()
+            or not args.prebuilt_backend_wheel.name.startswith("vllm_ascend-")
+            or args.prebuilt_backend_wheel.suffix != ".whl"
+        ):
+            raise ValueError("--prebuilt-backend-wheel must be a vllm_ascend wheel")
     if args.private_dir.exists() or args.private_dir.is_symlink():
         raise FileExistsError(f"Use a new private directory: {args.private_dir}")
     if (
@@ -266,12 +279,21 @@ def installed_backend_site() -> Path:
     return site
 
 
+def bootstrap_steps(args: argparse.Namespace, site: Path) -> list[tuple[str, list[str]]]:
+    steps = commands(args, site)
+    return steps[:1] if args.prebuilt_backend_wheel is not None else steps[:3]
+
+
 def run(args: argparse.Namespace) -> Path:
     preflight(args)
     root = args.private_dir
     if args.dry_run:
         site = Path(sys.prefix) / "lib/python3.11/site-packages"
-        for label, command in commands(args, site):
+        steps = commands(args, site)
+        if args.prebuilt_backend_wheel is not None:
+            steps = [steps[0], *steps[3:]]
+            print(f"backend-wheel-copy: {args.prebuilt_backend_wheel}")
+        for label, command in steps:
             print(f"{label}: {shlex.join(command)}")
         print("backend-install: python -m pip install --no-deps <built-backend-wheel>")
         print(f"runtime-env: {root / 'runtime.env'}")
@@ -279,12 +301,17 @@ def run(args: argparse.Namespace) -> Path:
     os.umask(0o077)
     root.mkdir(parents=True, mode=0o700)
     (root / "backend-wheels").mkdir(mode=0o700)
-    environment = dict(os.environ, ASCEND_HOME_PATH=str(args.cann_root))
+    environment = dict(
+        os.environ,
+        ASCEND_HOME_PATH=str(args.cann_root),
+        MAX_JOBS=str(args.jobs),
+        CMAKE_BUILD_PARALLEL_LEVEL=str(args.jobs),
+    )
     if args.plugin_source is not None:
         bootstrap = str(args.plugin_source / "src")
         source_path = environment.get("PYTHONPATH", "").split(os.pathsep)
         environment["PYTHONPATH"] = os.pathsep.join(p for p in source_path if p != bootstrap)
-    for label, command in commands(args, Path(sys.prefix))[0:3]:
+    for label, command in bootstrap_steps(args, Path(sys.prefix)):
         print(f"Installing {label}", flush=True)
         subprocess.run(command, check=True, env=environment)
         if (
@@ -292,6 +319,11 @@ def run(args: argparse.Namespace) -> Path:
             and importlib.metadata.version("vllm-hust-vspec") != __version__
         ):
             raise RuntimeError("Installed plugin version does not match the installer")
+    if args.prebuilt_backend_wheel is not None:
+        shutil.copy2(
+            args.prebuilt_backend_wheel,
+            root / "backend-wheels" / args.prebuilt_backend_wheel.name,
+        )
     wheels = sorted((root / "backend-wheels").glob("vllm_ascend*.whl"))
     if len(wheels) != 1:
         raise RuntimeError(f"Expected one built backend wheel, found {len(wheels)}")
@@ -324,6 +356,8 @@ def run(args: argparse.Namespace) -> Path:
             {
                 "plugin_version": importlib.metadata.version("vllm-hust-vspec"),
                 "backend_wheel": str(wheels[0]),
+                "backend_wheel_sha256": hashlib.sha256(wheels[0].read_bytes()).hexdigest(),
+                "backend_wheel_prebuilt": args.prebuilt_backend_wheel is not None,
                 "backend_site": str(site),
                 "runtime_env": str(env_file),
                 "components": exports,

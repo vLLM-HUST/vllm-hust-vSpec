@@ -30,6 +30,14 @@ def test_prepares_copy_without_changing_source(monkeypatch, tmp_path):
     (bundle / 'tracked-changes.patch').write_text(git(source, 'diff', '--', 'tracked.txt') + '\n')
     build_file.write_text('using-build-python\n')
     (bundle / 'build-python.patch').write_text(git(source, 'diff', '--', 'setup.py') + '\n')
+    (bundle / 'gdn-spec-history.patch').write_text(
+        'diff --git a/tracked.txt b/tracked.txt\n'
+        '--- a/tracked.txt\n'
+        '+++ b/tracked.txt\n'
+        '@@ -1 +1 @@\n'
+        '-after\n'
+        '+final\n'
+    )
     archive_dir = source / 'csrc' / 'third_party' / 'pkg'
     archive_dir.mkdir(parents=True)
     archives = {'offline.tar.gz': b'pinned offline source'}
@@ -54,7 +62,7 @@ def test_prepares_copy_without_changing_source(monkeypatch, tmp_path):
     })
     output = tmp_path / 'prepared'
     backend_bundle.prepare(source, output)
-    assert (output / 'tracked.txt').read_text() == 'after\n'
+    assert (output / 'tracked.txt').read_text() == 'final\n'
     assert (output / 'setup.py').read_text() == 'using-build-python\n'
     assert (output / 'vllm_ascend' / 'extra.py').read_text() == 'value = 1\n'
     assert (output / 'csrc' / 'third_party' / 'pkg' / 'offline.tar.gz').read_bytes() == archives['offline.tar.gz']
@@ -72,3 +80,11 @@ def test_prepares_copy_without_changing_source(monkeypatch, tmp_path):
     (makeself_dir / 'makeself.sh').write_bytes(b'changed')
     with pytest.raises(ValueError, match='makeself dependency hash mismatch'):
         backend_bundle.prepare(source, tmp_path / 'bad-makeself')
+
+
+def test_gdn_history_patch_preserves_flat_ascendc_state_indices():
+    """AscendC RGDR requires 1-D state indices during graph capture."""
+    tracked = (backend_bundle.BUNDLE / 'tracked-changes.patch').read_text()
+    history = (backend_bundle.BUNDLE / 'gdn-spec-history.patch').read_text()
+    assert 'ssm_state_indices=spec_state_indices_tensor.flatten()' in tracked
+    assert 'ssm_state_indices=spec_state_indices_tensor,' not in history

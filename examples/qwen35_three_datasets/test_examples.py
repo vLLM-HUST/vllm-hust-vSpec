@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -638,7 +639,11 @@ class PublicExampleTests(unittest.TestCase):
             root = Path(temp)
             python = root / "env" / "bin" / "python"
             python.parent.mkdir(parents=True)
-            python.symlink_to(sys.executable)
+            python.write_text(
+                "#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n',
+                encoding="utf-8",
+            )
+            python.chmod(0o700)
             vllm = python.parent / "vllm"
             vllm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             vllm.chmod(0o700)
@@ -715,10 +720,32 @@ class PublicExampleTests(unittest.TestCase):
                 paired.prepare(rejected_binding)
             bound_common.pop("ASCEND_RT_VISIBLE_DEVICES")
             dump(common_env, bound_common)
-            dump(dynamic_env, {"HUST_VSPEC_HOT_STATIC_SHAPES": "14,70"})
+            dump(dynamic_env, {"HUST_VSPEC_HOT_STATIC_SHAPES": "14,98"})
             rejected_args = Namespace(**{**vars(setup_args), "private_root": str(root / "rejected")})
-            with self.assertRaisesRegex(ValueError, "override must be 70"):
+            with self.assertRaisesRegex(ValueError, "subset containing 70"):
                 paired.prepare(rejected_args)
+            dump(dynamic_env, {"HUST_VSPEC_HOT_STATIC_SHAPES": "14,70"})
+            paired_args = Namespace(**{**vars(setup_args), "private_root": str(root / "two-shape")})
+            with patch.object(paired, "_active_evaluation_dir", return_value=evaluation):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    paired.prepare(paired_args)
+            self.assertEqual(
+                paired.read_json(root / "two-shape" / "setup.json")["dynamic_env"][
+                    "HUST_VSPEC_HOT_STATIC_SHAPES"
+                ],
+                "14,70",
+            )
+            dump(dynamic_env, {"HUST_VSPEC_HOT_STATIC_SHAPES": "70,98"})
+            gamma6_args = Namespace(**{**vars(setup_args), "private_root": str(root / "gamma6-shape")})
+            with patch.object(paired, "_active_evaluation_dir", return_value=evaluation):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    paired.prepare(gamma6_args)
+            self.assertEqual(
+                paired.read_json(root / "gamma6-shape" / "setup.json")["dynamic_env"][
+                    "HUST_VSPEC_HOT_STATIC_SHAPES"
+                ],
+                "70,98",
+            )
             self.assertEqual(setup["paths"]["native_python"], str(python))
             self.assertEqual(setup["paths"]["dynamic_python"], str(python))
             self.assertEqual(setup["paths"]["client_python"], str(python))

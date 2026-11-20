@@ -92,6 +92,25 @@ def _adaptive_scheduled_batch_size(
     return int(num_scheduled_requests)
 
 
+def _effective_adaptive_refill_batch(
+    method: str,
+    configured_batch: int,
+    backend_refill_enabled: bool,
+) -> int:
+    """Resolve admission cadence independently from adaptive draft depth."""
+    if backend_refill_enabled:
+        return 1
+    if configured_batch:
+        return configured_batch
+    if method == "draft_model":
+        return 8
+    if method == "mtp":
+        # Per-slot admission preserves the long-reasoning quality observed with
+        # native MTP. Coalescing remains an explicit throughput experiment.
+        return 1
+    return 4
+
+
 def _adaptive_initial_cohort_started_at(
     scheduler: Any,
     num_running: int,
@@ -2449,6 +2468,18 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
                 settings.method,
                 original_schedule,
             )
+            self._vspec_adaptive_refill_batch = _effective_adaptive_refill_batch(
+                settings.method,
+                settings.adaptive_refill_batch,
+                self._vspec_adaptive_native_eagle3_refill,
+            )
+            logger.info(
+                "vSpec Adaptive refill admission: method=%s configured=%d effective=%d backend_refill=%s",
+                settings.method,
+                settings.adaptive_refill_batch,
+                self._vspec_adaptive_refill_batch,
+                self._vspec_adaptive_native_eagle3_refill,
+            )
             self._vspec_adaptive_initial_cohort_size = max(
                 int(os.environ.get("HUST_VSPEC_ADAPTIVE_INITIAL_COHORT_SIZE", "0")),
                 0,
@@ -2499,14 +2530,7 @@ def apply_adaptive_patches(settings: PluginSettings) -> bool:
             )
             num_running = len(self.running) + self.num_waiting_for_streaming_input
             previous_max_num_running_reqs = self.max_num_running_reqs
-            refill_batch = settings.adaptive_refill_batch
-            if refill_batch == 0:
-                refill_batch = 8 if settings.method == "draft_model" else 4
-            if self._vspec_adaptive_native_eagle3_refill:
-                # The backend scheduler wrapper already owns refill coalescing.
-                # Applying a second, slightly different limiter here creates
-                # avoidable tail stalls and diverges from the fixed-gamma path.
-                refill_batch = 1
+            refill_batch = self._vspec_adaptive_refill_batch
             num_waiting = len(self.waiting) + len(self.skipped_waiting)
             free_slots = previous_max_num_running_reqs - num_running
             refill_target = min(refill_batch, num_waiting)

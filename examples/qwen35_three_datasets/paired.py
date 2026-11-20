@@ -32,6 +32,21 @@ MODULES = {
     "hle-verified": "hust_eval_hle_verified",
     "frontierscience": "hust_eval_frontierscience",
 }
+AVAILABLE_HOT_STATIC_SHAPES = (14, 42, 70, 98, 126)
+
+
+def valid_hot_static_shapes(value: str) -> bool:
+    if not isinstance(value, str) or not value or any(
+        not part.isdecimal() for part in value.split(",")
+    ):
+        return False
+    shapes = tuple(int(part) for part in value.split(","))
+    return (
+        shapes == tuple(sorted(set(shapes)))
+        and 70 in shapes
+        and all(shape in AVAILABLE_HOT_STATIC_SHAPES for shape in shapes)
+    )
+
 REQUIRED_COMMON = {
     "dtype",
     "tensor_parallel_size",
@@ -305,9 +320,9 @@ def prepare(args: argparse.Namespace) -> None:
         raise ValueError("Dynamic environment must not override a common setting")
     if (
         "HUST_VSPEC_HOT_STATIC_SHAPES" in overlap
-        and dynamic_env["HUST_VSPEC_HOT_STATIC_SHAPES"] != "70"
+        and not valid_hot_static_shapes(dynamic_env["HUST_VSPEC_HOT_STATIC_SHAPES"])
     ):
-        raise ValueError("v0.15.2 dynamic hot static shape override must be 70")
+        raise ValueError("dynamic hot static shape override must be an ordered supported subset containing 70")
     paths = {
         key: str(existing_executable(getattr(args, key), key))
         for key in ("native_python", "dynamic_python", "client_python")
@@ -478,7 +493,11 @@ def _validate_acl_import(python: str, env: dict[str, str], site: Path) -> None:
         check=False,
     )
     if probe.returncode:
-        raise RuntimeError("Selected server Python cannot import acl from the selected CANN site")
+        detail = probe.stderr.decode("utf-8", errors="replace").strip()[:500]
+        raise RuntimeError(
+            "Selected server Python cannot import acl from the selected CANN site"
+            + (f": {detail}" if detail else "")
+        )
 
 
 def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str]:
@@ -522,8 +541,10 @@ def _server_env(setup: dict[str, Any], arm: str, run_dir: Path) -> dict[str, str
         PYTHONPATH=os.pathsep.join(import_paths),
     )
     expected_hot_shapes = "14,42,70,98,126"
-    if arm == "dynamic" and setup["dynamic_env"].get("HUST_VSPEC_HOT_STATIC_SHAPES") == "70":
-        expected_hot_shapes = "70"
+    if arm == "dynamic":
+        dynamic_hot_shapes = setup["dynamic_env"].get("HUST_VSPEC_HOT_STATIC_SHAPES")
+        if dynamic_hot_shapes is not None and valid_hot_static_shapes(dynamic_hot_shapes):
+            expected_hot_shapes = dynamic_hot_shapes
     if (
         env.get("HUST_VSPEC_CAPTURE_SAFE_STATIC") != "1"
         or env.get("HUST_VSPEC_HOT_STATIC_SHAPES") != expected_hot_shapes
